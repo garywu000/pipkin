@@ -6,7 +6,7 @@
 
   const TOOL_ICONS = {
     list_files: "folder", search_text: "search", read_file: "file", read_files: "file", outline_file: "file", write_file: "edit", edit_file: "edit",
-    run_command: "terminal", write_page: "edit", web_search: "globe", web_fetch: "globe", remember: "brain", update_plan: "list",
+    run_command: "terminal", write_page: "edit", write_artifact: "file", web_search: "globe", web_fetch: "globe", remember: "brain", update_plan: "list",
     terminal_run: "terminal", terminal_read: "terminal", browser_open: "globe", browser_read: "globe",
     map_document: "file", check_page: "check",
   };
@@ -53,6 +53,22 @@
     }
   }
 
+  /** Upsert result-card records ({path, action, checks, sources}) sent by the server. */
+  function mergeOutputs(run, records) {
+    const outputs = run.outputs ||= [];
+    for (const record of records || []) {
+      if (!record?.path) continue;
+      const index = outputs.findIndex((item) => item.path.toLowerCase() === record.path.toLowerCase());
+      const copy = { path: record.path, action: record.action, checks: [...(record.checks || [])], sources: [...(record.sources || [])] };
+      if (record.undo) copy.undo = record.undo;
+      // A record already undone on this page keeps that state unless a newer write replaced its undo entry.
+      const previous = index < 0 ? null : outputs[index];
+      if (previous?.undone && previous.undo === copy.undo) copy.undone = previous.undone;
+      if (index < 0) outputs.push(copy);
+      else outputs[index] = copy;
+    }
+  }
+
   /** Apply one streamed server event. Returns extra info for the caller. */
   function apply(run, event) {
     switch (event.event) {
@@ -77,7 +93,11 @@
           run.entries.push({ type: "text", text: "Interrupted action to review: " + label });
         }
         showSavedFiles(run, event.files || []);
+        mergeOutputs(run, event.outputs);
         break;
+      case "output":
+        mergeOutputs(run, [event]);
+        return { output: true };
       case "step":
         endThinking(run);
         run.draft = "";
@@ -175,6 +195,7 @@
       case "stopped":
         if (event.text) run.draft = "";
         showSavedFiles(run, event.files || []);
+        mergeOutputs(run, event.outputs);
         finish(run, "stopped", event.text || "Stopped after the current step.");
         return { final: run.answer };
       case "usage":
@@ -381,7 +402,8 @@
     if (lastLiveThinking(run)) return "Thinking";
     if (run.entries.findLast((entry) => entry.type === "tool")?.state === "running") return "Running an action";
     if (run.draft.trim()) return "Writing the answer";
-    return run.modelPhase || "Working";
+    // Name the plan step in progress, so the collapsed header says what the run is doing.
+    return run.plan.find((step) => step.status === "in_progress")?.text || run.modelPhase || "Working";
   }
 
   function summaryText(run, now) {
@@ -537,16 +559,13 @@
           run.usage?.steps ? el("span", { className: "badge", title: (run.usage.compactions || 0) + " context compactions" }, run.usage.steps + " model steps") : null,
         ].filter(Boolean));
       }
-      const startedTools = run.entries.some((entry) => entry.type === "tool");
-      const phase = state === "complete" ? 3 : startedTools ? 1 : 0;
-      const nextPlan = run.plan.length ? run.plan : phase;
-      if (nextPlan !== planKey || planState !== state) {
-        planKey = nextPlan;
+      // The checklist is the model's own plan. Until it writes one, the timeline shows it thinking; no stand-in
+      // checklist is drawn. While the run works, the plan stays pinned above the thinking and actions below it.
+      if (run.plan !== planKey || planState !== state) {
+        planKey = run.plan;
         planState = state;
-        const actual = run.plan.length > 0;
-        const steps = actual ? run.plan : ["Review the request", "Work through the task", "Return the result"].map((text, index) =>
-          ({ text, status: index < phase ? "completed" : index === phase ? "in_progress" : "pending" }));
-        plan.replaceChildren(planCard(steps, actual ? "Plan" : "Run checklist", state === "working"));
+        plan.replaceChildren(...(run.plan.length ? [planCard(run.plan, "Plan", state === "working")] : []));
+        plan.className = run.plan.length && state === "working" ? "plan-pin" : "";
       }
 
       let batch = [];
@@ -572,7 +591,8 @@
       }
       flush();
       if (state === "working" && !pending && !lastLiveThinking(run) && lastTool?.state !== "running" && !run.draft.trim()) {
-        const nextText = (run.modelPhase || "Working") + "…";
+        const planning = !run.plan.length && !run.entries.some((entry) => entry.type === "tool");
+        const nextText = (planning ? "Planning" : run.modelPhase || "Working") + "…";
         if (busyText.textContent !== nextText) busyText.textContent = nextText;
         items.push(busyRow);
       }

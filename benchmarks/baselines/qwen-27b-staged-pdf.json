@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "mode": "ollama",
+  "model": {
+    "name": "hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Huihui-Qwen3.8-27B-abliterated-GSQ-RCO-IQ3_XXS.gguf",
+    "digest": "5168a90223b0d8ba8ee0517e0af9a11b0917393d4da056af594968fd289a80a8",
+    "details": {
+      "parent_model": "",
+      "format": "gguf",
+      "family": "qwen35",
+      "families": [
+        "qwen35"
+      ],
+      "parameter_size": "27.3B",
+      "quantization_level": "IQ3_S",
+      "context_length": 262144,
+      "embedding_length": 5120,
+      "runner": "ggml"
+    }
+  },
+  "platform": "Darwin",
+  "architecture": "arm64",
+  "context": 16384,
+  "think": false,
+  "interrupted": false,
+  "staged_site": true,
+  "trials": [
+    {
+      "case": "pdf-site",
+      "first_saved_output_seconds": 37.78,
+      "first_verified_output_seconds": 37.782,
+      "model_steps": 1,
+      "failed_tools": 0,
+      "approvals": 1,
+      "unexpected_approvals": 0,
+      "denied_requested_write": false,
+      "saved_paths": [
+        "index.html"
+      ],
+      "restored_paths": [],
+      "agent_timings_seconds": {
+        "load": 0.013,
+        "prompt": 3.095,
+        "generate": 27.773,
+        "approval": 0.002,
+        "tools": 0.223
+      },
+      "end_states": [
+        "result"
+      ],
+      "output_checks": {
+        "index.html": {
+          "html_and_heading": true,
+          "required_facts": true,
+          "required_source_links": true,
+          "local_references_only": true,
+          "script_free": true,
+          "static_links_resolve": true
+        }
+      },
+      "checks": {
+        "expected_workspace_files": true,
+        "inputs_unchanged": true,
+        "approved_scope_only": true,
+        "completed": true,
+        "index.html": true
+      },
+      "passed": true,
+      "wall_seconds": 37.785,
+      "resources": {
+        "samples": 19,
+        "peak_model_bytes": 11369583738,
+        "minimum_memory_free_percent": 12
+      },
+      "iteration": 1
+    }
+  ]
+}

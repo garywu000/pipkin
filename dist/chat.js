@@ -20,6 +20,7 @@ const skillEditor = byId("skill-editor");
 const newChatButton = byId("new-chat");
 const chatList = byId("chat-list");
 const sidebarContent = byId("sidebar-content");
+const sidebarResize = byId("sidebar-resize");
 const historyToggle = byId("history-toggle");
 const chatMenu = byId("chat-menu");
 const renameDialog = byId("rename-dialog");
@@ -29,6 +30,8 @@ const projectDialog = byId("project-dialog");
 const contextDialog = byId("context-dialog");
 const moveDialog = byId("move-dialog");
 const settingsDialog = byId("settings-dialog");
+const pastePreviewDialog = byId("paste-preview");
+let previewedPaste = null;
 const contextButton = byId("chat-context");
 const newProjectButton = byId("new-project");
 const workspace = document.querySelector(".workspace");
@@ -71,6 +74,8 @@ const settingsKey = "pipkin-settings";
 const memoryKey = "pipkin-memories";
 const skillKey = "pipkin-skills";
 const documentLimit = 24000;
+const longPasteThreshold = 10000;
+const documentByteLimit = 7_000_000;
 const academicDraftLimit = 24000;
 const summaryCharacterLimit = 2000;
 const summaryChunkSize = 6000;
@@ -78,11 +83,12 @@ const textEncoder = new TextEncoder();
 const renderedReplies = new WeakMap();
 const chatDragType = "application/x-local-model-chat";
 const narrow = window.matchMedia("(max-width: 860px)");
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const defaultSettings = {
   theme: "system", enterToSend: true, showStats: true, temperature: 0.7, instructions: "",
   memoryEnabled: true, permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
-  sidebarCollapsed: false,
+  sidebarCollapsed: false, sidebarWidth: 268,
 };
 let settings = { ...defaultSettings, ...readLocal(settingsKey, {}) };
 if (!["auto", "on", "off"].includes(settings.webMode)) settings.webMode = settings.web === false ? "off" : "auto";
@@ -375,6 +381,83 @@ async function readConversation(id) {
 /* Sidebar                                                                 */
 /* ====================================================================== */
 
+let sidebarDrag = null;
+
+function titleOverflow(clip) {
+  return Math.ceil(clip.firstElementChild.getBoundingClientRect().width - clip.getBoundingClientRect().width);
+}
+
+const titleFadeObserver = new ResizeObserver((entries) => {
+  const clips = new Set(entries.map(({ target }) => target.closest(".chat-title-clip")));
+  for (const clip of clips) clip.toggleAttribute("data-title-overflow", titleOverflow(clip) > 0);
+});
+
+function observeTitleFades() {
+  titleFadeObserver.disconnect();
+  for (const clip of document.querySelectorAll(".chat-title-clip")) {
+    titleFadeObserver.observe(clip);
+    titleFadeObserver.observe(clip.firstElementChild);
+  }
+}
+
+function applySidebarWidth(width) {
+  const available = narrow.matches ? window.innerWidth * .86 : window.innerWidth - 550;
+  const max = Math.min(480, Math.floor(available));
+  const min = Math.min(200, max);
+  const preferred = Number.isFinite(width) ? width : defaultSettings.sidebarWidth;
+  const value = Math.max(min, Math.min(max, Math.round(preferred)));
+  document.body.style.setProperty("--sidebar-width", value + "px");
+  sidebarResize.setAttribute("aria-valuemin", String(min));
+  sidebarResize.setAttribute("aria-valuemax", String(max));
+  sidebarResize.setAttribute("aria-valuenow", String(value));
+  sidebarResize.setAttribute("aria-valuetext", value + " pixels");
+  return value;
+}
+
+function scrollChatTitle(button, clip) {
+  const text = clip.firstElementChild;
+  const isActive = () => document.activeElement === button || button.matches(":hover");
+  let observer, animation, distance;
+
+  const reset = () => {
+    animation?.cancel();
+    clip.removeAttribute("data-title-revealed");
+    observer?.disconnect();
+    observer = animation = distance = null;
+  };
+  const measure = () => {
+    if (!clip.isConnected || !clip.clientWidth || reducedMotion.matches || !isActive()) return reset();
+    const overflow = titleOverflow(clip);
+    if (overflow === distance) return;
+    distance = overflow;
+    animation?.cancel();
+    clip.removeAttribute("data-title-revealed");
+    if (overflow <= 0) return;
+    const travel = getComputedStyle(clip).direction === "rtl" ? overflow : -overflow;
+    const scroll = text.animate([{ translate: "0" }, { translate: travel + "px" }], {
+      delay: 500, duration: 1000 * overflow / 48, easing: "ease-in-out", fill: "forwards",
+    });
+    animation = scroll;
+    scroll.finished.then(() => {
+      if (animation === scroll) clip.setAttribute("data-title-revealed", "");
+    }, () => {});
+  };
+  const start = () => {
+    if (observer || reducedMotion.matches || !isActive()) return;
+    observer = new ResizeObserver(measure);
+    observer.observe(clip);
+    observer.observe(text);
+    measure();
+  };
+  const stop = () => {
+    if (!isActive()) reset();
+  };
+  button.addEventListener("pointerenter", start);
+  button.addEventListener("focus", start);
+  button.addEventListener("pointerleave", stop);
+  button.addEventListener("blur", stop);
+}
+
 function renderChatRows(container, titles, matches = null) {
   const pinned = titles.filter((chat) => chat.pinned);
   const recent = titles.filter((chat) => !chat.pinned);
@@ -453,6 +536,7 @@ async function renderChatList() {
     byId("no-chats").textContent = "No saved chats yet";
     byId("no-chats").hidden = titles.some((chat) => !projects.has(chat.projectId));
   }
+  observeTitleFades();
   renderContextInfo();
 }
 
@@ -503,7 +587,10 @@ function projectSection(project, chats) {
 }
 
 function chatListItem({ id, title, pinned, usedAgent }, match) {
-  const open = el("button", { type: "button", className: "chat-open", title, dataset: { chatId: id }, "aria-haspopup": "menu" }, title);
+  const clip = el("span", { className: "chat-title-clip", dir: "auto" }, el("span", { className: "chat-title-text", text: title }));
+  const open = el("button", { type: "button", className: "chat-open", dataset: { chatId: id },
+    "aria-label": title, "aria-haspopup": "menu" }, clip);
+  scrollChatTitle(open, clip);
   if (match) open.append(el("span", { className: "match", text: match }));
   const more = el("button", { type: "button", className: "icon-button small chat-more", "aria-label": "Options for " + title, dataset: { chatId: id } }, icon("more"));
   const agentMark = usedAgent ? el("span", { className: "agent-mark", title: "Used the agent", "aria-label": "Used the agent" }, icon("bot")) : null;
@@ -627,6 +714,90 @@ async function updateChatSummary(id, fields) {
   changingChats = false;
   updateControls();
   focusChat(id);
+}
+
+/**
+ * Replace the placeholder title (trimmed from the first prompt) with a short title the model writes from the first
+ * exchange. Runs once per chat, only while the model is already loaded, and never overrides a manual rename.
+ */
+let titleJob = null;
+function refineChatTitle(id, userMessage, reply) {
+  const chat = chatTitles.get(id);
+  if (!chat || chat.titleSource === "manual" || chat.titleSource === "model" || unsavedChats.has(id)) return;
+  const command = Skills.parse(userMessage.content || "");
+  const request = ((command ? command.input : userMessage.content) || "").trim() ||
+    (userMessage.files || []).map((file) => file.name).join(", ");
+  if (!request) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  const done = fetch("/api/title", {
+    method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
+    body: JSON.stringify({ request: request.slice(0, 2000), reply: plainText(reply || "").slice(0, 600) }),
+  })
+    .then((response) => response.ok ? response.json() : null)
+    .then((data) => data?.title ? saveModelTitle(id, data.title) : null)
+    .catch(() => {})
+    .finally(() => {
+      clearTimeout(timer);
+      if (titleJob?.done === done) titleJob = null;
+    });
+  titleJob = { controller, done };
+}
+
+/** Store a model-written title without switching chats or interrupting the composer. */
+async function saveModelTitle(id, title) {
+  const current = chatTitles.get(id);
+  if (!current || current.titleSource === "manual") return;
+  let updated = { ...current, title, titleSource: "model" };
+  const saved = await writeStores(["titles"], (transaction) => {
+    const titles = transaction.objectStore("titles");
+    const request = titles.get(id);
+    request.onsuccess = () => {
+      if (!request.result || request.result.titleSource === "manual") {
+        transaction.abort();
+        return;
+      }
+      updated = { ...request.result, title, titleSource: "model" };
+      titles.put(updated);
+    };
+  });
+  if (!saved) return;
+  chatTitles.set(id, updated);
+  renderChatList();
+  updateControls();
+  const rowTitle = sidebarContent.querySelector(`.chat-open[data-chat-id="${CSS.escape(id)}"] .chat-title-text`);
+  if (rowTitle) animateRetitle(rowTitle, title, current.title);
+  if (id === chatId) animateRetitle(activeChatName, title, current.title);
+}
+
+/** Fade the old title out, then type the new one in with a short highlight. */
+const retitling = new WeakMap();
+function animateRetitle(node, title, previous = "") {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || typeof node.animate !== "function") {
+    node.textContent = title;
+    return;
+  }
+  const token = {};
+  retitling.set(node, token);
+  if (previous) node.textContent = previous;
+  node.classList.add("retitling");
+  node.animate([{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(-3px)" }],
+    { duration: 140, easing: "ease-in" }).finished.then(() => {
+    if (retitling.get(node) !== token) return;
+    node.textContent = "";
+    const step = Math.max(12, Math.min(35, 700 / title.length));
+    let shown = 0;
+    const type = () => {
+      if (retitling.get(node) !== token) return;
+      // A redraw may have replaced the text with the full title already; stop typing then.
+      if (node.textContent !== title.slice(0, shown)) return node.classList.remove("retitling");
+      shown += 1;
+      node.textContent = title.slice(0, shown);
+      if (shown < title.length) setTimeout(type, step);
+      else setTimeout(() => retitling.get(node) === token && node.classList.remove("retitling"), 900);
+    };
+    type();
+  }).catch(() => { node.textContent = title; node.classList.remove("retitling"); });
 }
 
 function moveChat(id, projectId) {
@@ -821,10 +992,22 @@ function findSkill(name) {
   return Skills.catalog(customSkills).find((skill) => skill.name === name && skill.instructions);
 }
 
-function canRunSkill(skill) {
-  if (skill?.name !== "site" || (agentMode.checked && agentWorkspace)) return true;
-  announce("Use Work with a selected folder to run /site.", true);
-  return false;
+function turnWorkflow(skill, text) {
+  return Skills.workflows[skill?.name] || (!skill && agentMode.checked ? Skills.detectWorkflow(text) : null);
+}
+
+function canRunSkill(skill, text) {
+  const workflow = turnWorkflow(skill, text);
+  if (!workflow) return true;
+  if (!agentMode.checked || !agentWorkspace) {
+    announce("Use Agent with a selected folder to save this output.", true);
+    return false;
+  }
+  if (workflow !== "site" && settings.permission === "read") {
+    announce("Choose Ask first or Auto-edit to save a document.", true);
+    return false;
+  }
+  return true;
 }
 
 function humanizeOptions(command) {
@@ -832,6 +1015,62 @@ function humanizeOptions(command) {
   if (command?.name !== "humanize") return null;
   const choice = command.input.match(/^--(warm|direct|professional|academic)(?:\s+|$)/i);
   return { tone: choice?.[1].toLowerCase() || "natural", pasted: command.input.slice(choice?.[0].length || 0).trim() };
+}
+
+/**
+ * People often paste "rewrite this in a direct tone:" and an essay prompt above the draft. Split those off so the
+ * editor follows them instead of treating them as text to edit, and infer the tone and kind of writing.
+ */
+/** Count words like Google Docs: split on spaces and em/en dashes; a hyphenated word counts once. Matches server.py. */
+function countWords(text) {
+  return (String(text || "").match(/[^\s\u2013\u2014]+/g) || []).filter((token) => /[\p{L}\p{N}]/u.test(token)).length;
+}
+
+/**
+ * When a message asks about words (a count, a limit, "how long is this"), attach Pipkin's exact count of the pasted
+ * text and attachments. Models count tokens, not words, and spend minutes guessing; this gives them the real number.
+ */
+function wordCountNote(content, documents) {
+  if (!/\bwords?\b/i.test(content) || !/\b(?:count|limit|how many|how long|under|over|at most|max(?:imum)?|no more than|fewer|less than|cut|trim|shorten|length)\b/i.test(content)) return "";
+  let { draft, instructions, context } = splitHumanizeRequest(content, "natural", true);
+  const [first, ...others] = draft.split(/\n\s*\n/);
+  if (others.length && first.length <= 400 && /[:?]\s*$/.test(first)) {
+    // A question or instruction line above the pasted text ("Is this under 350 words?") is not part of it.
+    ({ draft, context } = splitHumanizeRequest(others.join("\n\n"), "natural", true));
+    instructions = first;
+  }
+  const lines = [];
+  const pasted = draft !== content.trim() || countWords(content) > 60 ? draft : "";
+  if (pasted && countWords(pasted) > 20) lines.push(`the pasted text${instructions || context ? " (without the instruction and prompt lines)" : ""}: ${countWords(pasted)} words`);
+  for (const { name, text } of documents) lines.push(`${JSON.stringify(name)}: ${countWords(text)} words`);
+  if (!lines.length) return "";
+  return "[Pipkin's exact word count, using Google Docs rules. Use these numbers; do not count words yourself: " + lines.join("; ") + ".]";
+}
+
+function splitHumanizeRequest(text, tone, toneChosen) {
+  let rest = text.trim();
+  let instructions = "";
+  let context = "";
+  const first = rest.split(/\n\s*\n/, 1)[0];
+  const asks = /\b(?:humani[sz]e|rewrite|re-write|revise|edit|polish|proofread|improve|make (?:it|this)|tone|sound(?:s)? (?:more|less)|reword)\b/i;
+  if (first.length <= 600 && asks.test(first) && (/[:：]\s*$/.test(first) || /\b(?:following|below|this (?:essay|draft|text))\b/i.test(first))) {
+    instructions = first.replace(/[:：]\s*$/, "").trim();
+    rest = rest.slice(first.length).trim();
+  }
+  const prompt = /^(?:essay\s+)?(?:prompt|question|topic|piq)\s*(?:#?\d+)?\s*[:：-]\s*[^\n]+/i.exec(rest);
+  if (prompt) {
+    context = prompt[0].trim();
+    rest = rest.slice(prompt[0].length).trim();
+  }
+  const about = (instructions + " " + context).toLowerCase();
+  if (!toneChosen) {
+    if (/\bdirect|concise|straightforward\b/.test(about)) tone = "direct";
+    else if (/\bwarm|friendly\b/.test(about)) tone = "warm";
+    else if (/\bprofessional|formal\b/.test(about)) tone = "professional";
+  }
+  const essay = /\b(?:essay|personal statement|piq|insight question|application|college|supplement|statement of purpose)\b/.test(about) ||
+    (rest.split(/\n+/).filter((line) => line.trim().length > 200).length >= 3);
+  return { draft: rest || text.trim(), tone, instructions, context, kind: essay ? "essay" : "message" };
 }
 
 function humanizeInput(command, attachments) {
@@ -851,8 +1090,14 @@ function humanizeInput(command, attachments) {
     ? "Paste the paper after /humanize-paper, or attach a Word or text file."
     : "Paste a draft after /humanize, or attach a text document." };
   const limit = academic ? academicDraftLimit : 4000;
-  if ([...draft].length > limit) return { error: `${label} accepts up to ${limit.toLocaleString()} characters. Try a shorter section.` };
-  return { draft, tone };
+  if (academic) {
+    if ([...draft].length > limit) return { error: `${label} accepts up to ${limit.toLocaleString()} characters. Try a shorter section.` };
+    return { draft, tone };
+  }
+  const toneChosen = /^--(?:warm|direct|professional)\b/i.test(command.input || "");
+  const request = splitHumanizeRequest(draft, tone, toneChosen);
+  if ([...request.draft].length > limit) return { error: `${label} accepts up to ${limit.toLocaleString()} characters. Try a shorter section.` };
+  return request;
 }
 
 function chooseSkill(name) {
@@ -1141,8 +1386,7 @@ function updateControls() {
     if (activeChatName.textContent !== title) activeChatName.textContent = title;
     const mode = agent ? "Agent" : "Chat";
     const canRename = !switchingChat && canRenameChat(chatId);
-    activeChatTitle.title = canRename ? `Rename ${mode.toLowerCase()} · ${title}` : `${mode} · ${title}`;
-    activeChatTitle.setAttribute("aria-label", activeChatTitle.title);
+    activeChatTitle.setAttribute("aria-label", canRename ? `Rename ${mode.toLowerCase()} · ${title}` : `${mode} · ${title}`);
     byId("active-chat-mode").setAttribute("href", agent ? "#i-bot" : "#i-chat");
     activeChatTitle.disabled = !canRename;
   }
@@ -1150,9 +1394,9 @@ function updateControls() {
   const textLength = promptBox.value.trim().length;
   const command = Skills.parse(promptBox.value);
   const localCommand = !replying && Skills.commands.some(({ name }) => name === command?.name);
-  const needsSiteBrief = command?.name === "site" && !command.input && !files.length;
+  const needsSkillBrief = Boolean(Skills.workflows[command?.name] && !command.input && !files.length);
   sendButton.disabled = steering ? sendingSteering || !textLength || textLength > 2000 :
-    composerBusy || choosingWorkspace || (!localCommand && !modelCanReply()) || !hasInput || needsSiteBrief;
+    composerBusy || choosingWorkspace || (!localCommand && !modelCanReply()) || !hasInput || needsSkillBrief;
   newChatButton.disabled = composerBusy;
   byId("topbar-new").disabled = composerBusy;
   sidebarContent.inert = sidebarBusy;
@@ -1261,6 +1505,114 @@ function outputLocation(path, run) {
     fullPath: absolute || !root ? path : root + "/" + path.replace(/^\.\//, ""),
     key: root && root === workspace?.path && (!absolute || path.startsWith(root + "/")) ? workspace.key : null,
   };
+}
+
+/**
+ * The Work result card: each saved file as an output chip, what Pipkin did to it, the checks that actually
+ * ran on its current version, and the source pages it cites. Runs saved before v1.1 have only run.files,
+ * so those paths still render as plain chips.
+ */
+function renderWorkResult(container, run) {
+  const records = [...(run.outputs || [])];
+  const known = new Set(records.map((record) => record.path.toLowerCase()));
+  for (const path of run.files || []) {
+    if (!known.has(path.toLowerCase())) records.push({ path, legacy: true });
+  }
+  const detailed = records.some((record) => !record.legacy);
+  const rows = records.map((record) => record.legacy
+    ? localOutput(record.path, record.path, run, true)
+    : el("div", { className: "result-file" }, localOutput(record.path, record.path, run, true),
+      resultDetails(record, run, () => renderWorkResult(container, run))));
+  const failed = records.some((record) => record.checks?.some((check) => !check.ok));
+  const head = detailed ? el("div", { className: "result-head", dataset: { failed: String(failed) } },
+    icon(failed ? "alert" : "check"), el("span", { text: "Work result" }),
+    el("span", { className: "result-count", text: resultSummary(records) })) : null;
+  container.replaceChildren(...(head ? [head] : []), ...rows);
+  container.classList.toggle("work-result", detailed);
+  container.hidden = !records.length;
+}
+
+function resultSummary(records) {
+  const created = records.filter((record) => record.action === "created").length;
+  const edited = records.filter((record) => record.action === "edited").length;
+  const parts = [];
+  if (created) parts.push(created + " created");
+  if (edited) parts.push(edited + " edited");
+  const other = records.length - created - edited;
+  if (other) parts.push(other + " saved");
+  return parts.join(" · ");
+}
+
+/**
+ * Undo for one file: restore the original, or remove a file Pipkin created. The server applies it only while the
+ * file still matches what Pipkin saved, so later edits by the user are kept. Two clicks, so it is never accidental.
+ */
+function undoControl(record, run, rerender) {
+  if (!record.undo || record.undone) return null;
+  const created = record.action === "created";
+  const label = created ? "Remove" : "Undo";
+  const button = el("button", { type: "button", className: "button small result-undo",
+    title: created ? "Delete the file this run created" : "Restore the file as it was before this run" }, label);
+  let armed = 0;
+  button.addEventListener("click", async () => {
+    if (!armed) {
+      button.textContent = created ? "Click again to remove" : "Click again to undo";
+      button.dataset.armed = "true";
+      armed = setTimeout(() => { armed = 0; button.textContent = label; delete button.dataset.armed; }, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    armed = 0;
+    button.disabled = true;
+    try {
+      const { key } = outputLocation(record.path, run);
+      if (!key) throw new Error("Select this file's workspace folder to undo it.");
+      const response = await fetch("/api/agent/undo", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace: key, id: record.undo }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (data.conflict) record.undoNote = data.error;
+        throw new Error(data.error || "Could not undo this file.");
+      }
+      record.undone = data.action;
+      delete record.undoNote;
+      toast(data.action === "removed" ? `Removed ${record.path}` : `Restored ${record.path}`);
+    } catch (error) {
+      toast(error.message || "Could not undo this file.");
+    } finally {
+      rerender();
+      if (history.some((message) => message.agentRun === run)) void saveHistory([...history]);
+    }
+  });
+  return button;
+}
+
+function resultDetails(record, run = null, rerender = () => {}) {
+  const details = el("div", { className: "result-details" });
+  const checks = record.checks || [];
+  const action = record.undone === "removed" ? "Removed by undo" : record.undone === "restored" ? "Restored to the original"
+    : record.action === "edited" ? "Edited" : "Created";
+  const line = el("div", { className: "result-line", dataset: { undone: String(Boolean(record.undone)) } },
+    el("span", { className: "result-action", text: action }));
+  // Checks describe the version Pipkin saved; once it is undone they no longer apply.
+  for (const check of record.undone ? [] : checks) {
+    line.append(el("span", { className: "result-check", dataset: { ok: String(Boolean(check.ok)) } },
+      icon(check.ok ? "check" : "alert"), el("span", { text: check.text })));
+  }
+  if (!checks.length && !record.undone) {
+    const page = /\.html?$/i.test(record.path);
+    line.append(el("span", { className: "result-check", dataset: { ok: "none" }, text: page ? "Link check not run on this version" : "Not checked" }));
+  }
+  const undo = run ? undoControl(record, run, rerender) : null;
+  if (undo) line.append(undo);
+  details.append(line);
+  if (record.undoNote && !record.undone) details.append(el("div", { className: "result-conflict", role: "status", text: record.undoNote }));
+  if (record.sources?.length) {
+    details.append(el("div", { className: "result-sources", text: "Sources: " + record.sources.join(", ") }));
+  }
+  return details;
 }
 
 function localOutput(path, label, run, chip = false) {
@@ -1379,15 +1731,7 @@ function addMessage(message) {
     };
     const localFiles = el("div", { className: "local-outputs", hidden: true, "aria-label": "Workspace outputs" });
     if (message.agentRun) {
-      const shown = new Set();
-      view.renderLocalFiles = () => {
-        for (const path of message.agentRun.files || []) {
-          if (shown.has(path)) continue;
-          shown.add(path);
-          localFiles.append(localOutput(path, path, message.agentRun, true));
-        }
-        localFiles.hidden = !shown.size;
-      };
+      view.renderLocalFiles = () => renderWorkResult(localFiles, message.agentRun);
       view.renderLocalFiles();
     }
     article.append(webPanel, body, localFiles, evidencePanel);
@@ -1408,7 +1752,7 @@ function addMessage(message) {
     };
   } else {
     if (message.files?.length) {
-      article.append(el("div", { className: "attachments" }, message.files.map(attachmentPreview)));
+      article.append(el("div", { className: "attachments" }, message.files.map((file) => attachmentPreview(file))));
     }
     body.textContent = message.content;
     article.append(body, actions);
@@ -1492,7 +1836,7 @@ async function rerunFrom(index, text, attachments, { branch = false } = {}) {
   }
   const previousSkill = history[index]?.skill;
   const skill = previousSkill && command?.name === previousSkill.name ? previousSkill : findSkill(command?.name);
-  if (!canRunSkill(skill)) return;
+  if (!canRunSkill(skill, text)) return;
   let branchDetails;
   if (branch) {
     const { title, projectId, notes, goal } = currentChatContext();
@@ -1523,23 +1867,53 @@ async function rerunFrom(index, text, attachments, { branch = false } = {}) {
   await submitTurn(text, attachments, agentMode.checked, { skill, humanize });
 }
 
-function attachmentPreview(file) {
+function attachmentPreview(file, draft = false) {
   if (file.image) {
     return el("img", { src: "data:image/jpeg;base64," + file.image, alt: file.name, title: file.name });
+  }
+  if (typeof file.pastedText === "string") {
+    const size = file.pastedText.length.toLocaleString() + " chars";
+    const caption = file.truncated ? (file.text.length ? "Excerpt · " + size : "Saved only · " + size) : size;
+    return el("button", { type: "button", className: "file-chip pasted-text-chip", title: "Preview " + file.name,
+      "aria-haspopup": "dialog", onclick: () => openPastePreview(file, draft) },
+    el("span", { className: "file-icon" }, icon("file")),
+    el("div", {}, el("span", { text: file.name }), el("small", { text: caption })));
   }
   return el("div", { className: "file-chip", title: file.name },
     el("span", { className: "file-icon" }, icon("file")),
     el("div", {}, el("span", { text: file.name }), el("small", { text: (file.truncated ? "Excerpt · " : "") + Math.max(1, Math.round((file.text?.length || 0) / 1000)) + "K chars" })));
 }
 
+function openPastePreview(file, draft) {
+  if (pastePreviewDialog.open) return;
+  previewedPaste = { file, draft };
+  byId("paste-preview-title").textContent = file.name;
+  byId("paste-preview-text").textContent = file.pastedText;
+  byId("paste-preview-note").textContent = file.truncated
+    ? `The full paste is kept locally. This attachment includes an excerpt of ${file.text.length.toLocaleString()} of ${file.pastedText.length.toLocaleString()} characters.`
+    : `${file.pastedText.length.toLocaleString()} characters`;
+  const inline = byId("paste-preview-inline");
+  inline.hidden = !draft;
+  inline.disabled = attachButton.disabled || !pasteFitsComposer(file);
+  inline.title = inline.disabled ? "The text must fit in the composer." : "";
+  pastePreviewDialog.showModal();
+  byId("paste-preview-text").scrollTop = 0;
+}
+
+function pasteFitsComposer(file) {
+  const separatorLength = promptBox.value ? 2 : 0;
+  return promptBox.value.length + separatorLength + file.pastedText.length <= promptBox.maxLength;
+}
+
 function updateFiles() {
+  refreshPasteExcerpts();
   draftFiles.replaceChildren(...files.map((file, index) => {
     const remove = el("button", { type: "button", className: "remove-file", "aria-label": `Remove ${file.name}` }, icon("x"));
     remove.addEventListener("click", () => {
       files.splice(index, 1);
       updateFiles();
     });
-    return el("div", { className: "attachment" }, attachmentPreview(file), remove);
+    return el("div", { className: "attachment" }, attachmentPreview(file, true), remove);
   }));
   draftFiles.hidden = !files.length;
   updateControls();
@@ -1577,7 +1951,7 @@ function fileAsBase64(file) {
 
 async function prepareDocument(file, academic = false) {
   const kind = file.name.split(".").pop().toLowerCase();
-  if (file.size > 7_000_000) throw new Error("Use a document under 7 MB.");
+  if (file.size > documentByteLimit) throw new Error("Use a document under 7 MB.");
   if (kind === "pdf" || kind === "docx") {
     const response = await fetch("/api/document", {
       method: "POST",
@@ -1600,6 +1974,48 @@ async function prepareDocument(file, academic = false) {
 
 function documentBudget() {
   return Math.min(documentLimit, Math.floor(modelInfo.num_ctx * 1.4));
+}
+
+function refreshPasteExcerpts() {
+  const pastes = files.filter((file) => typeof file.pastedText === "string");
+  if (!pastes.length) return false;
+  const academic = humanizeOptions(Skills.parse(promptBox.value))?.tone === "academic";
+  let remaining = Math.max(0, (academic ? academicDraftLimit : documentBudget()) - files.reduce((used, file) =>
+    used + (typeof file.pastedText === "string" ? 0 : file.text?.length || 0), 0));
+  let changed = false;
+  for (const [index, file] of pastes.entries()) {
+    let size = Math.min(file.pastedText.length, Math.floor(remaining / (pastes.length - index)));
+    const last = file.pastedText.charCodeAt(size - 1);
+    if (size < file.pastedText.length && last >= 0xD800 && last <= 0xDBFF) size--;
+    if (file.text.length !== size) {
+      file.text = file.pastedText.slice(0, size);
+      file.truncated = size < file.pastedText.length;
+      changed = true;
+    }
+    remaining -= size;
+  }
+  return changed;
+}
+
+function addPastedText(text) {
+  if (attachButton.disabled) {
+    announce("Finish the current action before attaching pasted text.", true);
+    return;
+  }
+  if (files.length >= 4) {
+    announce("Remove an attachment to add this paste.", true);
+    return;
+  }
+  if (textEncoder.encode(text).length > documentByteLimit) {
+    announce("Paste a smaller block of text under 7 MB.", true);
+    return;
+  }
+  const names = new Set(files.map((file) => file.name));
+  let name = "Pasted text.txt";
+  for (let index = 2; names.has(name); index++) name = `Pasted text ${index}.txt`;
+  files.push({ name, text: "", pastedText: text, truncated: true });
+  updateFiles();
+  announce(agentMode.checked && !promptBox.value.trim() ? "Add a request for what Agent should do with the pasted text." : "");
 }
 
 async function addFiles(selected) {
@@ -1670,7 +2086,8 @@ function modelMessage({ role, content, files: attached = [], skill, sourceChecke
   const documents = attached.filter((file) => file.text);
   const tools = role === "user" && !humanizeOptions(command)
     ? Skills.requestedMentions(content).map(({ instructions }) => instructions) : [];
-  const parts = [request, ...tools];
+  const counted = role === "user" && !humanizeOptions(command) ? wordCountNote(content, documents) : "";
+  const parts = [request, ...tools, ...(counted ? [counted] : [])];
   let remaining = (evidence?.limit ?? Infinity) - parts.join("\n\n").length;
   for (const { name, text, truncated } of documents) {
     const header = `Attached document ${JSON.stringify(name)}${truncated ? " (excerpt)" : ""}`;
@@ -1978,8 +2395,11 @@ function renderModelControls() {
   byId("context-size").textContent = `${modelInfo.num_ctx / 1024}K context`;
   const canThink = !modelInfo.capabilities.length || modelInfo.capabilities.includes("thinking");
   thinkToggle.hidden = !canThink;
-  updateControls();
-  updateTokenMeter();
+  if (refreshPasteExcerpts()) updateFiles();
+  else {
+    updateControls();
+    updateTokenMeter();
+  }
 }
 
 async function chooseModel(model, numCtx) {
@@ -2282,6 +2702,7 @@ async function sendMessage(event) {
     await sendSteering(activeAgentRun, text);
     return;
   }
+  if (refreshPasteExcerpts()) updateFiles();
   const command = Skills.parse(text);
   if (Skills.commands.some(({ name }) => name === command?.name)) {
     promptBox.value = "";
@@ -2305,7 +2726,7 @@ async function sendMessage(event) {
     announce("Unknown skill /" + command.name + ". Open Skills to see the available commands.", true);
     return;
   }
-  if (!canRunSkill(skill)) return;
+  if (!canRunSkill(skill, text)) return;
   const attachments = files;
   promptBox.value = "";
   autoGrow();
@@ -2326,14 +2747,16 @@ async function resumeWork(checkpointId) {
 }
 
 async function submitTurn(text, attachments, useAgent, { resume = null, skill = null, modeOverride = null, humanize = null } = {}) {
+  // A title request takes a few seconds and holds the model; let it finish so this turn isn't refused as busy.
+  if (titleJob) await titleJob.done;
   useAgent = useAgent && !humanize;
   const userMessage = { role: "user", content: text };
   if (skill) userMessage.skill = { name: skill.name, instructions: skill.instructions };
-  const siteWorkflow = skill?.name === "site";
-  const starter = skill && !siteWorkflow && Skills.starters.some(({ name }) => name === skill.name);
+  const workflow = useAgent ? turnWorkflow(skill, text) : null;
+  const starter = skill && !workflow && Skills.starters.some(({ name }) => name === skill.name);
   const tools = Skills.requestedMentions(text);
-  const mode = modeOverride || (starter || (tools.length && !siteWorkflow) ? "read" : settings.permission);
-  const web = !siteWorkflow && settings.webMode !== "off" && (tools.length ? tools.some(({ name }) => name === "github") : !starter);
+  const mode = modeOverride || (starter || (tools.length && !workflow) ? "read" : settings.permission);
+  const web = !workflow && settings.webMode !== "off" && (tools.length ? tools.some(({ name }) => name === "github") : !starter);
   if (attachments.length) {
     userMessage.files = attachments;
     if (!text) userMessage.content = "Summarize the attached files.";
@@ -2392,16 +2815,23 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
   let thinkingDurationMs = null;
   let frame = 0;
   const startedAt = performance.now();
+  // WebKit pauses animation frames while the window is in the background, and a pending frame used to hold back
+  // every later update (an approval could wait unseen for minutes). A timer draws the update if the frame is late.
+  let paintTimer = 0;
   const paint = (content) => {
-    if (frame) return;
-    frame = requestAnimationFrame(() => {
-      frame = 0;
+    if (frame || paintTimer) return;
+    const draw = () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(paintTimer);
+      frame = paintTimer = 0;
       const text = content();
       view.renderDraft(text || "");
       if (view.activity) view.activity.render();
       if (followLatest) scrollToLatest();
       else scrollBottomButton.hidden = nearBottom(12);
-    });
+    };
+    frame = requestAnimationFrame(draw);
+    paintTimer = setTimeout(draw, 300);
   };
 
   function finishThinking() {
@@ -2445,6 +2875,16 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
         if (!response.ok) throw new Error(result.error || "The draft could not be rewritten.");
       }
       answer = result.rewrite;
+      const notes = [];
+      if (result.unchanged) notes.push("No changes: the model kept your draft as written. Try again, or name what to change.");
+      else if (humanize.instructions) notes.push("Followed: “" + humanize.instructions.slice(0, 140) + (humanize.instructions.length > 140 ? "…”" : "”"));
+      if (Number.isFinite(result.words)) {
+        // Pipkin's own count (Google Docs rules), never the model's estimate.
+        const limit = result.wordLimit ? ` · limit ${result.wordLimit}` : "";
+        const over = result.wordLimit && result.words > result.wordLimit ? ` · still ${result.words - result.wordLimit} over, ask it to cut more` : "";
+        notes.push(`${result.draftWords} → ${result.words} words${limit}${over} (counted by Pipkin)`);
+      }
+      rewriteNote = notes.join(" · ");
       stats = { tokens: result.tokens, tps: result.generateSeconds ? result.tokens / result.generateSeconds : 0,
         seconds: (performance.now() - startedAt) / 1000 };
       announce();
@@ -2461,8 +2901,12 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
           ...(resume ? { resume } : { checkpoint: agentRun.checkpointId }),
           workspace: agentWorkspace?.key || null, task, context: notes, history: agentHistory(),
           mode, web, think: settings.think && !thinkToggle.hidden,
-          ...(siteWorkflow ? { workflow: "site" } : {}),
-          allowMemory: !siteWorkflow && !starter && !tools.length && settings.memoryEnabled, memories: settings.memoryEnabled ? memories.slice(0, 60) : [],
+          ...(workflow ? { workflow, artifact: {
+            brief: skill ? Skills.parse(text)?.input || "" : text,
+            attachments: attachments.filter((file) => typeof file.text === "string")
+              .map(({ name, text, truncated }) => ({ name, text, truncated: Boolean(truncated) })),
+          } } : {}),
+          allowMemory: !workflow && !starter && !tools.length && settings.memoryEnabled, memories: settings.memoryEnabled ? memories.slice(0, 60) : [],
           instructions: settings.instructions.slice(0, 6000), maxSteps: Number(settings.maxSteps) || 24,
           terminal: window.PipkinPanels?.activeTerminalId() || null, browser: Boolean(window.PipkinPanels?.hasBrowser),
         }),
@@ -2480,7 +2924,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
         if (part.event === "error") throw new Error(part.text);
         if (part.event === "tool_result" || part.event === "checkpoint_restored") mergeSources(part.sources);
         const info = Agent.apply(agentRun, part);
-        if (part.saved_file || part.files?.length) view.renderLocalFiles();
+        if (part.saved_file || part.files?.length || part.outputs?.length || info.output) view.renderLocalFiles();
         if (part.event === "steering") queuedSteering.delete(part.id);
         if (part.event === "terminal") window.PipkinPanels?.attachTerminal(part.id);
         if (part.event === "browser") window.PipkinPanels?.browserRequest(agentRun.runId, part);
@@ -2620,6 +3064,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
       history.push(userMessage, { role: "assistant", content: answer, thinking: thought, thinkingDurationMs, agentRun,
         stats, ...replyDetails, ...(rewriteNote && { rewriteNote }), web: web.length ? web : undefined, ...sourceState(sourceNote) });
       const saved = await saveHistory([...history]);
+      if (saved && history.length === 2 && !humanize) refineChatTitle(chatId, userMessage, answer);
       if (saved && !unsavedChats.has(chatId) && agentRun?.state === "complete" && agentRun.checkpointId) {
         void discardWorkCheckpoints([agentRun.checkpointId]).catch(() => {});
       }
@@ -2708,12 +3153,52 @@ function renderMemories() {
   }));
 }
 
+let tokenUsagePoll;
+let tokenUsageRequest;
+
+function stopTokenUsageUpdates() {
+  clearTimeout(tokenUsagePoll);
+  tokenUsageRequest?.abort();
+  tokenUsageRequest = null;
+}
+
+async function refreshTokenUsage() {
+  const request = new AbortController();
+  tokenUsageRequest = request;
+  const status = byId("usage-status");
+  try {
+    const response = await fetch("/api/usage", { signal: request.signal });
+    if (!response.ok) throw new Error("Token usage is unavailable.");
+    const { input, output } = await response.json();
+    if (request.signal.aborted) return;
+    const total = input + output;
+    byId("usage-total").textContent = total.toLocaleString();
+    byId("usage-input").textContent = input.toLocaleString();
+    byId("usage-output").textContent = output.toLocaleString();
+    byId("usage-bar").style.setProperty("--usage-input-share", (total ? 100 * input / total : 0) + "%");
+    byId("usage-bar").toggleAttribute("data-empty", total === 0);
+    byId("usage-values").hidden = false;
+    status.textContent = "";
+  } catch {
+    if (!request.signal.aborted) status.textContent = "Couldn’t refresh token usage. Pipkin will retry.";
+  } finally {
+    if (tokenUsageRequest === request) {
+      tokenUsageRequest = null;
+      if (settingsDialog.open && !byId("panel-usage").hidden) {
+        tokenUsagePoll = setTimeout(refreshTokenUsage, 5000);
+      }
+    }
+  }
+}
+
 function selectSettingsTab(tab) {
   for (const button of settingsDialog.querySelectorAll('[role="tab"]')) {
     const selected = button === tab;
     button.setAttribute("aria-selected", String(selected));
     byId(button.getAttribute("aria-controls")).hidden = !selected;
   }
+  stopTokenUsageUpdates();
+  if (tab.id === "tab-usage") refreshTokenUsage();
 }
 
 function openSettings(tabId = "tab-general") {
@@ -3008,6 +3493,8 @@ function showMode() {
 /* ====================================================================== */
 
 document.body.toggleAttribute("data-sidebar-collapsed", Boolean(settings.sidebarCollapsed));
+applySidebarWidth(settings.sidebarWidth);
+scrollChatTitle(activeChatTitle, activeChatName.parentElement);
 if (settings.appMode === "work") agentMode.checked = true;
 syncAgentControls();
 showMode();
@@ -3032,6 +3519,10 @@ restoreAgentWorkspace();
 composer.addEventListener("submit", sendMessage);
 promptBox.addEventListener("input", () => {
   autoGrow();
+  if (refreshPasteExcerpts()) {
+    updateFiles();
+    return;
+  }
   updateControls();
   updateTokenMeter();
 });
@@ -3086,7 +3577,35 @@ promptBox.addEventListener("paste", (event) => {
   if (pasted.length) {
     event.preventDefault();
     addFiles(pasted);
+    return;
   }
+  const text = event.clipboardData?.getData("text/plain") || "";
+  if (text.length > longPasteThreshold && text.trim() && !promptBox.readOnly) {
+    event.preventDefault();
+    addPastedText(text);
+  }
+});
+byId("paste-preview-copy").addEventListener("click", (event) => {
+  if (previewedPaste) copyText(previewedPaste.file.pastedText, event.currentTarget);
+});
+byId("paste-preview-inline").addEventListener("click", () => {
+  if (!previewedPaste?.draft || attachButton.disabled) return;
+  const file = previewedPaste.file;
+  const index = files.indexOf(file);
+  if (index < 0 || !pasteFitsComposer(file)) return;
+  const text = promptBox.value + (promptBox.value ? "\n\n" : "") + file.pastedText;
+  files.splice(index, 1);
+  promptBox.value = text;
+  pastePreviewDialog.close();
+  autoGrow();
+  updateFiles();
+  promptBox.focus();
+  promptBox.setSelectionRange(text.length, text.length);
+});
+pastePreviewDialog.addEventListener("close", () => {
+  if (pastePreviewDialog.open) return;
+  previewedPaste = null;
+  byId("paste-preview-text").textContent = "";
 });
 stopButton.addEventListener("click", () => activeReply?.abort());
 unloadModelButton.addEventListener("click", unloadModel);
@@ -3177,6 +3696,35 @@ contextDialog.addEventListener("close", () => {
 historyToggle.addEventListener("click", toggleSidebar);
 byId("collapse-sidebar").addEventListener("click", toggleSidebar);
 byId("sidebar-scrim").addEventListener("click", () => showHistory(false));
+sidebarResize.addEventListener("pointerdown", (event) => {
+  if (sidebarDrag || event.button !== 0 || !event.isPrimary) return;
+  event.preventDefault();
+  sidebarResize.setPointerCapture(event.pointerId);
+  closeChatMenu();
+  sidebarDrag = {
+    pointerId: event.pointerId, offset: sidebarResize.parentElement.getBoundingClientRect().right - event.clientX,
+    width: Number(sidebarResize.getAttribute("aria-valuenow")),
+  };
+  document.body.setAttribute("data-sidebar-resizing", "");
+});
+sidebarResize.addEventListener("pointermove", (event) => {
+  if (sidebarDrag?.pointerId !== event.pointerId) return;
+  sidebarDrag.width = applySidebarWidth(event.clientX + sidebarDrag.offset);
+});
+sidebarResize.addEventListener("lostpointercapture", (event) => {
+  if (sidebarDrag?.pointerId !== event.pointerId) return;
+  saveSettings({ sidebarWidth: sidebarDrag.width });
+  sidebarDrag = null;
+  document.body.removeAttribute("data-sidebar-resizing");
+});
+sidebarResize.addEventListener("keydown", (event) => {
+  const width = Number(sidebarResize.getAttribute("aria-valuenow"));
+  const targets = { ArrowLeft: width - 16, ArrowRight: width + 16, Home: 0, End: 480 };
+  if (!Object.hasOwn(targets, event.key)) return;
+  event.preventDefault();
+  closeChatMenu();
+  saveSettings({ sidebarWidth: applySidebarWidth(targets[event.key]) });
+});
 byId("pin-chat").addEventListener("click", () => {
   const id = menuChatId;
   closeChatMenu();
@@ -3224,6 +3772,8 @@ chatMenu.addEventListener("focusout", (event) => {
 sidebarContent.addEventListener("scroll", () => closeChatMenu(), { passive: true });
 window.addEventListener("resize", () => {
   closeChatMenu();
+  if (sidebarDrag) sidebarDrag.width = applySidebarWidth(sidebarDrag.width);
+  else applySidebarWidth(settings.sidebarWidth);
   autoGrow();
 });
 searchInput.addEventListener("input", () => {
@@ -3286,6 +3836,9 @@ replyJump.addEventListener("click", () => jumpToMessage(previewTurn?.reply));
 // Settings dialog
 byId("open-settings").addEventListener("click", () => openSettings());
 byId("close-settings").addEventListener("click", () => settingsDialog.close());
+settingsDialog.addEventListener("close", () => {
+  if (!settingsDialog.open) stopTokenUsageUpdates();
+});
 settingsDialog.addEventListener("click", (event) => {
   if (event.target === settingsDialog) settingsDialog.close();
 });
@@ -3386,7 +3939,9 @@ async function importAllData(data) {
     }
   });
   if (!ok) throw new Error("Could not write the imported chats.");
-  if (data.settings && typeof data.settings === "object") saveSettings({ ...data.settings, sidebarCollapsed: settings.sidebarCollapsed });
+  if (data.settings && typeof data.settings === "object") saveSettings({
+    ...data.settings, sidebarCollapsed: settings.sidebarCollapsed, sidebarWidth: settings.sidebarWidth,
+  });
   for (const memory of data.memories || []) if (typeof memory === "string" && !memories.includes(memory)) memories.push(memory);
   const existingNames = new Set(customSkills.map(({ name }) => name));
   const importedSkills = Skills.normalize(data.skills).filter(({ name }) => !existingNames.has(name));

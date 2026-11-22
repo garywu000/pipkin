@@ -152,6 +152,11 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
     [content addScriptMessageHandler:self name:@"pipkin"];
     config.userContentController = content;
     config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+    if (@available(macOS 14.0, *)) {
+        // Keep the page's timers and frames running while Pipkin is in the background, so a long Work run keeps
+        // showing its progress and approvals instead of freezing until the window is focused.
+        config.preferences.inactiveSchedulingPolicy = WKInactiveSchedulingPolicyNone;
+    }
     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     @try { [config.preferences setValue:@YES forKey:@"developerExtrasEnabled"]; } @catch (NSException *e) {}
 

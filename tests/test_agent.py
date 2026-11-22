@@ -22,6 +22,54 @@ class AgentTest(unittest.TestCase):
     def emit(self, event, **data):
         self.events.append((event, data))
 
+    def test_resume_identifies_canceled_actions_as_unfinished_and_requires_approval(self):
+        approvals = []
+        (self.path / "plan.txt").write_text("Review notes.\n")
+        replies = iter([
+            {"tool_calls": [tool("write_file", path="checklist.txt", content="Bring a notebook.\n")]},
+            {"content": "Both files are ready."},
+        ])
+
+        def model(messages, _tools, _think):
+            self.assertIn("requested deliverables against confirmed results", messages[0]["content"])
+            self.assertIn("request fresh approval", messages[0]["content"])
+            self.assertIn("honor any action the user declined", messages[0]["content"])
+            if not approvals:
+                self.assertEqual(messages[-1]["role"], "user")
+                self.assertIn("checklist.txt", messages[-1]["content"])
+            return next(replies)
+
+        def approve(kind, title, diff):
+            approvals.append((kind, title))
+            return True
+
+        work = Agent(model, self.emit, lambda: None, approve, workspace=self.workspace, mode="ask", web=False)
+        work.run("System", [], "Save the plan and checklist.", saved={
+            "files": ["plan.txt"],
+            "activity": [{"name": "write_file", "label": "Write checklist.txt", "cancelled": True}],
+        })
+        self.assertEqual(approvals, [("edit", "Create checklist.txt")])
+        self.assertEqual((self.path / "plan.txt").read_text(), "Review notes.\n")
+        self.assertEqual((self.path / "checklist.txt").read_text(), "Bring a notebook.\n")
+
+    def test_resume_does_not_finish_on_an_unchecked_canceled_edit(self):
+        checkpoint = {}
+        replies = iter([
+            {"tool_calls": [tool("read_file", path="checklist.txt")]},
+            {"content": "I finished."},
+            {"content": "I finished."},
+        ])
+        work = Agent(lambda *_: next(replies), self.emit, lambda: None, lambda *_: False,
+                     workspace=self.workspace, mode="ask", web=False)
+        with self.assertRaisesRegex(WorkPaused, "canceled edit still to review"):
+            work.run("System", [], "Save a checklist.", saved={
+                "activity": [{"name": "write_file", "label": "Write checklist.txt", "cancelled": True}],
+            }, save_checkpoint=lambda **fields: checkpoint.update(fields))
+        self.assertFalse((self.path / "checklist.txt").exists())
+        self.assertNotIn("result", [event for event, _ in self.events])
+        self.assertEqual([event for event, _ in self.events].count("model_step"), 3)
+        self.assertEqual(checkpoint["pending_edit_path"], "checklist.txt")
+
     def test_prompt_stays_cacheable_and_identical_write_is_blocked(self):
         body = "<main>A long page</main>\n" * 700
         write = tool("write_file", path="index.html", content=body)
@@ -137,13 +185,14 @@ class AgentTest(unittest.TestCase):
         calls = []
 
         def model(messages, tools, think):
-            calls.append(1)
+            calls.append(messages[-1])
             return {"tool_calls": [tool("read_file", path="notes.md")]}
 
         work = Agent(model, self.emit, lambda: None, lambda *_: False, workspace=self.workspace, mode="auto")
-        with self.assertRaisesRegex(WorkPaused, "three steps without a new result"):
+        with self.assertRaisesRegex(WorkPaused, "four steps without a new result, including one recovery attempt"):
             work.run("System", [], "Make a file")
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
+        self.assertIn("Recovery check", calls[3]["content"], "one recovery step comes before the pause")
         self.assertEqual(work.saved_files, [])
 
     def test_site_pauses_after_five_steps_without_a_page(self):

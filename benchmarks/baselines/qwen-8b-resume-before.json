@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "mode": "ollama",
+  "model": {
+    "name": "qwen3:8b",
+    "digest": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+    "details": {
+      "parent_model": "",
+      "format": "gguf",
+      "family": "qwen3",
+      "families": [
+        "qwen3"
+      ],
+      "parameter_size": "8.2B",
+      "quantization_level": "Q4_K_M",
+      "context_length": 40960,
+      "embedding_length": 4096,
+      "runner": "ggml"
+    }
+  },
+  "platform": "Darwin",
+  "architecture": "arm64",
+  "context": 8192,
+  "think": false,
+  "interrupted": false,
+  "trials": [
+    {
+      "case": "resume-work",
+      "first_saved_output_seconds": 7.886,
+      "first_verified_output_seconds": 7.886,
+      "model_steps": 2,
+      "failed_tools": 0,
+      "approvals": 2,
+      "unexpected_approvals": 0,
+      "denied_requested_write": false,
+      "saved_paths": [
+        "plan.txt"
+      ],
+      "restored_paths": [
+        "plan.txt"
+      ],
+      "agent_timings_seconds": {
+        "load": 0.003,
+        "prompt": 5.849,
+        "generate": 4.061,
+        "tools": 0.003,
+        "approval": 0.002
+      },
+      "end_states": [
+        "stopped",
+        "result"
+      ],
+      "resume_preserved_first_output": true,
+      "output_checks": {
+        "plan.txt": {
+          "expected_lines": true
+        },
+        "checklist.txt": {
+          "readable_output": false
+        }
+      },
+      "checks": {
+        "expected_workspace_files": false,
+        "inputs_unchanged": true,
+        "approved_scope_only": true,
+        "completed": true,
+        "plan.txt": true,
+        "checklist.txt": false,
+        "resumed_from_saved_output": true
+      },
+      "passed": false,
+      "wall_seconds": 11.798,
+      "resources": {
+        "samples": 6,
+        "peak_model_bytes": 5801708093,
+        "minimum_memory_free_percent": 49
+      },
+      "iteration": 1
+    }
+  ]
+}

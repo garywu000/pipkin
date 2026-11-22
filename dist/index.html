@@ -89,6 +89,7 @@
     <div class="sidebar-footer">
       <button id="open-settings" class="sidebar-row" type="button"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span><kbd>⌘,</kbd></button>
     </div>
+    <div id="sidebar-resize" class="sidebar-resize" role="separator" aria-label="Chat sidebar width" aria-orientation="vertical" aria-controls="chat-sidebar" tabindex="0"></div>
   </aside>
   <div id="sidebar-scrim" class="sidebar-scrim" hidden></div>
 
@@ -108,6 +109,18 @@
       <div class="dialog-actions">
         <button id="cancel-rename" type="button" class="button">Cancel</button>
         <button type="submit" class="button primary" value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="paste-preview" class="paste-preview" aria-labelledby="paste-preview-title">
+    <form method="dialog" class="dialog-body">
+      <h2 id="paste-preview-title">Pasted text</h2>
+      <p id="paste-preview-note" class="hint"></p>
+      <pre id="paste-preview-text" tabindex="0" aria-label="Full pasted text"></pre>
+      <div class="dialog-actions">
+        <button id="paste-preview-inline" type="button" class="button" hidden>Move to composer</button>
+        <button id="paste-preview-copy" type="button" class="button" aria-label="Copy pasted text"><span class="copy-label">Copy</span></button>
+        <button type="submit" class="button primary">Done</button>
       </div>
     </form>
   </dialog>
@@ -203,6 +216,7 @@
         <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
           <button type="button" role="tab" id="tab-general" aria-controls="panel-general" aria-selected="true"><svg class="icon"><use href="#i-settings"/></svg>General</button>
           <button type="button" role="tab" id="tab-model" aria-controls="panel-model" aria-selected="false"><svg class="icon"><use href="#i-sparkle"/></svg>Model</button>
+          <button type="button" role="tab" id="tab-usage" aria-controls="panel-usage" aria-selected="false"><svg class="icon"><use href="#i-list"/></svg>Usage</button>
           <button type="button" role="tab" id="tab-personal" aria-controls="panel-personal" aria-selected="false"><svg class="icon"><use href="#i-brain"/></svg>Personalization</button>
           <button type="button" role="tab" id="tab-agent" aria-controls="panel-agent" aria-selected="false"><svg class="icon"><use href="#i-bot"/></svg>Agent</button>
           <button type="button" role="tab" id="tab-data" aria-controls="panel-data" aria-selected="false"><svg class="icon"><use href="#i-download"/></svg>Data</button>
@@ -254,6 +268,23 @@
               <input id="setting-temperature" type="range" min="0" max="1.5" step="0.05">
               <div class="range-labels"><span>Precise</span><span>Balanced</span><span>Creative</span></div>
             </div>
+          </section>
+          <section id="panel-usage" class="usage-panel" role="tabpanel" aria-labelledby="tab-usage" hidden>
+            <h3>Token usage</h3>
+            <p class="hint">Across all models used in Pipkin on this Mac.</p>
+            <div id="usage-values" class="usage-card" hidden>
+              <dl class="usage-total">
+                <dt>Lifetime tokens</dt>
+                <dd id="usage-total"></dd>
+              </dl>
+              <div id="usage-bar" class="usage-bar" aria-hidden="true"><span></span><span></span></div>
+              <dl class="usage-breakdown">
+                <div><dt>Input</dt><dd id="usage-input"></dd></div>
+                <div><dt>Generated</dt><dd id="usage-output"></dd></div>
+              </dl>
+            </div>
+            <p id="usage-status" class="hint" role="status">Loading token usage…</p>
+            <p class="hint">Totals start when tracking is installed. Deleting a chat keeps its tokens in the total.</p>
           </section>
           <section id="panel-personal" role="tabpanel" aria-labelledby="tab-personal" hidden>
             <div class="setting stack">
@@ -345,7 +376,7 @@
         </fieldset>
         <button id="active-chat-title" class="active-chat-title" type="button" hidden>
           <svg class="icon" aria-hidden="true"><use id="active-chat-mode" href="#i-chat"/></svg>
-          <span id="active-chat-name"></span>
+          <span class="chat-title-clip" dir="auto"><span id="active-chat-name" class="chat-title-text"></span></span>
           <svg class="icon rename-icon" aria-hidden="true"><use href="#i-edit"/></svg>
         </button>
       </div>

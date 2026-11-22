@@ -13,15 +13,18 @@ import os
 import posixpath
 import re
 from pathlib import Path
+from secrets import token_hex
+from threading import Lock
 import signal
 import socket
 import stat
 import subprocess
 import time
 from unicodedata import normalize
-from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 import urllib.request
 
+import artifacts
 
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -356,10 +359,10 @@ class Workspace:
         sections.append("Headings\n" + ("\n".join(headings) or "(No Markdown headings.)"))
         return "\n\n".join(sections)
 
-    def check_page(self, path, check):
+    def check_page(self, path, check, *, candidate=None):
         if not path.casefold().endswith(".html"):
             raise ValueError("Choose a workspace .html file.")
-        source, truncated = self.raw_text(path)
+        source, truncated = self.raw_text(path) if candidate is None else (candidate, False)
         if truncated:
             raise ValueError("This HTML file is too large to check.")
         parser = _PageReferences()
@@ -391,7 +394,7 @@ class Workspace:
                 except (OSError, ValueError):
                     pass
             problems.append(f"Unresolved local link or asset: {reference[:120]}")
-        result = "\n".join(problems[:25]) or "No missing local assets, page anchors, or duplicate IDs found."
+        result = "\n".join(problems[:25]) or LINKS_OK
         return f"{path} · static link and anchor check\n{result}"
 
     def write_text(self, path, content):
@@ -411,6 +414,49 @@ class Workspace:
             fd = os.open(parts[-1], WRITE_FLAGS, 0o644, dir_fd=parent)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)
+
+    def file_digest(self, path):
+        """SHA-256 of a regular file's bytes, or None when it no longer exists."""
+        try:
+            with self.open_path(path, FILE_FLAGS) as fd:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError(f"{path} is no longer a regular file.")
+                digest = sha256()
+                with os.fdopen(os.dup(fd), "rb") as stream:
+                    for block in iter(lambda: stream.read(1 << 20), b""):
+                        digest.update(block)
+                return digest.hexdigest()
+        except FileNotFoundError:
+            return None
+
+    def remove_file(self, path):
+        parts = validate_path(path)
+        if not parts:
+            raise ValueError("Give a file path inside the workspace.")
+        with self._directory(parts[:-1]) as parent:
+            info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("Only regular files can be removed.")
+            os.unlink(parts[-1], dir_fd=parent)
+
+    def write_new_artifact(self, path, data):
+        parts = validate_path(path)
+        if not parts or len(data) > 2_000_000:
+            raise ValueError("Choose a filename for an output under 2 MB.")
+        with self._directory(parts[:-1], create=True) as parent:
+            staging = ".pipkin-" + token_hex(12)
+            fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=parent)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.link(staging, parts[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+            except FileExistsError as error:
+                raise ValueError(f"{path} already exists. Choose a new output filename.") from error
+            finally:
+                os.unlink(staging, dir_fd=parent)
 
 
 PEM_KEY = re.compile(r"^\s*-{5}BEGIN [A-Z0-9 ]*PRIVATE KEY-{5}\s*$", re.MULTILINE)
@@ -460,6 +506,193 @@ def make_diff(path, before, after):
 
 
 # ---------------------------------------------------------------- web tools
+
+LINKS_OK = "No missing local assets, page anchors, or duplicate IDs found."
+PLAN_NOTE = ("\n\n(Work note: if this takes more than one action, begin your first reply with update_plan: 3 to 6 concrete "
+             "steps for this request, the first one in_progress, sent together with your first action.)")
+PLAN_REMINDER = ("\n\n(Before your next action, call update_plan with 3 to 6 concrete steps for this task, marking the "
+                 "work already confirmed as completed.)")
+ARTIFACT_CHECKS = {
+    "word": ("package", "Word archive and XML parts checked"),
+    "slides": ("package", "PowerPoint archive and XML parts checked"),
+    "pdf": ("pdf", "PDF reopened; pages and text checked"),
+}
+
+
+def artifact_steps(plan, sources, workflow, mode):
+    """A checklist written from the model's content plan: what it read, the sections it chose, and the output."""
+    pages = {}
+    for source in sources:
+        pages.setdefault(source["name"], set())
+        if source.get("page"):
+            pages[source["name"]].add(source["page"])
+    read = ", ".join(name + (f" (pages {', '.join(str(page) for page in sorted(found)[:6])})" if len(found) > 1
+                             else f" (page {next(iter(found))})" if found else "")
+                     for name, found in list(pages.items())[:3]) or "the brief"
+    headings = [section["heading"] for section in plan["sections"]]
+    outline = ", ".join(headings[:3]) + (f" and {len(headings) - 3} more" if len(headings) > 3 else "")
+    check = {"site": "check its links", "word": "check the Word file", "slides": "check the deck",
+             "pdf": "reopen the PDF to check it"}.get(workflow, "check it")
+    steps = [
+        {"text": clip("Read " + read, 160), "status": "completed"},
+        {"text": clip(f"Plan {len(headings)} section{'s' if len(headings) != 1 else ''}: {outline}", 160), "status": "completed"},
+        {"text": clip(f"Build {plan['path']} and {check}", 160), "status": "in_progress"},
+    ]
+    if mode == "ask":
+        steps.append({"text": f"Save {plan['path']} after your approval", "status": "pending"})
+    return steps
+
+
+EXIT_CODE = re.compile(r"\[exit code (\d+)\]\s*$")
+
+
+def command_failed(output):
+    """True when run_command finished with a nonzero exit code or was stopped."""
+    match = EXIT_CODE.search(output)
+    return bool(match and match.group(1) != "0") or "\n[Stopped: " in output
+
+
+def recovery_hint(name, output, tool_names):
+    """Advice for the model's next step after a failed action, matched to the error it got."""
+    text = output.casefold()
+    if output.startswith("The user declined"):
+        return "Do not retry this action. Continue with the rest of the task, or say what you need from the user."
+    if name == "run_command" and command_failed(output):
+        if "[stopped: " in text:
+            return ""  # the stop message already explains how to recover
+        if "command not found" in text:
+            return ("That program is not installed here. Use another command (for example python3 instead of python) "
+                    "or one of your built-in tools, or skip this check and say it is unverified.")
+        if "no such file or directory" in text:
+            return "A path in the command does not exist. Check it with list_files first."
+        if "permission denied" in text or "operation not permitted" in text:
+            return "Do not change permissions or use sudo. Take another approach, or tell the user what is blocked."
+        return ("Read the error output above and fix its cause before running one corrected command. "
+                "Note that grep exits 1 when nothing matched, which is a result, not a failure.")
+    if not output.startswith("Tool error:"):
+        return ""
+    if "no such file or folder" in text or "could not be opened" in text or "does not exist" in text:
+        return "Check the exact path with list_files, or find the file with search_text. Paths are relative to the workspace folder."
+    if "old_text was not found" in text:
+        return ("Read the current lines with read_file and copy the snippet exactly, including spaces and punctuation. "
+                "For a small file, rewrite it with write_file instead.")
+    if "not available right now" in text:
+        return "Use one of the available tools: " + ", ".join(sorted(tool_names)) + "."
+    if "already made this exact change" in text:
+        return "The file already has this change. Move on to the next step."
+    return "Change the arguments or use a different tool rather than repeating this call."
+
+
+def failure_signature(name, output):
+    first = next((line for line in output.splitlines() if line.strip()), "")
+    if name == "run_command":
+        first = next((line for line in reversed(output.splitlines()) if line.strip() and not line.startswith("[")), first)
+    return name, re.sub(r"\d+", "#", first.casefold())[:120]
+
+
+def link_check(report):
+    """Turn a check_page report into a result-card check."""
+    report = report.strip()
+    if report.endswith(LINKS_OK):
+        return {"kind": "links", "ok": True, "text": "Local links, anchors and IDs passed"}
+    # The report opens with a "<path> · static link and anchor check" heading; the problems follow, one per line.
+    problems = [line.strip() for line in report.splitlines()[1:] if line.strip()]
+    text = problems[0] if problems else "The page could not be checked."
+    if len(problems) > 1:
+        text += f" (+{len(problems) - 1} more)"
+    return {"kind": "links", "ok": False, "text": clip(text, 160)}
+
+
+class UndoStore:
+    """Local, bounded history of the files Pipkin wrote, so each one can be undone.
+
+    One record per file per run keeps the file's original text (None for a file Pipkin created) and the SHA-256 of
+    the version Pipkin last wrote. Undo applies only while the file still matches that version, so later edits by
+    the user are never overwritten.
+    """
+
+    def __init__(self, folder, max_records=200, max_bytes=20_000_000):
+        self.folder = Path(folder)
+        self.max_records, self.max_bytes = max_records, max_bytes
+        self.lock = Lock()
+
+    def _path(self, undo_id):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", str(undo_id)):
+            raise ValueError("Unknown undo record.")
+        return self.folder / (undo_id + ".json")
+
+    def _load(self, undo_id):
+        try:
+            return json.loads(self._path(undo_id).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise ValueError("This undo is no longer available. Pipkin keeps the most recent 200 file changes.") from None
+
+    def _save(self, record):
+        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = self._path(record["id"])
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+
+    def _prune(self):
+        files = sorted(self.folder.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        total = 0
+        for index, item in enumerate(files):
+            total += item.stat().st_size
+            if index >= self.max_records or total > self.max_bytes:
+                item.unlink(missing_ok=True)
+
+    def record(self, workspace, path, before, after, existing=None):
+        """Remember a write. A later write to the same file in the same run keeps the first original."""
+        digest = sha256(after).hexdigest()
+        with self.lock:
+            if existing:
+                try:
+                    record = self._load(existing)
+                    if record["path"] == path and record["state"] == "ready":
+                        record.update(after_sha256=digest, updated=time.time())
+                        self._save(record)
+                        return existing
+                except (ValueError, KeyError, OSError):
+                    pass
+            record = {"id": token_hex(12), "folder": str(workspace.path), "identity": list(workspace.identity),
+                      "path": path, "before": before, "after_sha256": digest, "state": "ready",
+                      "created": time.time(), "updated": time.time()}
+            self._save(record)
+            self._prune()
+            return record["id"]
+
+    def apply(self, workspace, undo_id):
+        """Undo one file. Returns {"action": "restored" | "removed"} or raises UndoConflict / ValueError."""
+        with self.lock:
+            record = self._load(undo_id)
+            if record["folder"] != str(workspace.path) or tuple(record["identity"]) != tuple(workspace.identity):
+                raise ValueError("This undo belongs to a different folder. Select that folder and try again.")
+            if record["state"] != "ready":
+                raise UndoConflict(f"{record['path']} was already undone.")
+            current = workspace.file_digest(record["path"])
+            if current != record["after_sha256"]:
+                if current is None and record["before"] is None:
+                    action = "removed"  # Already gone; nothing of the user's is at risk.
+                elif current is None:
+                    raise UndoConflict(f"{record['path']} was deleted after Pipkin edited it, so there is nothing to restore into.")
+                else:
+                    raise UndoConflict(f"{record['path']} changed after Pipkin saved it. Undo was skipped to keep your changes.")
+            elif record["before"] is None:
+                workspace.remove_file(record["path"])
+                action = "removed"
+            else:
+                workspace.write_text(record["path"], record["before"])
+                action = "restored"
+            record.update(state="undone", undone=time.time())
+            self._save(record)
+            return {"action": action, "path": record["path"]}
+
+
+class UndoConflict(Exception):
+    """The file no longer matches what Pipkin wrote, so undoing it would discard someone's later work."""
+
 
 class Sources:
     def __init__(self, items=()):
@@ -699,6 +932,26 @@ def web_search(query, sources=None):
 
 # ---------------------------------------------------------------- commands
 
+COMMAND_IDLE = 30
+# Commands that never finish on their own: servers, watchers, pagers, editors, and interactive tools.
+NEVER_EXITS = re.compile(
+    r"(?:^|[;&|(]\s*|\b(?:then|do|sudo|exec|nohup)\s+)(?:python3?\s+-m\s+http\.server|http-server|live-server|npx\s+serve|"
+    r"(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:start|dev|serve|watch)|flask\s+run|uvicorn|php\s+-S|"
+    r"tail\s+-[a-zA-Z]*f|watch\s|top\b|htop|less\b|more\b|man\s|vim?\b|nano\b|emacs\b|ssh\s|"
+    r"ping\s+(?!.*-c\s*\d)|cat\s*(?:$|[;&|])|read\b)",
+)
+
+
+def long_running(command):
+    """A reason the command would hang Work, or None. Backgrounding with & doesn't help: the output never closes."""
+    match = NEVER_EXITS.search(command)
+    if not match:
+        return None
+    return (f"Not run: `{match.group(0).strip()}` keeps running or waits for input, so it would never finish. "
+            "Commands must exit on their own. To check a page, use check_page or read_file instead of a web server. "
+            "To search, use search_text. Choose a command that finishes, or skip this check.")
+
+
 def run_command(workspace, command, check):
     env = dict(os.environ)
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
@@ -709,14 +962,18 @@ def run_command(workspace, command, check):
         ["/bin/zsh", "-c", command], cwd=str(workspace.path), stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, start_new_session=True,
     )
-    deadline = time.monotonic() + COMMAND_TIMEOUT
+    started = time.monotonic()
+    deadline = started + COMMAND_TIMEOUT
+    last_output = started
     output = bytearray()
     try:
         os.set_blocking(process.stdout.fileno(), False)
         while True:
             check()
             chunk = process.stdout.read(65536)
+            now = time.monotonic()
             if chunk:
+                last_output = now
                 if len(output) < 400_000:
                     output.extend(chunk)
             elif process.poll() is not None:
@@ -725,12 +982,18 @@ def run_command(workspace, command, check):
                 break
             else:
                 time.sleep(0.05)
-            if time.monotonic() > deadline:
-                raise TimeoutError()
-    except TimeoutError:
+            if now > deadline:
+                raise TimeoutError(f"ran for {COMMAND_TIMEOUT}s without finishing")
+            if now - last_output > COMMAND_IDLE:
+                raise TimeoutError(f"printed nothing for {COMMAND_IDLE}s")
+    except TimeoutError as why:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait()
-        return clip(output.decode("utf-8", "replace"), 6000) + f"\n[Command timed out after {COMMAND_TIMEOUT}s and was stopped.]"
+        # Tell the model how to recover, so it changes approach instead of rerunning the same command.
+        return (clip(output.decode("utf-8", "replace"), 6000) + f"\n[Stopped: the command {why}. It is probably "
+                "waiting for input, serving, or watching. Do not run it again. Use a command that exits on its own "
+                "(add flags such as -c 1, --no-pager or a timeout), split it into smaller checks, or verify with "
+                "read_file, search_text or check_page instead.]")
     except BaseException:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -918,12 +1181,19 @@ def system_prompt(workspace, mode, web, memory, memories, instructions, context,
         lines.append("No workspace folder is selected, so you cannot read or change the user's files.")
     lines += [
         "Guidelines:",
-        "- For tasks with several steps, open a short checklist with update_plan. Pair plan changes with the relevant tool calls in the same response whenever possible. Mark a step completed only when its work is confirmed.",
+        ("- Plan first. For a task with two or more steps, your first reply calls update_plan with 3 to 6 concrete steps "
+         "written for this request (the first one in_progress), together with the first action. Steps name real work, "
+         "such as \"Read brief.md for the meeting details\", not generic phases. As each step's work is confirmed, mark it "
+         "completed and the next one in_progress in the same reply as your next tool call. Skip the checklist for a "
+         "single quick action."),
         ("- Start with the workspace source map when one is supplied. If it is missing for a named extract, "
          "pair the initial plan with map_document. Read specific ranges only when a required fact is missing. "
          "Save a usable page before doing extra exploration."
          if workflow == "site" else
          "- Explore with list_files, search_text and outline_file; read_file the exact lines before you edit. Prefer edit_file for small changes and write_file for new files."),
+        ("- Commands must finish on their own within seconds: no servers, watchers, editors, pagers or prompts. "
+         "If a command fails or is stopped, read the message, change the approach, and do not repeat it; "
+         "after two failed attempts at the same check, move on and report what is unverified."),
         "- Use read_files for related reads and send up to four independent tool calls together. Batch changes only when none depends on seeing the other's result. Make a small working version once you have enough evidence, then verify and refine it.",
         "- For a small new file with a named destination, create it directly. Use one targeted read or check to verify it, then report what was verified.",
         "- When a new file needs many sections, write a small working version first and add the other sections in focused edits.",
@@ -1094,7 +1364,7 @@ def summarize_exchange(dropped):
 
 class Agent:
     def __init__(self, request_model, emit, check, approve, *, workspace=None, mode="ask", web=True,
-                 memory=True, max_steps=24, num_ctx=8192, think=False, panels=None, workflow=None):
+                 memory=True, max_steps=24, num_ctx=8192, think=False, panels=None, workflow=None, undo=None):
         self.request_model, self.emit, self.check = request_model, emit, check
         self.panels = panels
         self.workflow = workflow
@@ -1118,6 +1388,8 @@ class Agent:
         self.uncertain = {}
         self.sources = Sources()
         self.saved_files = []
+        self.outputs = []
+        self.undo = undo
         self.save_checkpoint = None
 
     # Context budgeting: roughly 3 bytes per token, leave room for the reply.
@@ -1222,6 +1494,210 @@ class Agent:
             self.uncertain[self.current_id] = label
             self.save_checkpoint(uncertain=dict(self.uncertain))
 
+    def run_artifact(self, inputs, context, saved, request_plan, read_document, *,
+                     stop_requested, take_steering, save_checkpoint):
+        """Return False when a site needs the general editing workflow."""
+        if not inputs or saved.get("artifact_fallback") or self.mode == "read" or not self.workspace:
+            return False
+        site = self.workflow == "site"
+        steering = take_steering()
+        for note in steering:
+            self.emit("steering", **note)
+        if steering:
+            inputs = {**inputs, "brief": inputs["brief"] + "\n\nUser updates\n" + "\n".join(note["text"] for note in steering)}
+        output_paths = artifacts.destination_paths(inputs["brief"], self.workflow)
+        slides = artifacts.requested_slides(inputs["brief"]) if self.workflow == "slides" else None
+        if slides is not None and not 1 <= slides <= 9:
+            raise WorkPaused("This PowerPoint template supports one to nine slides. Use a shorter deck or separate the topics.")
+        if site:
+            if len(output_paths) > 1 or re.search(
+                r"\b(?:interactive|dashboard|animations?|forms?|multi-page|login|localStorage)\b",
+                inputs["brief"], re.IGNORECASE,
+            ):
+                return False
+            for path in output_paths:
+                try:
+                    if self.workspace.existing_text(path) is not None:
+                        return False
+                except (OSError, ValueError):
+                    return False
+
+        started = time.monotonic()
+        self.save_checkpoint = save_checkpoint
+        self.saved_files = list(saved.get("files", []))
+        self.outputs = deepcopy(saved.get("outputs", []))
+        self.current_id = "artifact-output"
+        self.uncertain = dict(saved.get("uncertain", {}))
+        plan_steps = []
+
+        def load_source(name):
+            self.check()
+            if Path(name).is_absolute():
+                return None
+            try:
+                kind = Path(name).suffix[1:].casefold()
+                if kind not in {"pdf", "docx"}:
+                    return self.workspace.raw_text(name)[0]
+                with self.workspace.open_path(name, FILE_FLAGS) as fd:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_dev != self.workspace.identity[0]:
+                        return None
+                    if not 0 < info.st_size <= 7_000_000:
+                        return None
+                    with os.fdopen(os.dup(fd), "rb") as stream:
+                        return read_document(kind, stream.read(7_000_001)).strip()[:8500]
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return None
+
+        draft = saved.get("artifact_draft") if not steering else None
+        timings = {"load": 0.0, "prompt": 0.0, "generate": 0.0}
+        tokens = rounds = 0
+        if draft:
+            plan, sources = draft["plan"], draft["sources"]
+        else:
+            sources, omitted = artifacts.source_catalog(inputs, load_source, min(9000, self.num_ctx))
+            if site and (omitted or len(inputs["brief"]) > 6500):
+                return False
+            # No checklist yet: the timeline shows the model planning, and the checklist is built from its plan.
+            messages = artifacts.planner_messages(self.workflow, inputs, sources, omitted, context)
+            copy_lines = artifacts.use_source_lines(self.workflow, inputs["brief"], sources)
+            plan = None
+            for number in (1, 2):
+                if stop_requested():
+                    raise WorkPaused("Stopped before the output was saved.")
+                self.emit("model_step", number=number, planning=True)
+                response = request_plan(messages, artifacts.plan_schema(self.workflow, slides))
+                rounds += 1
+                tokens += response.get("eval_count", 0)
+                for key in timings:
+                    timings[key] += response.get("timings", {}).get(key, 0)
+                try:
+                    plan = artifacts.checked_plan(json.loads(response["content"]), self.workflow, sources, copy_lines=copy_lines)
+                    if plan is None:
+                        return False
+                    if len(output_paths) == 1:
+                        plan["path"] = output_paths[0]
+                    if slides is not None:
+                        if len(plan["sections"]) != max(1, slides - 1):
+                            raise ValueError(f"Use exactly {max(1, slides - 1)} content sections.")
+                        plan["single_slide"] = slides == 1
+                    if Path(plan["path"]).is_absolute():
+                        raise ValueError("Use a relative output path.")
+                    plan["path"] = "/".join(validate_path(plan["path"]))
+                    break
+                except (ValueError, KeyError, TypeError) as error:
+                    if number == 2:
+                        if site:
+                            return False
+                        raise WorkPaused("The model could not return a valid content plan. Resume with a shorter brief.") from error
+                    messages.append({"role": "user", "content": "Return corrected JSON. " + str(error)[:250]})
+            plan_steps = artifact_steps(plan, sources, self.workflow, self.mode)
+            self.emit("plan", steps=plan_steps)
+            if save_checkpoint:
+                save_checkpoint(artifact_draft={"plan": plan, "sources": sources}, plan=plan_steps)
+        if not plan_steps:
+            plan_steps = artifact_steps(plan, sources, self.workflow, self.mode)
+
+        if stop_requested():
+            raise WorkPaused("Stopped before the output was saved.")
+        by_id = {}
+        folder = posixpath.dirname(plan["path"]) or "."
+        for source in sources:
+            item = dict(source)
+            if source["path"]:
+                try:
+                    with self.workspace.open_path(source["path"], FILE_FLAGS) as fd:
+                        if stat.S_ISREG(os.fstat(fd).st_mode):
+                            href = quote(posixpath.relpath(source["path"], folder))
+                            item["href"] = href + (f"#page={source['page']}" if source["page"] else "")
+                except (OSError, ValueError):
+                    pass
+            by_id[item["id"]] = item
+        self.emit("plan", steps=plan_steps)
+        path = plan["path"]
+        label = "Create " + path
+        self.emit("tool", id=self.current_id, name="write_artifact", label=label)
+        data = artifacts.render(self.workflow, plan, by_id)
+        verification = "Office archive and XML checked." if self.workflow in {"word", "slides"} else "PDF opened and its pages were checked."
+        if site:
+            verification = self.workspace.check_page(path, self.check, candidate=data.decode())
+            if not verification.endswith(LINKS_OK):
+                raise WorkPaused(verification)
+        detail = artifacts.preview(plan, by_id)
+        # Built and checked: the approval step (Ask first) is now the one in progress.
+        plan_steps[2]["status"] = "completed"
+        if len(plan_steps) > 3:
+            plan_steps[3]["status"] = "in_progress"
+        self.emit("plan", steps=plan_steps)
+        saved_output = False
+        try:
+            if stop_requested():
+                raise ApprovalCancelled()
+            needs_review = self.mode == "ask"
+            if needs_review and not self.approve("edit", label, detail):
+                self.emit("tool_result", id=self.current_id, ok=None, preview="The user declined this output.")
+                answer = "The proposed output was declined."
+            else:
+                self.begin_effect(label)
+                self.workspace.write_new_artifact(path, data)
+                self.saved_files.append(path)
+                self.uncertain.pop(self.current_id, None)
+                cited = [artifacts.source_label(by_id[key]) for section in plan["sections"]
+                         for key in section["sources"] if key in by_id]
+                kind, text = ARTIFACT_CHECKS.get(self.workflow, ("render", "Rendered"))
+                self.record_output(path, action="created", sources=cited, undo=self.remember_undo(path, None, data),
+                                   check=link_check(verification) if site else {"kind": kind, "ok": True, "text": text})
+                answer = f"Saved [{escape(path)}]({quote(path)}).\n\n{verification}"
+                if save_checkpoint:
+                    save_checkpoint(files=self.saved_files, outputs=self.outputs, uncertain=dict(self.uncertain), result=answer)
+                self.emit("tool_result", id=self.current_id, ok=True, saved_file=path, preview=verification)
+                saved_output = True
+        except ApprovalCancelled as error:
+            raise WorkPaused("The output is ready for review. Resume Work to continue.") from error
+        if save_checkpoint:
+            save_checkpoint(result=answer)
+        if len(plan_steps) > 3:
+            # A declined output leaves the save step open rather than ticking it.
+            plan_steps[3]["status"] = "completed" if saved_output else "pending"
+        self.emit("plan", steps=plan_steps)
+        self.emit("result", text=answer)
+        timings["approval"] = round(self.approval_seconds, 3)
+        timings["tools"] = max(0, round(time.monotonic() - started - self.approval_seconds - sum(
+            timings[key] for key in ("load", "prompt", "generate")), 3))
+        self.emit("usage", tokens=tokens, seconds=round(time.monotonic() - started, 3), steps=rounds, compactions=0, timings=timings)
+        return True
+
+    def remember_undo(self, path, before, after):
+        """Record a write for undo, reusing this run's record for the file so its first original is kept."""
+        if self.undo is None or self.workspace is None:
+            return None
+        current = next((item.get("undo") for item in self.outputs if path_identity(item["path"]) == path_identity(path)), None)
+        try:
+            return self.undo.record(self.workspace, path, before, after, existing=current)
+        except (OSError, ValueError):
+            return None  # Undo is a convenience; never fail the write over it.
+
+    def record_output(self, path, *, action=None, check=None, sources=None, undo=None):
+        """Keep one result-card record per saved file. A new write clears checks made on the previous version."""
+        record = next((item for item in self.outputs if path_identity(item["path"]) == path_identity(path)), None)
+        if record is None:
+            if action is None:
+                return
+            record = {"path": path, "action": action, "checks": [], "sources": []}
+            self.outputs.append(record)
+        elif action is not None:
+            if record["action"] != "created":
+                record["action"] = action
+            record["checks"] = []
+        if check is not None:
+            record["checks"] = [item for item in record["checks"] if item["kind"] != check["kind"]] + [check]
+        if sources:
+            record["sources"] = list(dict.fromkeys([*record["sources"], *sources]))[:12]
+        if undo:
+            record["undo"] = undo
+            record.pop("undone", None)
+        self.emit("output", **deepcopy(record))
+
     def execute(self, name, args):
         if name not in self.tool_names:
             raise ValueError(f"The tool '{name}' is not available right now.")
@@ -1294,7 +1770,10 @@ class Agent:
             queries = [require_str({"query": query}, "query", 80).strip() for query in queries]
             return workspace.map_document(require_str(args, "path", 500), queries, self.check)
         if name == "check_page":
-            return workspace.check_page(require_str(args, "path", 500), self.check)
+            path = require_str(args, "path", 500)
+            report = workspace.check_page(path, self.check)
+            self.record_output(path, check=link_check(report))
+            return report
         if name == "read_file":
             path = require_str(args, "path", 500)
             site = self.workflow == "site"
@@ -1347,17 +1826,24 @@ class Agent:
                 self.saved_files.append(path)
             self.saved_file = path
             self.emit("diff", id=self.current_id, text=diff)
+            self.record_output(path, action="created" if before is None else "edited",
+                               undo=self.remember_undo(path, before, after.encode("utf-8")))
             added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
             removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
             result = f"{'Created' if before is None else 'Updated'} {path} (+{added} −{removed} lines)."
             if self.workflow == "site" and path.casefold().endswith(".html"):
                 try:
-                    result += "\n\n" + workspace.check_page(path, self.check)
+                    report = workspace.check_page(path, self.check)
+                    result += "\n\n" + report
+                    self.record_output(path, check=link_check(report))
                 except (OSError, ValueError):
                     result += "\n\nThe static link check could not open the saved page."
             return result
         if name == "run_command":
             command = require_str(args, "command", 2000).strip()
+            blocked = long_running(command)
+            if blocked:
+                raise ValueError(blocked)
             if not self.approve("command", "Run a command in " + workspace.path.name, command):
                 return "The user declined to run this command. Do not retry it."
             self.begin_effect(describe(name, args))
@@ -1373,11 +1859,21 @@ class Agent:
         self.uncertain = dict(saved.get("uncertain", {}))
         self.sources = Sources(saved.get("sources", []))
         self.saved_files = list(saved.get("files", []))
+        self.outputs = deepcopy(saved.get("outputs", []))
         self.seen.update(saved.get("seen", []))
         self.counter = saved.get("counter", 0)
         self.summary = list(saved.get("summary", []))
         self.task = task
         activity = list(saved.get("activity", []))
+        last_action = next((item for item in reversed(activity) if item.get("name")), {})
+        canceled_path = saved.get("pending_edit_path") if self.mode != "read" else None
+        if (self.mode != "read" and "pending_edit_path" not in saved
+                and last_action.get("name") in WRITE_TOOL_NAMES and last_action.get("cancelled")):
+            # Older checkpoints recorded the label, whose path was capped at 120 characters.
+            label_path = last_action.get("label", "").partition(" ")[2]
+            if 0 < len(label_path) < 120:
+                canceled_path = label_path
+        retry_canceled_edit = True
         if self.workflow == "site" and self.workspace is not None:
             source_map = saved.get("site_source_map") if saved else self.prepare_site_source(task)
             if source_map:
@@ -1392,9 +1888,18 @@ class Agent:
                 break
             self.exploring += item.get("name") in EXPLORE_TOOLS
         if saved:
-            system += "\nContinue the same task from the saved plan and tool results. Use the earlier results to avoid repeating completed actions."
+            system += ("\nContinue the same task from the saved plan and tool results. Use the earlier results to avoid "
+                       "repeating completed actions. Check the requested deliverables against confirmed results before "
+                       "giving a final answer. Take the next unfinished action when work remains.")
+            if canceled_path:
+                system += ("\nAn action canceled while awaiting approval was left unexecuted. If the task still needs it, "
+                           "call its tool again to request fresh approval. Continue to honor any action the user declined.")
         if self.uncertain:
             system += "\nAn edit or command was interrupted. Inspect the current state and report what the user should review."
+        plan_nudge = not saved and not self.plan and "update_plan" in self.tool_names
+        if plan_nudge:
+            # Small models follow a note at the end of the request far better than a guideline in the system prompt.
+            self.task += PLAN_NOTE
         messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": self.task},
                     *saved.get("evidence", [])]
         self.history_len = len(history)
@@ -1406,6 +1911,10 @@ class Agent:
         model_steps = 0
         stalled = 0
         site_rounds = 0
+        plan_reminded = False
+        failures = {}
+        problems = []
+        recovery_sent = False
         site_needs_page = self.workflow == "site" and self.mode != "read" and not any(
             path.casefold().endswith(".html") for path in self.saved_files
         )
@@ -1420,12 +1929,18 @@ class Agent:
             if notes:
                 stalled = 0
                 site_rounds = 0
+                canceled_path = None
                 for note in notes:
                     steering_texts.append(note["text"])
                     self.emit("steering", **note)
                 self.write_task(messages)
             allow_tools = step < self.max_steps
             convo = self.fit(messages)
+            if canceled_path and step == 0:
+                convo.append({"role": "user", "content": (
+                    f"Resume the original task. Stop canceled the pending edit to {canceled_path!r} before it ran. "
+                    "Use a workspace write tool to request fresh approval for the unfinished edit."
+                )})
             if not allow_tools:
                 convo[0] = dict(convo[0], content=convo[0]["content"] + "\nThe step limit was reached. Give your final answer now without tools.")
             model_steps += 1
@@ -1443,6 +1958,15 @@ class Agent:
             calls = reply.get("tool_calls") or []
             content = (reply.get("content") or "").strip()
             if not calls or not allow_tools:
+                if canceled_path and not stop_requested():
+                    if allow_tools and retry_canceled_edit:
+                        retry_canceled_edit = False
+                        messages.append({"role": "user", "content": (
+                            f"The edit to {canceled_path!r} is still pending. Perform that file action using a "
+                            "workspace write tool. If the file is missing and the task asks for it, create it."
+                        )})
+                        continue
+                    raise WorkPaused(f"Work paused with a canceled edit still to review in {canceled_path!r}.")
                 if not content and not stop_requested():
                     raise ValueError("The agent ended without an answer. Try rephrasing the task.")
                 result = content
@@ -1515,13 +2039,20 @@ class Agent:
                     output = "Tool error: " + detail
                 tool_seconds += time.monotonic() - tool_started
                 outcome = {"id": self.current_id, "ok": ok, "cancelled": cancelled, "preview": clip(output, 1800)}
+                if name in WRITE_TOOL_NAMES:
+                    if cancelled:
+                        canceled_path = args["path"].strip()
+                    elif canceled_path and (ok or output.startswith("The user declined")):
+                        if path_identity(args["path"]) == path_identity(canceled_path):
+                            canceled_path = None
                 if self.saved_file:
                     outcome["saved_file"] = self.saved_file
                     if self.saved_file.casefold().endswith(".html"):
                         site_needs_page = False
                 if name in WRITE_TOOL_NAMES:
                     advanced = advanced or bool(self.saved_file)
-                elif ok and not output.startswith("This exact call's result") and (name != "update_plan" or last_plan != self.plan):
+                elif (ok and not output.startswith("This exact call's result") and (name != "update_plan" or last_plan != self.plan)
+                      and not (name == "run_command" and command_failed(output))):
                     advanced = True
                 new_sources = self.sources.items[source_start:]
                 if new_sources:
@@ -1546,6 +2077,23 @@ class Agent:
                 if name in WRITE_TOOL_NAMES | {"run_command"} and self.has_plan and self.since_plan >= 4:
                     output += "\n\n(Reminder: if a plan step is finished, call update_plan to mark it completed.)"
                     self.since_plan = 0
+                failed = ok is False or (ok is None and not cancelled) or (name == "run_command" and command_failed(output))
+                if failed:
+                    signature = failure_signature(name, output)
+                    failures[signature] = failures.get(signature, 0) + 1
+                    problems = [*problems[-2:], clip(f"{label}: {signature[1]}", 200)]
+                    hint = recovery_hint(name, output, self.tool_names)
+                    if failures[signature] >= 2:
+                        hint = ("This failed the same way before. Do not try it again: use a different tool or approach, "
+                                "or skip this step and report it as unverified. " + hint).strip()
+                        self.emit("notice", text=f"Same problem twice with “{clip(label, 80)}”. Asked the model to try a different approach.")
+                    if hint:
+                        output += "\n\n(Recovery: " + hint + ")"
+                if (plan_nudge and not plan_reminded and not self.plan and name != "update_plan"
+                        and not any((item.get("function") or {}).get("name") == "update_plan"
+                                    for item in calls if isinstance(item, dict))):
+                    output += PLAN_REMINDER
+                    plan_reminded = True
                 messages.append({"role": "tool", "tool_name": str(name), "content": clip(output, 14000)})
                 if name in {"run_command", "terminal_run"}:
                     self.results.clear()
@@ -1563,17 +2111,31 @@ class Agent:
                                                      **{key: value for key, value in outcome.items() if key != "sources"}}]
                     save_checkpoint(evidence=deepcopy(messages[self.history_len + 2:]), seen=sorted(self.seen), plan=self.plan,
                                     counter=self.counter, activity=activity, uncertain=dict(self.uncertain),
-                                    sources=self.sources.items, summary=self.summary, files=self.saved_files)
+                                    sources=self.sources.items, summary=self.summary, files=self.saved_files,
+                                    outputs=self.outputs, pending_edit_path=canceled_path)
                 self.emit("tool_result", **outcome)
             if not accepted_calls:
                 messages.pop()
                 continue
             if not stop_requested() and not steering_pending():
                 stalled = 0 if advanced else stalled + 1
+                if advanced:
+                    recovery_sent = False
                 if site_needs_page:
                     site_rounds += 1
-                if stalled >= 3:
-                    raise WorkPaused("Work paused after three steps without a new result. Resume with a different approach or a more specific instruction.")
+                if stalled == 2 and not recovery_sent:
+                    # One deliberate recovery step before giving up: diagnose, then work around the obstacle.
+                    recovery_sent = True
+                    recent = "\n".join("- " + item for item in problems) or "- The last actions returned nothing new."
+                    messages.append({"role": "user", "content": (
+                        "Recovery check: your last two steps made no progress.\n" + recent + "\n"
+                        "In your next reply, state the likely cause in one sentence, then take a different action that works "
+                        "around it. Do not repeat a failed call. If a step cannot be done, mark it in update_plan, skip it, "
+                        "and continue with the rest of the task.")})
+                    self.emit("notice", text="No progress for two steps. Asked the model to find the cause and work around it.")
+                if stalled >= 4:
+                    raise WorkPaused("Work paused after four steps without a new result, including one recovery attempt. "
+                                     "Resume with a different approach or a more specific instruction.")
                 if site_needs_page and site_rounds >= 5:
                     raise WorkPaused("Work paused after five steps without saving an HTML page. Resume with the smallest useful page as the next step.")
         if result:
@@ -1581,7 +2143,7 @@ class Agent:
                 save_checkpoint(result=result)
             self.emit("result", text=result)
         else:
-            self.emit("stopped", files=self.saved_files)
+            self.emit("stopped", files=self.saved_files, outputs=self.outputs)
         timings["tools"] = max(0.0, tool_seconds - self.approval_seconds)
         timings["approval"] = self.approval_seconds
         self.emit("usage", tokens=tokens, seconds=round(time.monotonic() - started, 1), steps=model_steps, compactions=self.compactions,

@@ -3,9 +3,11 @@
 
 import argparse
 import base64
+import datetime
 import binascii
 import codecs
 from collections import Counter
+from contextlib import closing
 import http.client
 from io import BytesIO
 import json
@@ -19,27 +21,29 @@ from socket import MSG_PEEK, SHUT_RDWR
 import stat
 import subprocess
 import shutil
+import sqlite3
 import sys
 import tempfile
 from threading import Condition, Event, Lock, Thread
 import time
+import traceback
 from uuid import UUID
 import xml.etree.ElementTree as ET
 from zipfile import BadZipFile, ZipFile
+import artifacts
 from agent import (
     FILE_FLAGS, PERMISSION_MODES, SOURCE_GUIDANCE, WEB_TOOLS, Agent, AgentStopped, ApprovalCancelled, Sources,
-    WorkPaused, Workspace, clip, project_notes, system_prompt, validate_path, web_fetch, web_search,
+    UndoConflict, UndoStore, WorkPaused, Workspace, clip, project_notes, system_prompt, validate_path, web_fetch, web_search,
 )
 
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-DEFAULT_MODEL = (
-    "hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:"
-    "Huihui-Qwen3.8-27B-abliterated-GSQ-RCO-IQ3_XXS.gguf"
-)
+# Used until the user picks a model; the README recommends it for 16 GB Macs. A saved choice always wins.
+DEFAULT_MODEL = "qwen3:8b"
 CONTEXT_SIZES = (4096, 8192, 16384, 32768, 65536)
 SETTINGS_FILE = Path.home() / "Library" / "Application Support" / "Pipkin" / "settings.json"
+USAGE_FILE = SETTINGS_FILE.with_name("usage.sqlite3")
 SETTINGS_LOCK = Lock()
 TRANSFER_FILE = SETTINGS_FILE.parent / "transfer.json"
 TRANSFER_LIMIT = 200 * 1024 * 1024
@@ -73,6 +77,31 @@ HUMANIZE_SCHEMA = {
     "required": ["rewrite"],
     "additionalProperties": False,
 }
+TITLE_SCHEMA = {
+    "type": "object",
+    "properties": {"title": {"type": "string"}},
+    "required": ["title"],
+    "additionalProperties": False,
+}
+TITLE_INSTRUCTIONS = (
+    "Write a short title for this conversation, like a chat app's sidebar label. Use 2 to 6 words in sentence case. "
+    "Name the subject or the deliverable, for example \"Heat pump efficiency explained\" or \"Word agenda for study "
+    "session\". No quotes, no ending punctuation, no emoji, and no words like \"request\", \"help with\" or \"user\". "
+    "Write the title in the language of the request. Return JSON with a title field."
+)
+
+
+def clean_title(value):
+    """Accept a model title only if it reads like a short label."""
+    if not isinstance(value, str):
+        return None
+    title = " ".join(value.replace("\n", " ").split()).strip(" \"'“”‘’`*#.:;,!-")
+    words = title.split()
+    if not 1 <= len(words) <= 8 or not 2 <= len(title) <= 60 or "{" in title:
+        return None
+    return title[0].upper() + title[1:]
+
+
 HUMANIZE_EXAMPLES = (
     ("natural",
      "Hey Maya, I just wanted to ask: are you still able to take a look at this by Friday? No worries if not.",
@@ -144,9 +173,34 @@ ACADEMIC_CLAIMS = re.compile(
 )
 
 
-def humanize_messages(draft, tone):
-    def draft_message(text, style):
-        return {"role": "user", "content": json.dumps({"tone": style, "draft": text}, ensure_ascii=False)}
+ESSAY_EDITOR = (
+    "You are Pipkin's editor for personal statements and college application essays. Rewrite the essay in the "
+    "writer's own first-person voice so it reads like a thoughtful student wrote it, not a template. Follow the "
+    "writer's instructions for tone and focus. The essay prompt, if given, is context only: answer it better, but do "
+    "not copy it into the rewrite. Keep every experience, fact, name, number and claim, and invent nothing. Make real "
+    "edits: replace stock or inflated phrasing (for example 'I am keen to', 'I have become effective in', 'empowered "
+    "to engage', 'a more inclusive and understanding community') with concrete, plain wording; show the specific "
+    "action or moment instead of summarizing it; vary sentence length; prefer active verbs; cut filler and repeated "
+    "ideas; and end on something specific rather than a slogan. Keep the paragraph breaks and keep the length within "
+    "about 10 percent of the original. Keep words like might, could, if, unless and not with the same meaning. "
+    "Return only the JSON object with the rewritten essay in the rewrite field. Tone: "
+)
+
+
+def humanize_messages(draft, tone, instructions="", context="", kind="message"):
+    def draft_message(text, style, notes="", about=""):
+        fields = {"tone": style}
+        if notes:
+            fields["instructions"] = notes
+        if about:
+            fields["prompt_or_context"] = about
+        fields["draft"] = text
+        return {"role": "user", "content": json.dumps(fields, ensure_ascii=False)}
+
+    if kind == "essay":
+        # Long-form writing needs real edits; the short-message examples below teach the model to change little.
+        return [{"role": "system", "content": ESSAY_EDITOR + HUMANIZE_TONES[tone]},
+                draft_message(draft, tone, instructions, context)]
 
     system = (
         "You are Pipkin's copy editor for short messages, emails and drafts. Rewrite the draft in its original language. "
@@ -162,14 +216,42 @@ def humanize_messages(draft, tone):
         "unless verbatim with the same clause. Keep negations. Never turn a tentative statement such as "
         "'I might be able to' into certainty. Keep separate thoughts separate when merging could change their meaning. "
         "Keep the existing subject, greeting, sign-off, and paragraph structure when appropriate. "
-        "Return wording that already works verbatim. Return only the JSON object with the rewritten text in the rewrite field. "
+        "Return wording that already works verbatim. If the writer gives instructions, follow them for style and focus, "
+        "but they never override these rules. Return only the JSON object with the rewritten text in the rewrite field. "
         "Tone choices: " + " ".join(f"{key}: {value}" for key, value in HUMANIZE_TONES.items())
     )
     messages = [{"role": "system", "content": system}]
     for style, original, rewritten in HUMANIZE_EXAMPLES:
         messages.extend([draft_message(original, style), {"role": "assistant", "content": json.dumps({"rewrite": rewritten})}])
-    messages.append(draft_message(draft, tone))
+    messages.append(draft_message(draft, tone, instructions, context))
     return messages
+
+
+WORD_TOKEN = re.compile(r"[^\s\u2013\u2014]+")
+WORD_LIMIT = re.compile(
+    r"\b(?:under|below|at most|no more than|max(?:imum)?(?: of)?|within|up to|less than|fewer than|limit of|cap of)"
+    r"\s+(\d{2,5})\s*words?\b|\b(\d{2,5})[- ]word\s*(?:limit|max(?:imum)?|cap|count)\b",
+    re.IGNORECASE,
+)
+UC_PIQ = re.compile(r"\b(?:piq|personal insight|university of california|\bUCs?\b)", re.IGNORECASE)
+
+
+def count_words(text):
+    """Count words the way Google Docs does: split on spaces and em or en dashes; hyphenated words count once."""
+    return sum(1 for token in WORD_TOKEN.findall(text) if any(char.isalnum() for char in token))
+
+
+def word_limit(*texts):
+    """A word limit stated in the instructions, or the 350-word UC Personal Insight Question limit."""
+    joined = " ".join(texts)
+    match = WORD_LIMIT.search(joined)
+    if match:
+        return int(match.group(1) or match.group(2))
+    return 350 if UC_PIQ.search(joined) else None
+
+
+def same_text(first, second):
+    return " ".join(first.split()) == " ".join(second.split())
 
 
 def checked_rewrite(draft, output):
@@ -335,6 +417,53 @@ def ollama_request(method, path, body=None, timeout=3, *, cancelable=False):
         raise
 
 
+def token_usage(input_tokens=0, output_tokens=0):
+    """Share one durable counter between Pipkin's main and development servers."""
+    if not (input_tokens or output_tokens) and not USAGE_FILE.exists():
+        return {"input": 0, "output": 0}
+    USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(USAGE_FILE, timeout=1)) as database, database:
+        database.execute("""
+            CREATE TABLE IF NOT EXISTS usage (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL
+            )
+        """)
+        if input_tokens or output_tokens:
+            database.execute("""
+                INSERT INTO usage (id, input_tokens, output_tokens) VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    input_tokens = usage.input_tokens + excluded.input_tokens,
+                    output_tokens = usage.output_tokens + excluded.output_tokens
+            """, (input_tokens, output_tokens))
+        used_input, used_output = database.execute(
+            "SELECT input_tokens, output_tokens FROM usage WHERE id = 1"
+        ).fetchone() or (0, 0)
+    return {"input": used_input, "output": used_output}
+
+
+def ollama_chat_packets(response):
+    """Record the terminal usage packet once, before forwarding it to the caller."""
+    for line in response:
+        packet = json.loads(line)
+        if not isinstance(packet, dict):
+            raise ValueError("Invalid Ollama response.")
+        done = packet.get("done") is True
+        if done:
+            prompt, generated = (packet.get(key) for key in ("prompt_eval_count", "eval_count"))
+            prompt = prompt if type(prompt) is int and prompt > 0 else 0
+            generated = generated if type(generated) is int and generated > 0 else 0
+            if prompt or generated:
+                try:
+                    token_usage(prompt, generated)
+                except (OSError, sqlite3.Error, OverflowError) as error:
+                    log_unexpected("token usage storage", error)
+        yield line, packet
+        if done:
+            return
+
+
 def load_settings():
     settings = {"model": DEFAULT_MODEL, "num_ctx": 8192}
     try:
@@ -433,6 +562,19 @@ def set_residency(keep_alive, model, num_ctx, *, timeout=60, cancelable=False):
         connection.close()
 
 
+def undo_store(port):
+    """Undo history for this server's port, kept next to the settings file and capped in size."""
+    return UndoStore(SETTINGS_FILE.parent / "undo" / str(port))
+
+
+def log_unexpected(where, error):
+    """Write a timestamped traceback to stderr, which the app saves as server.log."""
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    print(f"{stamp} Unexpected error in {where}:", file=sys.stderr)
+    traceback.print_exception(type(error), error, error.__traceback__, file=sys.stderr)
+    sys.stderr.flush()
+
+
 class ModelGlitch(Exception):
     """Ollama's runner failed mid-generation (for example after a macOS GPU reset)."""
 
@@ -501,7 +643,7 @@ def read_document(kind, data, *, academic=False):
             document = Path(directory) / "attachment.pdf"
             document.write_bytes(data)
             result = subprocess.run(
-                [str(ASSETS.parent / "read-pdf"), str(document)],
+                [str(ASSETS.parent / "read-pdf"), "--pages", str(document)],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=12,
             )
         if result.returncode:
@@ -975,6 +1117,13 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(503 if SESSIONS.stopping else 200, {"app": "local.browser-model"})
         elif self.path == "/api/models":
             self.list_models()
+        elif self.path == "/api/usage":
+            try:
+                usage = token_usage()
+            except (OSError, sqlite3.Error):
+                self.send_json(503, {"error": "Token usage is temporarily unavailable."})
+            else:
+                self.send_json(200, usage)
         elif self.path in STATIC_FILES:
             name, content_type = STATIC_FILES[self.path]
             body = (ASSETS / name).read_bytes()
@@ -1008,6 +1157,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         if self.path == "/api/document":
             self.extract_document()
             return
+        if self.path == "/api/title":
+            self.chat_title()
+            return
         if self.path == "/api/humanize":
             self.humanize()
             return
@@ -1025,6 +1177,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/agent/open-file":
             self.open_workspace_file()
+            return
+        if self.path == "/api/agent/undo":
+            self.undo_file()
             return
         if self.path == "/api/agent/forget":
             self.forget_workspace()
@@ -1244,11 +1399,18 @@ class ChatHandler(BaseHTTPRequestHandler):
                     ".pdf": "com.apple.Preview", ".png": "com.apple.Preview",
                     ".jpg": "com.apple.Preview", ".jpeg": "com.apple.Preview",
                     ".md": "com.apple.TextEdit", ".txt": "com.apple.TextEdit",
+                    ".docx": "com.microsoft.Word", ".pptx": "com.microsoft.Powerpoint",
                 }.get(target.suffix.casefold()) if regular else None
                 # Open known formats in fixed viewers. Reveal every other file or folder in Finder.
                 options = ["-b", app] if app else ["-R"]
-                subprocess.run(["/usr/bin/open", *options, str(target)], check=True, timeout=5,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    subprocess.run(["/usr/bin/open", *options, str(target)], check=True, timeout=5,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except subprocess.CalledProcessError:
+                    if target.suffix.casefold() not in {".docx", ".pptx"}:
+                        raise
+                    subprocess.run(["/usr/bin/open", "-R", str(target)], check=True, timeout=5,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (ValueError, OSError):
             self.send_json(404, {"error": "Could not open this path in the selected folder."})
             return
@@ -1263,11 +1425,85 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ValueError()
         return json.loads(self.rfile.read(length))
 
+    def undo_file(self):
+        """Undo one file Pipkin wrote, only if it still matches the version Pipkin saved."""
+        try:
+            payload = self.read_json(512)
+            key, undo_id = payload["workspace"], payload["id"]
+            if not valid_workspace_key(key) or not isinstance(undo_id, str):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            self.send_json(400, {"error": "Invalid undo request."})
+            return
+        workspace = authorized_workspace(key)
+        if workspace is None:
+            self.send_json(403, {"error": "Choose this file's workspace folder again to undo it.", "code": "workspace_required"})
+            return
+        try:
+            self.send_json(200, undo_store(self.server.server_port).apply(workspace, undo_id))
+        except UndoConflict as conflict:
+            self.send_json(409, {"error": str(conflict), "conflict": True})
+        except ValueError as error:
+            self.send_json(400, {"error": str(error)})
+        except OSError:
+            self.send_json(503, {"error": "Pipkin could not change that file. Check that it is not open elsewhere."})
+
+    def chat_title(self):
+        """Name a chat from its first exchange. Uses the model only when it is already loaded and idle."""
+        try:
+            payload = self.read_json(20_000)
+            request, reply = payload["request"], payload.get("reply", "")
+            if not isinstance(request, str) or not isinstance(reply, str) or not request.strip():
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            self.send_json(400, {"error": "Invalid title request."})
+            return
+        if SESSIONS.loaded_key is None:
+            self.send_json(409, {"error": "The model is not loaded."})
+            return
+        if not GENERATION.acquire(blocking=False):
+            self.send_json(409, {"error": "The model is busy."})
+            return
+
+        def check():
+            SESSIONS.check_cancelled()
+            if select([self.connection], [], [], 0)[0] and not self.connection.recv(1, MSG_PEEK):
+                raise AgentStopped()
+
+        try:
+            messages = [
+                {"role": "system", "content": TITLE_INSTRUCTIONS},
+                {"role": "user", "content": "Request:\n" + request.strip()[:700]
+                 + ("\n\nStart of the reply:\n" + reply.strip()[:400] if reply.strip() else "")},
+            ]
+            reply = self.agent_step(messages, [], False, check, lambda *_args, **_fields: None, output_schema=TITLE_SCHEMA,
+                                    output_limit=40)
+            title = clean_title(json.loads(reply["content"]).get("title"))
+            if title is None:
+                self.send_json(422, {"error": "The model did not return a usable title."})
+            else:
+                self.send_json(200, {"title": title})
+        except (AgentStopped, BrokenPipeError, ConnectionResetError):
+            pass
+        except (ValueError, KeyError, TypeError, AttributeError, OSError, http.client.HTTPException, ModelGlitch):
+            try:
+                self.send_json(503, {"error": "Could not name this chat."})
+            except OSError:
+                pass
+        finally:
+            GENERATION.release()
+
     def humanize(self):
         try:
             payload = self.read_json(ACADEMIC_LIMIT * 12 + 1024)
             draft, tone = payload["draft"], payload["tone"]
+            instructions, context = payload.get("instructions", ""), payload.get("context", "")
+            kind = payload.get("kind", "message")
             if not isinstance(tone, str) or (tone != "academic" and tone not in HUMANIZE_TONES):
+                raise ValueError()
+            if not all(isinstance(value, str) and len(value) <= 1000 for value in (instructions, context)):
+                raise ValueError()
+            if kind not in ("message", "essay"):
                 raise ValueError()
             if not isinstance(draft, str) or "\x00" in draft:
                 raise ValueError()
@@ -1312,11 +1548,49 @@ class ChatHandler(BaseHTTPRequestHandler):
                 return
             SESSIONS.ensure_loaded()
             check()
-            reply = self.agent_step(humanize_messages(draft, tone), [], False, check, lambda *_args, **_fields: None,
+            limit = word_limit(instructions, context)
+            draft_words = count_words(draft)
+            messages = humanize_messages(draft, tone, instructions.strip(), context.strip(), kind)
+            # Models can't count words reliably; give them Pipkin's exact numbers instead of asking them to count.
+            note = f"\n\nPipkin counted the draft at exactly {draft_words} words."
+            if limit:
+                note += f" The rewrite must be at most {limit} words; aim for {max(1, limit - 10)} to {limit}."
+            messages[0] = dict(messages[0], content=messages[0]["content"] + note)
+            reply = self.agent_step(messages, [], False, check, lambda *_args, **_fields: None,
                                     output_schema=HUMANIZE_SCHEMA)
             rewrite = checked_rewrite(draft, reply["content"])
-            seconds = reply["timings"]["generate"]
-            self.send_json(200, {"rewrite": rewrite, "tokens": reply["eval_count"], "generateSeconds": seconds})
+            tokens, seconds = reply["eval_count"], reply["timings"]["generate"]
+            if same_text(rewrite, draft):
+                # A model asked to keep good wording sometimes returns everything verbatim. Ask once for real edits.
+                messages += [{"role": "assistant", "content": reply["content"]}, {"role": "user", "content": (
+                    "That returned the draft unchanged. Revise the sentences that sound stiff, generic or wordy, "
+                    "following the tone and instructions, and keep the rest. Return the JSON object.")}]
+                check()
+                reply = self.agent_step(messages, [], False, check, lambda *_args, **_fields: None,
+                                        output_schema=HUMANIZE_SCHEMA)
+                rewrite = checked_rewrite(draft, reply["content"])
+                tokens += reply["eval_count"]
+                seconds += reply["timings"]["generate"]
+            words = count_words(rewrite)
+            for _ in range(2):
+                if not limit or words <= limit:
+                    break
+                # Exact feedback works where "make it shorter" does not: say how many words to remove.
+                messages += [{"role": "assistant", "content": json.dumps({"rewrite": rewrite}, ensure_ascii=False)},
+                             {"role": "user", "content": (
+                                 f"Pipkin counted that rewrite at {words} words. The limit is {limit}. Remove at least "
+                                 f"{words - limit + 5} words by tightening wordy phrases and cutting repetition. Keep every "
+                                 "experience and fact, and the paragraph breaks. Return the full rewrite as the JSON object.")}]
+                check()
+                reply = self.agent_step(messages, [], False, check, lambda *_args, **_fields: None,
+                                        output_schema=HUMANIZE_SCHEMA)
+                rewrite = checked_rewrite(draft, reply["content"])
+                tokens += reply["eval_count"]
+                seconds += reply["timings"]["generate"]
+                words = count_words(rewrite)
+            self.send_json(200, {"rewrite": rewrite, "tokens": tokens, "generateSeconds": seconds,
+                                 "unchanged": same_text(rewrite, draft), "words": words, "draftWords": draft_words,
+                                 "wordLimit": limit})
         except (AgentStopped, BrokenPipeError, ConnectionResetError):
             pass
         except ModelGlitch:
@@ -1560,6 +1834,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             allow_memory = payload.get("allowMemory", True)
             max_steps = payload.get("maxSteps", 24)
             workflow = payload.get("workflow")
+            artifact = artifacts.request_input(payload.get("artifact"))
             memories = payload.get("memories", [])
             history = payload.get("history", [])
             terminal_id = payload.get("terminal")
@@ -1576,7 +1851,11 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ValueError()
             if type(max_steps) is not int or not 4 <= max_steps <= 60:
                 raise ValueError()
-            if workflow not in (None, "site"):
+            if workflow is not None and (not isinstance(workflow, str) or workflow not in artifacts.FORMATS):
+                raise ValueError()
+            if artifact and (workflow not in artifacts.FORMATS or key is None):
+                raise ValueError()
+            if workflow in {"word", "slides", "pdf"} and not (artifact or resume_id):
                 raise ValueError()
             if not isinstance(memories, list) or len(memories) > 60 or not all(isinstance(item, str) and len(item) <= 400 for item in memories):
                 raise ValueError()
@@ -1586,7 +1865,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if item.get("role") != ("user" if index % 2 == 0 else "assistant") or not isinstance(item.get("content"), str) or len(item["content"]) > 8000:
                     raise ValueError()
             history = [{"role": item["role"], "content": item["content"]} for item in history]
-            if workflow == "site":
+            if workflow in artifacts.FORMATS:
                 web = has_browser = False
         except (AttributeError, KeyError, TypeError, ValueError):
             self.send_json(400, {"error": "The agent request was invalid. Try a shorter task."})
@@ -1667,12 +1946,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             check()
             send_event(event, **fields)
 
-        def request_step(messages, tools, think_now):
+        def request_step(messages, tools, think_now, *, schema=None):
             nonlocal step_started
             check()
             with run["changed"]:
                 step_started = time.monotonic()
             try:
+                if schema is not None:
+                    def emit_plan_step(event, **data):
+                        if event == "step":
+                            emit(event, **data)
+                    return self.agent_step(messages, [], False, check, emit_plan_step, output_schema=schema)
                 return self.agent_model(messages, tools, think_now, check, emit, stop_requested=stop_requested, workflow=workflow)
             finally:
                 reason = budget_reason()
@@ -1744,8 +2028,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                         mode = "ask"
                     task = restored["task"]
                     workflow = restored.get("workflow")
+                    artifact = restored.get("artifact")
                     web = web and restored["web"]
-                    if workflow == "site":
+                    if workflow in artifacts.FORMATS:
                         web = has_browser = False
                     allow_memory = allow_memory and restored["memory"]
                     run["steering"] = list(restored.get("steering", []))
@@ -1753,7 +2038,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                     if checkpoint.path.exists():
                         self.send_json(409, {"error": "This Work run already has a checkpoint. Use Resume Work."})
                         return
-                    checkpoint.save(version=1, scope=scope, task=task, mode=mode, web=web, memory=allow_memory, workflow=workflow)
+                    checkpoint.save(version=1, scope=scope, task=task, mode=mode, web=web, memory=allow_memory,
+                                    workflow=workflow, artifact=artifact)
                 run["checkpoint"] = checkpoint
 
             notes_name, notes_text = project_notes(workspace, max(2500, current()["num_ctx"] // 3)) if workspace else (None, "")
@@ -1764,7 +2050,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             if restored is not None:
                 emit("checkpoint_restored", plan=restored.get("plan", []), activity=restored.get("activity", []),
                      uncertain=list(restored.get("uncertain", {}).values()), sources=restored.get("sources", []),
-                     files=restored.get("files", []))
+                     files=restored.get("files", []), outputs=restored.get("outputs", []))
                 if restored.get("result"):
                     emit("result", text=restored["result"])
                     return
@@ -1787,9 +2073,29 @@ class ChatHandler(BaseHTTPRequestHandler):
                 request_step,
                 emit, check, approve, workspace=workspace, mode=mode, web=web, memory=allow_memory,
                 max_steps=max_steps, num_ctx=settings["num_ctx"], think=think, panels=panels, workflow=workflow,
+                undo=undo_store(self.server.server_port),
             )
             system = system_prompt(workspace, mode, web, allow_memory, memories, instructions.strip(), context.strip(),
                                    notes_text, notes_name, panels=panels, workflow=workflow)
+            if artifact:
+                if workflow != "site" and mode == "read":
+                    raise WorkPaused("Choose Ask first or Auto-edit to save a document.")
+                staged_steering = take_steering()
+                if agent.run_artifact(
+                    artifact, "\n\n".join((instructions, context, notes_text)), restored or {},
+                    lambda messages, schema: request_step(messages, [], False, schema=schema), read_document,
+                    stop_requested=lambda: stop_requested() or steering_pending(),
+                    take_steering=lambda: staged_steering,
+                    save_checkpoint=checkpoint.save if checkpoint else None,
+                ):
+                    return
+                if checkpoint:
+                    checkpoint.save(artifact_fallback=True)
+                if staged_steering:
+                    with run["changed"]:
+                        run["steering_seen"] -= len(staged_steering)
+                if workflow == "site" and mode != "read":
+                    emit("progress", text="Using Work’s editor for this site.")
             agent.run(system, history, task, stop_requested=stop_requested, take_steering=take_steering,
                       steering_pending=steering_pending, saved=restored,
                       save_checkpoint=checkpoint.save if checkpoint else None)
@@ -1797,9 +2103,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             pass
         except WorkPaused as pause:
             files = agent.saved_files if agent is not None else []
+            outputs = agent.outputs if agent is not None else []
             if checkpoint and files:
                 try:
-                    checkpoint.save(files=files)
+                    checkpoint.save(files=files, outputs=outputs)
                 except OSError:
                     pass
             text = str(pause)
@@ -1807,7 +2114,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 text += " This run saved no files."
             if streaming:
                 try:
-                    send_event("stopped", text=text, files=files)
+                    send_event("stopped", text=text, files=files, outputs=outputs)
                 except OSError:
                     pass
         except (ValueError, KeyError, OSError, http.client.HTTPException) as error:
@@ -1817,6 +2124,18 @@ class ChatHandler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"event": "error", "text": message}).encode() + b"\n")
                 else:
                     self.send_json(503, {"error": "Could not open the Work checkpoint."})
+            except OSError:
+                pass
+        except Exception as error:  # noqa: BLE001 - a bug must end the run visibly, never leave it "Running…"
+            log_unexpected("Work run", error)
+            message = (f"Pipkin hit an unexpected error ({type(error).__name__}) and stopped this run. "
+                       "Resume Work to try again. Details are in Develop › Show Logs (server.log).")
+            try:
+                if streaming:
+                    self.wfile.write(json.dumps({"event": "error", "text": message}).encode() + b"\n")
+                    self.wfile.flush()
+                else:
+                    self.send_json(500, {"error": message})
             except OSError:
                 pass
         finally:
@@ -1997,9 +2316,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             emit("step")
             chunks, calls = [], []
             thought = ThoughtWatch()
-            for line in response:
+            for _, packet in ollama_chat_packets(response):
                 check()
-                packet = json.loads(line)
                 if packet.get("error"):
                     if is_glitch(packet["error"]):
                         raise ModelGlitch()
@@ -2104,10 +2422,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                             error = "Ollama could not start the reply."
                         send({"error": error})
                         return
-                    for line in response:
+                    for line, packet in ollama_chat_packets(response):
                         if SESSIONS.cancelled.is_set():
                             return
-                        packet = json.loads(line)
                         if packet.get("error"):
                             if is_glitch(packet["error"]):
                                 recover = True
@@ -2205,22 +2522,16 @@ class ChatHandler(BaseHTTPRequestHandler):
                 return
             self.headers_for(200, "application/x-ndjson; charset=utf-8")
             finished = False
-            for line in response:
+            for line, packet in ollama_chat_packets(response):
                 if SESSIONS.cancelled.is_set():
                     break
-                if b'"error"' in line:
-                    try:
-                        problem = json.loads(line).get("error", "")
-                    except ValueError:
-                        problem = ""
-                    if is_glitch(problem):
-                        recover = True
-                        line = json.dumps({"error": "The GPU reset during this reply. Send your message again to reload the model."}).encode() + b"\n"
-                if b'"done":true' in line or b'"done": true' in line:
-                    finished = True
+                if packet.get("error") and is_glitch(packet["error"]):
+                    recover = True
+                    line = json.dumps({"error": "The GPU reset during this reply. Send your message again to reload the model."}).encode() + b"\n"
+                finished = packet.get("done") is True
                 self.wfile.write(line)
             recover = recover or not finished
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException, ValueError):
             # A closed browser stream also closes the corresponding Ollama request.
             pass
         finally:

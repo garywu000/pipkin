@@ -5,7 +5,7 @@
 <p align="center"><strong>A local AI chat and workspace agent for the Mac you already have.</strong><br>
 Turn your own files into finished work with a model that runs on your machine.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v1.0.0"><strong>Download v1.0</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v1.1.0"><strong>Download v1.1</strong></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#try-site">Try /site</a> ·
   <a href="#roadmap">Roadmap</a> ·
@@ -45,14 +45,14 @@ The goal is narrow on purpose: help a mid-size local model, on an ordinary Mac, 
    ~~~sh
    ollama pull qwen3:8b
    ~~~
-2. Download the [v1.0 release](https://github.com/garywu000/pipkin/releases/tag/v1.0.0), unzip it, and open Pipkin. This build is Apple silicon only and ad-hoc signed. If macOS blocks it, [build it yourself](#build-from-source).
+2. Download the [v1.1 release](https://github.com/garywu000/pipkin/releases/tag/v1.1.0), unzip it, and open Pipkin. This build is Apple silicon only and ad-hoc signed. If macOS blocks it, [build it yourself](#build-from-source).
 3. Pick your model in the top bar, then choose **Chat** or **Agent**. In Agent, choose a project folder and keep **Ask first** on so you review every edit and command.
 
 Use **Unload model** in the top bar to free memory without quitting.
 
 ## Try /site
 
-Copy [the sample brief](examples/study-session/brief.md) into an empty folder and choose that folder in Agent. Type **/site**, press **Enter** to pick the skill, and send this:
+Copy [the sample brief](examples/study-session/brief.md) into an empty folder and choose that folder in Agent. Ask Pipkin to build the page in plain language.
 
 ~~~text
 Build a printable Study Session page in index.html using brief.md.
@@ -64,15 +64,35 @@ report the saved page.
 Pipkin plans the work, shows the proposed `index.html` as a diff for your approval, and finishes with a link that opens the saved page.
 
 > [!NOTE]
-> Small models don't always finish multi-step tasks. If a run stops early, send a steering note such as "Continue and verify the page", or use a larger model. Making `/site` reliable on 8B models is the top item on the roadmap.
+> Pipkin detects straightforward site requests and renders a first page from a checked content plan. Work’s editor handles interactive sites, larger projects, and updates to existing pages. You can also select `/site` from the slash menu.
 
-## What v1.0 includes
+## Create a document or presentation
+
+Select an Agent workspace, then ask for the output directly.
+
+- “Create a Word report named `meeting-notes.docx` from the attached notes.”
+- “Make a five-slide PowerPoint from `brief.md`.”
+- “Create a printable PDF handout from `brief.md`.”
+
+Pipkin previews the content for approval in **Ask first**, saves the file, and shows a clickable output. `/word`, `/powerpoint`, and `/pdf` are optional shortcuts. Office exports use editable text and templates. The PowerPoint template supports one to nine slides. Check the names, numbers, and wording in the preview before approving.
+
+## New in v1.1
+
+- **Deliverables in plain language.** Ask for a website, Word document, PowerPoint, or PDF. Pipkin plans the content with the model, then renders and checks the file itself.
+- **Work result card with undo.** Each run ends with the files it created or edited, the checks that actually ran on the current version, and the source pages it used. **Undo** restores a file's original and **Remove** deletes a file Pipkin created, but only while the file still matches what Pipkin saved, so your later edits are never overwritten.
+- **Plan first.** The model writes its own checklist before acting. It stays pinned above the timeline while thinking and actions appear below.
+- **Recovery.** Error-specific hints, a change of approach after a repeated failure, one recovery step before pausing, and commands that never exit are refused or stopped.
+- **Chat titles** written by the model after the first reply.
+- **Humanize** follows pasted instructions, has an essay mode for personal statements, and enforces word limits using an exact count that matches Google Docs.
+
+## What Pipkin includes
 
 | | |
 | --- | --- |
-| **Chat** | Saved chats and projects, file and image attachments, LaTeX, a thinking panel, optional web search, and context compaction |
-| **Agent** | Workspace file tools, plan and progress timeline, edit and command approvals, steering mid-run, stop after this step, resumable checkpoints |
-| **Long runs** | Prompt-cache-friendly context, a guard that catches looping reasoning, a 90-minute working-time limit that excludes your approval time, and nudges to start writing |
+| **Chat** | Saved chats and projects, model-written titles, file and image attachments, LaTeX, a thinking panel, optional web search, and context compaction |
+| **Agent** | Workspace file tools, a model-written plan, a progress timeline, edit and command approvals, steering mid-run, stop after this step, resumable checkpoints, and a result card with per-file undo |
+| **Deliverables** | Sites, Word documents, PowerPoint decks, and PDFs from plain-language requests, with link, archive, and page checks |
+| **Long runs** | Prompt-cache-friendly context, a guard that catches looping reasoning, recovery hints for failed actions, a six-minute active limit that excludes approval time, and a two-minute model-step limit |
 | **Skills** | `/site`, `/humanize`, `/humanize-paper`, and custom recipes |
 | **macOS** | Native window, built-in browser (tabs, Google search) and terminal, notifications when approval is needed, and the optional Sprig desktop pet |
 
@@ -89,12 +109,17 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 Pipkin's bet: the most useful local agent is the one that **finishes**. Each release is judged on how often a mid-size model completes a real task on an everyday Mac, how long that takes, and whether the Mac stays responsive.
 
-### v1.1: reliable deliverables
+### v1.1: reliable deliverables (released)
 
-- **A staged `/site` runner.** Code handles file discovery, rendering and link checks, and the model writes the content plan and the design. This fixes the two biggest 8B failure modes: exploring forever without writing, and stopping before verifying.
-- **A public benchmark.** Six fixture tasks: PDF to site, updating an existing page, a small code fix, and stop-and-resume. Each is graded on the files it leaves on disk. Track completion rate, time to first verified output, total time, and memory pressure for Pipkin and one other harness, using the same model and Mac. Results ship in the repo.
-- **Result cards you can trust and undo.** Every run ends with its outputs, the source pages it used, the checks it actually ran, and a diff. One click undoes Pipkin's edits, after checking you haven't changed those files since.
+- **Staged file creation** for sites, Word, PowerPoint, and PDF, with rendering and file checks handled by Pipkin.
+- **A Work benchmark.** [Six fixture tasks](benchmarks/README.md) graded on the files they leave on disk, with time to first verified output, total time, and memory use.
+- **Result cards you can trust and undo**, plus plan-first runs and recovery from stuck actions.
+
+### v1.2: ready for everyone
+
 - **Signed and notarized builds**, a clean-Mac install guide, and a chosen license.
+- **Live benchmark comparisons** with matched model, context, and Mac settings, published with the results.
+- **Undo for whole runs**, building on per-file undo.
 
 ### v2: long documents and long runs
 
@@ -115,7 +140,7 @@ Have an idea or a task Pipkin should finish? [Open an issue](https://github.com/
 
 ## Build from source
 
-The app targets macOS 12 or later. The v1.0 download was built and tested on Apple silicon. You need the Xcode Command Line Tools and Ollama.
+The app targets macOS 12 or later. The v1.1 download was built and tested on Apple silicon. You need the Xcode Command Line Tools and Ollama.
 
 ~~~sh
 git clone https://github.com/garywu000/pipkin.git
@@ -137,7 +162,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 | [`shell/`](shell/) | Native window, browser pane, Sprig, and macOS packaging |
 | [`dist/`](dist/) | Chat UI, skill menu, terminal panel, and Agent timeline |
 | [`server.py`](server.py) | Loopback server, Ollama session, terminal, and approvals |
-| [`agent.py`](agent.py) | Agent loop, workspace tools, context management, and site checks |
+| [`agent.py`](agent.py) | Agent loop, workspace tools, context management, recovery, undo, and site checks |
+| [`artifacts.py`](artifacts.py) | Content plans and rendering for sites, Word, PowerPoint, and PDF |
+| [`benchmarks/`](benchmarks/) | Work benchmark tasks, graders, and recorded baselines |
 | [`tests/`](tests/) | Agent and workspace regression tests |
 | [`docs/screenshots/`](docs/screenshots/) | Images used in this README |
 

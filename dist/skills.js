@@ -34,6 +34,18 @@
       ].join("\n"),
     },
     {
+      name: "word", icon: "file", description: "Write an editable Word document in the selected Work folder.",
+      instructions: "Create a structured Word document from the brief or attachments. Keep headings descriptive and preserve source facts.",
+    },
+    {
+      name: "powerpoint", icon: "file", description: "Build an editable PowerPoint deck in the selected Work folder.",
+      instructions: "Build a PowerPoint deck with a title slide and one main idea per slide. Keep slide text concise and cite supplied sources.",
+    },
+    {
+      name: "pdf", icon: "file", description: "Write a paginated PDF in the selected Work folder.",
+      instructions: "Create a readable PDF from the supplied material with a clear title, headings, source notes and page numbers.",
+    },
+    {
       name: "humanize", icon: "note", description: "Cut stiff phrasing and keep your voice. Tones include --warm, --direct, --professional, and --academic.",
       instructions: "Make light edits where phrasing feels stiff. Keep the writer's voice, meaning, and details.",
     },
@@ -62,6 +74,31 @@
       "Use the attached document or pasted excerpt. Cite its section or filename. Ask the user to attach the document if none is available." },
   ];
   const reserved = new Set([...starters, ...commands].map(({ name }) => name));
+  const workflows = { __proto__: null, site: "site", word: "word", powerpoint: "slides", pdf: "pdf" };
+  const deliverables = {
+    site: /\b(?:web\s?page|web\s?site|site|landing page|html page)\b|\.html?(?=\W|$)/i,
+    word: /\b(?:microsoft word|word (?:doc(?:ument)?|report)|(?:in|as) word|docx)\b|\.docx(?=\W|$)/i,
+    slides: /\b(?:powerpoint|pptx|slide deck|slides?|presentation)\b|\.pptx(?=\W|$)/i,
+    pdf: /\bpdf\b|\.pdf(?=\W|$)/i,
+  };
+
+  function detectWorkflow(text) {
+    const request = text.trimStart().replace(
+      /^(?:(?:please|can you|could you|would you|help me|i want you to|i['’]d like you to)\s+)+/i, "",
+    ).replace(/^(?:using|with|based on)\s+[^,\n]{1,220},\s*/i, "");
+    const action = request.match(/^(build|create|make|generate|write|draft|prepare|design|turn|convert|export|save|assemble|produce)\s+(.+)/i);
+    if (!action) return null;
+    let target = action[2].slice(0, 450);
+    if (/^(?:turn|convert)$/i.test(action[1])) {
+      target = target.match(/\b(?:into|as|to)\s+(.+)/i)?.[1] || "";
+    } else {
+      const destination = target.match(/\b(?:save|export)(?:\s+(?:it|this))?\s+(?:as|to)\s+(.+)/i);
+      const subject = target.split(/\s+(?:from|using|based on|of|about|for|with links? to)\s+/i, 1)[0];
+      target = destination ? subject + " " + destination[1] : subject;
+    }
+    const kinds = Object.keys(deliverables).filter((key) => deliverables[key].test(target));
+    return kinds.length === 1 ? kinds[0] : null;
+  }
   const names = /^[a-z][a-z0-9-]{0,31}$/;
   const stepDescriptions = {
     list_files: "Locate the relevant files.",
@@ -74,6 +111,7 @@
     edit_file: "Prepare the necessary edits using the current approval settings.",
     write_file: "Prepare the necessary files using the current approval settings.",
     write_page: "Build a page from the supplied content using the current approval settings.",
+    write_artifact: "Render and verify the requested file before saving it.",
     map_document: "Map source headings and anchors in one pass.",
     check_page: "Check the built page's local links and anchors.",
     run_command: "Run the relevant checks using the current approval settings.",
@@ -139,6 +177,6 @@
       (input ? "\n\nInput for this run\n" + input : "");
   }
 
-  window.PipkinSkills = { starters, commands, mentions, mentionAt, requestedMentions,
+  window.PipkinSkills = { starters, commands, mentions, workflows, detectWorkflow, mentionAt, requestedMentions,
     parse, customSkill, normalize, catalog, suggestions, fromRun, prompt };
 })();
