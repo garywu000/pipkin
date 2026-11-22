@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="Chat with and delegate tasks to your local model.">
+  <meta name="color-scheme" content="light dark">
+  <title>Pipkin</title>
+  <link rel="icon" href="/favicon.png" type="image/png">
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/vendor/katex.min.js" defer></script>
+  <script src="/ui.js" defer></script>
+  <script src="/agent-view.js" defer></script>
+  <script src="/skills.js" defer></script>
+  <script src="/chat.js" defer></script>
+  <script src="/vendor/xterm.js" defer></script>
+  <script src="/vendor/xterm-addon-webgl.js" defer></script>
+  <script src="/panels.js" defer></script>
+</head>
+<body>
+  <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+      <symbol id="i-new" viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/></symbol>
+      <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+      <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M19 12l-7 7-7-7"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9M7 6a8 8 0 1 0 10 0"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+      <symbol id="i-retry" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24"><path d="M21.17 6.81a2.82 2.82 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"/><path d="m15 5 4 4"/></symbol>
+      <symbol id="i-speak" viewBox="0 0 24 24"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z"/><path d="M16 9a5 5 0 0 1 0 6M19.4 18.4a9 9 0 0 0 0-12.8"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+      <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6M9 13h6"/></symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+      <symbol id="i-bulb" viewBox="0 0 24 24"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5M9 18h6M10 22h4"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+      <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+      <symbol id="i-list" viewBox="0 0 24 24"><path d="m3 17 2 2 4-4M3 7l2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
+      <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.14-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.14a.5.5 0 0 1 .96 0l1.58 6.14a2 2 0 0 0 1.44 1.44l6.14 1.58a.5.5 0 0 1 0 .96l-6.14 1.58a2 2 0 0 0-1.44 1.44l-1.58 6.14a.5.5 0 0 1-.96 0z"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4M12 17h.01"/></symbol>
+      <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></symbol>
+      <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+      <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></symbol>
+      <symbol id="i-note" viewBox="0 0 24 24"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8.6a2 2 0 0 0-.6-1.4l-4.6-4.6A2 2 0 0 0 13.4 2Z"/><path d="M8 13h8M8 17h5"/></symbol>
+      <symbol id="i-brain" viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></symbol>
+    </defs>
+  </svg>
+
+  <aside id="chat-sidebar" class="sidebar" aria-label="Chats">
+    <div class="sidebar-top">
+      <div class="brand"><img src="/favicon.png" alt="" width="26" height="26"><span>Pipkin</span></div>
+      <button id="collapse-sidebar" class="icon-button" type="button" title="Hide sidebar (⌘⇧S)" aria-label="Hide sidebar"><svg class="icon"><use href="#i-sidebar"/></svg></button>
+    </div>
+    <button id="new-chat" class="sidebar-primary" type="button"><svg class="icon"><use href="#i-new"/></svg><span>New chat</span><kbd>⌘⇧O</kbd></button>
+    <label class="sidebar-search">
+      <svg class="icon"><use href="#i-search"/></svg>
+      <span class="sr-only">Search chats</span>
+      <input id="chat-search" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false">
+      <kbd>⌘K</kbd>
+    </label>
+    <div id="sidebar-content" class="sidebar-content">
+      <section class="projects-section" aria-labelledby="projects-heading">
+        <div class="section-heading">
+          <h2 id="projects-heading">Projects</h2>
+          <button id="new-project" class="icon-button small" type="button" title="New project" aria-label="New project"><svg class="icon"><use href="#i-folder-plus"/></svg></button>
+        </div>
+        <div id="projects"></div>
+      </section>
+      <div class="section-heading"><h2 id="chats-heading">Chats</h2></div>
+      <p id="no-chats" class="no-chats">No saved chats yet</p>
+      <nav id="chat-list" class="chat-list" aria-labelledby="chats-heading"></nav>
+    </div>
+    <div class="sidebar-footer">
+      <button id="open-settings" class="sidebar-row" type="button"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span><kbd>⌘,</kbd></button>
+    </div>
+  </aside>
+  <div id="sidebar-scrim" class="sidebar-scrim" hidden></div>
+
+  <div id="chat-menu" class="menu" role="menu" aria-label="Chat actions" hidden>
+    <button id="pin-chat" type="button" role="menuitem"><svg class="icon"><use href="#i-pin"/></svg><span>Pin</span></button>
+    <button id="rename-chat" type="button" role="menuitem"><svg class="icon"><use href="#i-edit"/></svg><span>Rename</span></button>
+    <button id="move-chat" type="button" role="menuitem"><svg class="icon"><use href="#i-folder"/></svg><span>Move to project</span></button>
+    <button id="export-chat-menu" type="button" role="menuitem"><svg class="icon"><use href="#i-download"/></svg><span>Export as Markdown</span></button>
+    <button id="delete-chat" type="button" role="menuitem" class="danger"><svg class="icon"><use href="#i-trash"/></svg><span>Delete</span></button>
+  </div>
+
+  <dialog id="rename-dialog" aria-labelledby="rename-heading">
+    <form method="dialog" class="dialog-body">
+      <h2 id="rename-heading">Rename chat</h2>
+      <label for="rename-title">Chat name</label>
+      <input id="rename-title" type="text" maxlength="80" pattern=".*\S.*" required>
+      <div class="dialog-actions">
+        <button id="cancel-rename" type="button" class="button">Cancel</button>
+        <button type="submit" class="button primary" value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="project-dialog" aria-labelledby="project-heading">
+    <form method="dialog" class="dialog-body">
+      <h2 id="project-heading">New project</h2>
+      <label for="project-name">Project name</label>
+      <input id="project-name" type="text" maxlength="80" pattern=".*\S.*" required>
+      <label for="project-notes">Shared context</label>
+      <textarea id="project-notes" rows="5" maxlength="3000" placeholder="Goals, instructions, or facts for every chat in this project"></textarea>
+      <label class="check-row"><input id="project-share" type="checkbox" checked> <span>Use recent excerpts from other chats in this project</span></label>
+      <div class="dialog-actions">
+        <button type="submit" class="button" value="cancel" formnovalidate>Cancel</button>
+        <button type="submit" class="button primary" value="save">Save project</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="context-dialog" aria-labelledby="context-heading">
+    <form method="dialog" class="dialog-body">
+      <h2 id="context-heading">Chat context</h2>
+      <label for="chat-goal">Goal</label>
+      <textarea id="chat-goal" rows="3" maxlength="1800" placeholder="What should Pipkin help you finish in this chat?"></textarea>
+      <label for="chat-notes">Notes for this chat</label>
+      <textarea id="chat-notes" rows="5" maxlength="3000" placeholder="Instructions or background for this conversation"></textarea>
+      <p id="context-project" class="hint" hidden></p>
+      <details id="compacted-context" class="compacted-context" hidden>
+        <summary>Compacted context</summary>
+        <p id="compacted-context-text"></p>
+      </details>
+      <div class="dialog-actions">
+        <button type="submit" class="button" value="cancel">Cancel</button>
+        <button type="submit" class="button primary" value="save">Save context</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="move-dialog" aria-labelledby="move-heading">
+    <form method="dialog" class="dialog-body">
+      <h2 id="move-heading">Move chat</h2>
+      <label for="move-project">Project</label>
+      <select id="move-project"></select>
+      <div class="dialog-actions">
+        <button type="submit" class="button" value="cancel">Cancel</button>
+        <button type="submit" class="button primary" value="move">Move chat</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="delete-dialog" aria-labelledby="delete-heading">
+    <form method="dialog" class="dialog-body">
+      <h2 id="delete-heading">Delete chat?</h2>
+      <p id="delete-description"></p>
+      <div class="dialog-actions">
+        <button type="submit" class="button" value="cancel" autofocus>Cancel</button>
+        <button type="submit" class="button danger" value="delete">Delete chat</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="skills-dialog" aria-labelledby="skills-heading">
+    <div class="dialog-body">
+      <h2 id="skills-heading">Skills</h2>
+      <div id="skills-list" class="skills-list"></div>
+      <form method="dialog" class="dialog-actions">
+        <button type="submit" class="button">Close</button>
+        <button id="new-skill" type="button" class="button primary">New skill</button>
+      </form>
+    </div>
+  </dialog>
+  <dialog id="skill-editor" aria-labelledby="skill-editor-heading">
+    <form id="skill-form" class="dialog-body">
+      <h2 id="skill-editor-heading">New skill</h2>
+      <label for="skill-name">Slash name</label>
+      <input id="skill-name" type="text" maxlength="33" placeholder="review-notes" required>
+      <label for="skill-description">Short description</label>
+      <input id="skill-description" type="text" maxlength="120">
+      <label for="skill-instructions">Workflow steps</label>
+      <textarea id="skill-instructions" rows="7" maxlength="4000" required></textarea>
+      <p id="skill-error" class="hint" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="delete-skill" type="button" class="button danger" hidden>Delete skill</button>
+        <button id="cancel-skill" type="button" class="button">Cancel</button>
+        <button type="submit" class="button primary">Save skill</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-heading">
+    <div class="settings-shell">
+      <header class="settings-header">
+        <h2 id="settings-heading">Settings</h2>
+        <button id="close-settings" class="icon-button" type="button" aria-label="Close settings"><svg class="icon"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="settings-layout">
+        <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
+          <button type="button" role="tab" id="tab-general" aria-controls="panel-general" aria-selected="true"><svg class="icon"><use href="#i-settings"/></svg>General</button>
+          <button type="button" role="tab" id="tab-model" aria-controls="panel-model" aria-selected="false"><svg class="icon"><use href="#i-sparkle"/></svg>Model</button>
+          <button type="button" role="tab" id="tab-personal" aria-controls="panel-personal" aria-selected="false"><svg class="icon"><use href="#i-brain"/></svg>Personalization</button>
+          <button type="button" role="tab" id="tab-agent" aria-controls="panel-agent" aria-selected="false"><svg class="icon"><use href="#i-bot"/></svg>Agent</button>
+          <button type="button" role="tab" id="tab-data" aria-controls="panel-data" aria-selected="false"><svg class="icon"><use href="#i-download"/></svg>Data</button>
+        </nav>
+        <div class="settings-panels">
+          <section id="panel-general" role="tabpanel" aria-labelledby="tab-general">
+            <div class="setting">
+              <div><strong>Theme</strong><p>Match your system, or pick one.</p></div>
+              <div class="segmented" id="theme-choice" role="radiogroup" aria-label="Theme">
+                <label><input type="radio" name="theme" value="system"><span>System</span></label>
+                <label><input type="radio" name="theme" value="light"><span>Light</span></label>
+                <label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+              </div>
+            </div>
+            <div class="setting">
+              <div><strong>Send with Enter</strong><p>Off: use ⌘ Enter to send, Enter for a new line.</p></div>
+              <label class="switch"><input id="setting-enter" type="checkbox"><span></span><span class="sr-only">Send with Enter</span></label>
+            </div>
+            <div class="setting">
+              <div><strong>Show response stats</strong><p>Tokens and speed under each reply.</p></div>
+              <label class="switch"><input id="setting-stats" type="checkbox"><span></span><span class="sr-only">Show response stats</span></label>
+            </div>
+            <div class="setting stack">
+              <strong>Keyboard shortcuts</strong>
+              <dl class="shortcuts">
+                <dt><kbd>⌘</kbd><kbd>⇧</kbd><kbd>O</kbd></dt><dd>New chat</dd>
+                <dt><kbd>⌘</kbd><kbd>K</kbd></dt><dd>Search chats</dd>
+                <dt><kbd>⌘</kbd><kbd>⇧</kbd><kbd>S</kbd></dt><dd>Toggle sidebar</dd>
+                <dt><kbd>⌘</kbd><kbd>⇧</kbd><kbd>A</kbd></dt><dd>Switch Chat / Agent</dd>
+                <dt><kbd>⌘</kbd><kbd>,</kbd></dt><dd>Settings</dd>
+                <dt><kbd>/</kbd></dt><dd>Focus the message box</dd>
+                <dt><kbd>Esc</kbd></dt><dd>Stop the reply</dd>
+              </dl>
+            </div>
+          </section>
+          <section id="panel-model" role="tabpanel" aria-labelledby="tab-model" hidden>
+            <div class="setting stack">
+              <label for="setting-model"><strong>Model</strong></label>
+              <select id="setting-model"></select>
+              <p id="model-details" class="hint"></p>
+            </div>
+            <div class="setting stack">
+              <label for="setting-context"><strong>Context window</strong></label>
+              <select id="setting-context"></select>
+              <p class="hint">Larger windows remember more of the chat and let the agent read more files, but use more memory and load slower. 8K–16K suits a 27B model on 24 GB.</p>
+            </div>
+            <div class="setting stack">
+              <label for="setting-temperature"><strong>Creativity</strong> <output id="temperature-value"></output></label>
+              <input id="setting-temperature" type="range" min="0" max="1.5" step="0.05">
+              <div class="range-labels"><span>Precise</span><span>Balanced</span><span>Creative</span></div>
+            </div>
+          </section>
+          <section id="panel-personal" role="tabpanel" aria-labelledby="tab-personal" hidden>
+            <div class="setting stack">
+              <label for="setting-instructions"><strong>Custom instructions</strong></label>
+              <p class="hint">How should Pipkin respond? Applies to every chat and agent run.</p>
+              <textarea id="setting-instructions" rows="5" maxlength="4000" placeholder="e.g. Be concise. I'm a software engineer who prefers TypeScript examples."></textarea>
+            </div>
+            <div class="setting">
+              <div><strong>Memory</strong><p>Let Pipkin save and use facts you ask it to remember.</p></div>
+              <label class="switch"><input id="setting-memory" type="checkbox"><span></span><span class="sr-only">Memory</span></label>
+            </div>
+            <div class="setting stack">
+              <strong>Saved memories</strong>
+              <ul id="memory-list" class="memory-list"></ul>
+              <form id="memory-form" class="inline-form">
+                <label class="sr-only" for="memory-input">Add a memory</label>
+                <input id="memory-input" type="text" maxlength="300" placeholder="Add something to remember">
+                <button class="button" type="submit">Add</button>
+              </form>
+            </div>
+          </section>
+          <section id="panel-agent" role="tabpanel" aria-labelledby="tab-agent" hidden>
+            <div class="setting stack">
+              <strong>Permissions</strong>
+              <div class="choice-list" id="permission-choice" role="radiogroup" aria-label="Agent permissions">
+                <label><input type="radio" name="permission" value="read"><span><strong>Read only</strong><small>List, search and read files. No changes.</small></span></label>
+                <label><input type="radio" name="permission" value="ask"><span><strong>Ask before changes</strong><small>Approve each file edit and command.</small></span></label>
+                <label><input type="radio" name="permission" value="auto"><span><strong>Auto-approve edits</strong><small>Edits apply directly; commands still ask.</small></span></label>
+              </div>
+            </div>
+            <div class="setting">
+              <div><strong>Web search</strong><p>Auto lets the model search when a question needs current facts. Applies to Chat and Agent.</p></div>
+              <div class="segmented" id="setting-web" role="radiogroup" aria-label="Web search">
+                <label><input type="radio" name="web-mode" value="auto"><span>Auto</span></label>
+                <label><input type="radio" name="web-mode" value="on"><span>On</span></label>
+                <label><input type="radio" name="web-mode" value="off"><span>Off</span></label>
+              </div>
+            </div>
+            <div class="setting stack">
+              <label for="setting-steps"><strong>Step limit</strong></label>
+              <select id="setting-steps">
+                <option value="12">12 steps</option>
+                <option value="24">24 steps</option>
+                <option value="40">40 steps</option>
+                <option value="60">60 steps</option>
+              </select>
+              <p class="hint">The agent must finish within this many model turns.</p>
+            </div>
+          </section>
+          <section id="panel-data" role="tabpanel" aria-labelledby="tab-data" hidden>
+            <div class="setting">
+              <div><strong>Export current chat</strong><p>Download it as a Markdown file.</p></div>
+              <button id="export-chat" class="button" type="button">Export</button>
+            </div>
+            <div class="setting">
+              <div><strong>Export all data</strong><p>Every chat, project, memory and setting, as one JSON file.</p></div>
+              <button id="export-all" class="button" type="button">Export</button>
+            </div>
+            <div class="setting">
+              <div><strong>Import data</strong><p>Add chats from a Pipkin data file. Existing chats are kept; newer copies win.</p></div>
+              <button id="import-all" class="button" type="button">Import…</button>
+              <input id="import-file" type="file" accept="application/json,.json" hidden>
+            </div>
+            <div class="setting">
+              <div><strong>Storage</strong><p>Chats, projects and memories are stored by the app showing this page (the Pipkin app or your browser). Nothing leaves your Mac unless the agent uses the web.</p></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <main class="workspace">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="history-toggle" class="icon-button" type="button" aria-expanded="false" aria-controls="chat-sidebar" title="Show sidebar (⌘⇧S)" aria-label="Show sidebar"><svg class="icon"><use href="#i-sidebar"/></svg></button>
+        <button id="topbar-new" class="icon-button" type="button" title="New chat (⌘⇧O)" aria-label="New chat"><svg class="icon"><use href="#i-new"/></svg></button>
+        <label class="model-picker" title="Model">
+          <span class="sr-only">Model</span>
+          <select id="model-select"><option>Loading models…</option></select>
+          <svg class="icon"><use href="#i-chevron"/></svg>
+        </label>
+      </div>
+      <div class="topbar-session">
+        <fieldset id="app-mode" class="mode-switch" data-mode="chat">
+          <legend class="sr-only">Pipkin mode</legend>
+          <label><input type="radio" name="app-mode" value="chat" checked><span><svg class="icon"><use href="#i-chat"/></svg>Chat</span></label>
+          <label><input id="agent-mode" type="radio" name="app-mode" value="work"><span><svg class="icon"><use href="#i-bot"/></svg>Agent</span></label>
+        </fieldset>
+        <button id="active-chat-title" class="active-chat-title" type="button" hidden>
+          <svg class="icon" aria-hidden="true"><use id="active-chat-mode" href="#i-chat"/></svg>
+          <span id="active-chat-name"></span>
+          <svg class="icon rename-icon" aria-hidden="true"><use href="#i-edit"/></svg>
+        </button>
+      </div>
+      <div class="topbar-right">
+        <button id="toggle-terminal" class="icon-button" type="button" title="Terminal (⌃`)" aria-label="Terminal" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
+        <button id="toggle-browser" class="icon-button" type="button" title="Browser (⌘⇧B)" aria-label="Browser" aria-pressed="false" hidden><svg class="icon"><use href="#i-globe"/></svg></button>
+        <button id="chat-context" class="icon-button" type="button" title="Chat context" aria-label="Chat context"><svg class="icon"><use href="#i-note"/></svg><span id="context-dot" class="dot" hidden></span></button>
+        <button id="topbar-export" class="icon-button" type="button" title="Export chat as Markdown" aria-label="Export chat"><svg class="icon"><use href="#i-download"/></svg></button>
+        <button id="unload-model" class="icon-button" type="button" title="Unload local model and free RAM" aria-label="Unload local model" hidden><svg class="icon"><use href="#i-power"/></svg></button>
+        <div id="model-status" class="model-status" data-state="connecting" role="status"><span class="status-dot"></span><span id="status-label">Connecting</span></div>
+      </div>
+    </header>
+
+    <div class="conversation-frame">
+      <section id="conversation" class="conversation" aria-label="Conversation">
+        <div id="empty" class="empty">
+          <div class="welcome">
+            <img class="welcome-logo" src="/favicon.png" alt="" width="52" height="52">
+            <h1 id="welcome-heading">How can I help?</h1>
+            <p id="welcome-sub" class="welcome-sub">Private chat with your local model.</p>
+            <div id="suggestions" class="suggestions"></div>
+          </div>
+        </div>
+        <div id="messages" class="messages"></div>
+      </section>
+      <button id="scroll-bottom" class="scroll-bottom" type="button" aria-label="Scroll to latest" hidden><svg class="icon"><use href="#i-down"/></svg></button>
+      <nav id="turn-navigator" class="turn-navigator" aria-label="Conversation turns" hidden>
+        <div id="turn-markers" class="turn-markers"></div>
+        <div id="turn-preview" class="turn-preview" hidden>
+          <button id="jump-to-prompt" class="turn-jump" type="button"><strong>Prompt</strong><span id="prompt-preview"></span></button>
+          <button id="jump-to-reply" class="turn-jump" type="button"><strong>Reply</strong><span id="reply-preview"></span></button>
+        </div>
+      </nav>
+    </div>
+
+    <footer class="composer-area">
+      <form id="composer" class="composer">
+        <div id="feedback" class="feedback" role="status"></div>
+        <div class="composer-box">
+          <div id="draft-files" class="attachments draft" aria-label="Attachments" hidden></div>
+          <div id="skill-menu" class="skill-menu" role="listbox" aria-label="Commands and tools" hidden></div>
+          <label class="sr-only" for="prompt">Message</label>
+          <textarea id="prompt" rows="1" placeholder="Message Pipkin" maxlength="40000"></textarea>
+          <div class="composer-controls">
+            <div class="composer-options">
+              <input id="files" type="file" multiple hidden>
+              <button id="attach-files" type="button" class="tool-button icon-only" title="Add files, skills and more" aria-label="Add files, skills and more" aria-haspopup="menu"><svg class="icon"><use href="#i-plus"/></svg></button>
+              <button id="think-toggle" type="button" class="tool-button" aria-pressed="true" title="Think before answering"><svg class="icon"><use href="#i-bulb"/></svg><span>Think</span></button>
+              <button id="web-mode" type="button" class="tool-button" aria-haspopup="menu" title="Web search"><svg class="icon"><use href="#i-globe"/></svg><span id="web-mode-label">Auto</span></button>
+            </div>
+            <div class="composer-send">
+              <span id="token-meter" class="token-meter" title="Estimated context use"></span>
+              <button id="stop-after-step" class="tool-button" type="button" hidden>Stop after this step</button>
+              <button id="send" class="send-button" type="submit" disabled aria-label="Send"><svg class="icon"><use href="#i-up"/></svg></button>
+              <button id="stop" class="send-button stop" type="button" aria-label="Stop now" title="Stop now" hidden><svg class="icon"><use href="#i-stop"/></svg></button>
+            </div>
+          </div>
+        </div>
+        <div class="composer-meta">
+          <div id="agent-controls" class="meta-controls" hidden>
+            <button id="choose-workspace" type="button" class="meta-button" aria-haspopup="menu" title="Folder the agent works in"><svg class="icon"><use href="#i-folder"/></svg><span id="workspace-label">No folder</span><svg class="icon chev"><use href="#i-chevron"/></svg></button>
+            <button id="permission-button" type="button" class="meta-button" aria-haspopup="menu" title="What the agent may do"><svg class="icon"><use href="#i-shield"/></svg><span id="permission-label">Ask first</span><svg class="icon chev"><use href="#i-chevron"/></svg></button>
+          </div>
+          <p class="composer-note"><span id="active-project" hidden></span><span id="context-size">8K context</span><span id="compact-status" hidden></span><span>Runs locally · chats saved in this browser</span></p>
+        </div>
+      </form>
+    </footer>
+    <section id="terminal-panel" class="terminal-panel" aria-label="Terminal" hidden>
+      <div id="terminal-resize" class="terminal-resize" role="separator" aria-orientation="horizontal" aria-label="Resize terminal"></div>
+      <header class="terminal-bar">
+        <svg class="icon terminal-glyph"><use href="#i-terminal"/></svg>
+        <div id="terminal-tabs" class="terminal-tabs" role="tablist" aria-label="Terminals"></div>
+        <button id="terminal-new" class="icon-button small" type="button" title="New terminal" aria-label="New terminal"><svg class="icon"><use href="#i-plus"/></svg></button>
+        <button id="terminal-hide" class="icon-button small" type="button" title="Hide terminal (⌃`)" aria-label="Hide terminal"><svg class="icon"><use href="#i-down"/></svg></button>
+      </header>
+      <div id="terminal-host" class="terminal-host"></div>
+    </section>
+    <div id="drop-overlay" class="drop-overlay" hidden><div><svg class="icon"><use href="#i-clip"/></svg><strong>Drop files to attach</strong><span>PDF, Word, text or photos</span></div></div>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
