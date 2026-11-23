@@ -5,6 +5,7 @@
 // Build with shell/build.sh.
 
 #import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
 #import <WebKit/WebKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import "PipkinPet.h"
@@ -80,21 +81,24 @@ static NSColor *ParseCSSColor(NSString *css) {
 static NSColor *DefaultBackground(void) {
     return [NSColor colorWithName:nil dynamicProvider:^NSColor *(NSAppearance *appearance) {
         BOOL dark = [[appearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqual:NSAppearanceNameDarkAqua];
-        return dark ? [NSColor colorWithSRGBRed:0x16 / 255.0 green:0x18 / 255.0 blue:0x17 / 255.0 alpha:1]
-                    : [NSColor colorWithSRGBRed:0xfb / 255.0 green:0xfb / 255.0 blue:0xf9 / 255.0 alpha:1];
+        return dark ? [NSColor colorWithSRGBRed:0x0c / 255.0 green:0x0f / 255.0 blue:0x0e / 255.0 alpha:1]
+                    : [NSColor colorWithSRGBRed:0xed / 255.0 green:0xf3 / 255.0 blue:0xf1 / 255.0 alpha:1];
     }];
 }
 
 static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
-    NSString *spin = spinner ? @"<div class=s></div>" : @"";
+    NSString *spin = spinner ? @"<div class=orb><div class=s></div></div>" : @"";
     return [NSString stringWithFormat:
         @"<!doctype html><meta charset=utf-8><style>"
         @":root{color-scheme:light dark;font:15px -apple-system,sans-serif}"
-        @"body{margin:0;height:100vh;display:grid;place-items:center;background:#fbfbf9;color:#4a4f4b;text-align:center}"
-        @"@media(prefers-color-scheme:dark){body{background:#161817;color:#c5c9c4}}"
-        @"h1{font-size:17px;font-weight:600;margin:14px 0 6px}p{margin:0;max-width:420px;line-height:1.5;opacity:.8}"
-        @".s{width:22px;height:22px;margin:auto;border-radius:50%%;border:2.5px solid #1f7a5333;border-top-color:#1f7a53;animation:r .8s linear infinite}"
-        @"@keyframes r{to{transform:rotate(360deg)}}</style><div>%@<h1>%@</h1><p>%@</p></div>", spin, title, detail];
+        @"body{margin:0;height:100vh;display:grid;place-items:center;background:#edf3f1;background-image:radial-gradient(60%% 50%% at 50%% 0%%,rgb(16 172 118/.2),rgb(14 165 233/.08) 52%%,transparent 80%%);color:#36453f;text-align:center}"
+        @"@media(prefers-color-scheme:dark){body{background:#0c0f0e;background-image:radial-gradient(60%% 50%% at 50%% 0%%,rgb(62 213 152/.12),rgb(56 217 217/.05) 52%%,transparent 80%%);color:#c2cbc6}.orb{background:rgb(20 25 24/.8);border-color:#222b28}.s{border-color:#3ed59833;border-top-color:#3ed598}}"
+        @".wrap{animation:up .48s cubic-bezier(.16,1,.3,1) both}"
+        @".orb{width:54px;height:54px;margin:0 auto 14px;border-radius:16px;display:grid;place-items:center;background:rgb(255 255 255/.85);border:1px solid #cddbd5;box-shadow:0 12px 32px rgb(10 42 30/.12)}"
+        @"h1{font-size:18px;font-weight:650;letter-spacing:-.025em;margin:0 0 6px}p{margin:0;max-width:420px;line-height:1.5;opacity:.78}"
+        @".s{width:22px;height:22px;border-radius:50%%;border:2.5px solid #0d8a5e33;border-top-color:#0d8a5e;animation:r .72s linear infinite}"
+        @"@keyframes r{to{transform:rotate(360deg)}}@keyframes up{from{opacity:0;transform:translateY(10px) scale(.97)}}"
+        @"</style><div class=wrap>%@<h1>%@</h1><p>%@</p></div>", spin, title, detail];
 }
 
 #pragma mark - Window
@@ -207,11 +211,24 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
         return;
     }
     CGFloat total = self.split.bounds.size.width;
+    self.browser.wantsLayer = YES;
     if (!show) {
         [[NSUserDefaults standardUserDefaults] setDouble:self.browser.frame.size.width forKey:@"BrowserPaneWidth"];
-        self.browser.hidden = YES;
-        [self.split adjustSubviews];
-        [self.window makeFirstResponder:self.webView];
+        __weak PipkinWindow *weakSelf = self;
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = 0.22;
+            ctx.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.22f :1.0f :0.36f :1.0f];
+            ctx.allowsImplicitAnimation = YES;
+            weakSelf.browser.animator.alphaValue = 0.0;
+            [weakSelf.split setPosition:total ofDividerAtIndex:0];
+            [weakSelf.split layoutSubtreeIfNeeded];
+        } completionHandler:^{
+            if (!weakSelf) return;
+            weakSelf.browser.hidden = YES;
+            weakSelf.browser.alphaValue = 1.0;
+            [weakSelf.split adjustSubviews];
+            [weakSelf.window makeFirstResponder:weakSelf.webView];
+        }];
     } else {
         // Widen a small window so the chat keeps room next to the browser.
         double saved = [[NSUserDefaults standardUserDefaults] doubleForKey:@"BrowserPaneWidth"];
@@ -222,14 +239,25 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
             CGFloat grow = MIN(420 + width - total, NSMaxX(screen) - NSMaxX(frame));
             if (grow > 0) {
                 frame.size.width += grow;
-                [self.window setFrame:frame display:YES animate:NO];
+                [self.window setFrame:frame display:YES animate:YES];
                 total = self.split.bounds.size.width;
             }
             width = MAX(320, MIN(width, total - 420));
         }
+        CGFloat target = total - width - self.split.dividerThickness;
+        self.browser.alphaValue = 0.0;
         self.browser.hidden = NO;
         [self.split adjustSubviews];
-        [self.split setPosition:total - width - self.split.dividerThickness ofDividerAtIndex:0];
+        [self.split setPosition:total - 1 ofDividerAtIndex:0];
+        __weak PipkinWindow *weakSelf = self;
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = 0.26;
+            ctx.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.22f :1.0f :0.36f :1.0f];
+            ctx.allowsImplicitAnimation = YES;
+            weakSelf.browser.animator.alphaValue = 1.0;
+            [weakSelf.split setPosition:target ofDividerAtIndex:0];
+            [weakSelf.split layoutSubtreeIfNeeded];
+        } completionHandler:nil];
         [self.browser loadHomeIfEmpty];
     }
     [self runJS:[NSString stringWithFormat:@"window.PipkinPanels && PipkinPanels.browserState(%@)", show ? @"true" : @"false"]];
@@ -402,10 +430,20 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
     if ([body[@"type"] isEqual:@"theme"] && [body[@"background"] isKindOfClass:[NSString class]]) {
         NSColor *color = ParseCSSColor(body[@"background"]);
         if (color) self.window.backgroundColor = color;
+        NSString *scheme = [body[@"scheme"] isKindOfClass:[NSString class]] ? body[@"scheme"] : nil;
+        if ([scheme isEqual:@"dark"]) self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+        else if ([scheme isEqual:@"light"]) self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+        else self.window.appearance = nil;
         return;
     }
     if ([body[@"type"] isEqual:@"browser"]) {
         if ([body[@"action"] isEqual:@"toggle"]) [self toggleBrowser];
+        else if ([body[@"action"] isEqual:@"show"]) [self showBrowser:YES];
+        else if ([body[@"action"] isEqual:@"hide"]) [self showBrowser:NO];
+        else if ([body[@"action"] isEqual:@"navigate"] && [body[@"query"] isKindOfClass:[NSString class]]) {
+            [self showBrowser:YES];
+            [self.browser openInput:body[@"query"]];
+        }
         else if ([body[@"action"] isEqual:@"agent"] && [body[@"id"] isKindOfClass:[NSString class]]) {
             [self agentBrowserRequest:body];
         }

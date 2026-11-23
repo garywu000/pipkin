@@ -126,3 +126,109 @@ class RepeatedFailureTest(PlanFirstTest):
         self.assertIn("(Recovery: Check the exact path with list_files", outputs[0])
         self.assertIn("failed the same way before", outputs[1])
         self.assertTrue(any(event == "notice" and "Same problem twice" in data["text"] for event, data in events))
+
+    def test_builtin_tool_name_in_run_command_is_refused_before_approval(self):
+        approvals = []
+        replies = iter([
+            {"tool_calls": [tool("run_command", command="check_page index.html")]},
+            {"content": "I will call check_page directly."},
+        ])
+        seen = []
+
+        def model(messages, _tools, _think):
+            seen.append(messages)
+            return next(replies)
+
+        Agent(model, lambda *_, **__: None, lambda: None, lambda *a: approvals.append(a) or True,
+              workspace=self.workspace, mode="ask", web=False).run("System", [], "Verify index.html.")
+        self.assertEqual(approvals, [], "built-in tool mistake should be caught before asking for shell approval")
+        tool_msg = next(m["content"] for m in seen[-1] if m["role"] == "tool")
+        self.assertIn("built-in Pipkin tool", tool_msg)
+        self.assertIn("`check_page`", tool_msg)
+
+    def test_check_page_is_available_in_default_workspace_mode(self):
+        tools = agent.available_tools(self.workspace, mode="ask", web=False, memory=False, workflow=None)
+        names = {item["function"]["name"] for item in tools}
+        self.assertIn("check_page", names)
+
+    def test_unavailable_builtin_tool_in_run_command_says_not_enabled(self):
+        replies = iter([
+            {"tool_calls": [tool("run_command", command="web_search python")]},
+            {"content": "Skipping web search."},
+        ])
+        seen = []
+
+        def model(messages, _tools, _think):
+            seen.append(messages)
+            return next(replies)
+
+        Agent(model, lambda *_, **__: None, lambda: None, lambda *_: True,
+              workspace=self.workspace, mode="ask", web=False).run("System", [], "Check docs.")
+        tool_msg = next(m["content"] for m in seen[-1] if m["role"] == "tool")
+        self.assertIn("not enabled in this session", tool_msg)
+        self.assertNotIn("Call the `web_search` tool directly", tool_msg)
+
+    def test_duplicate_run_command_is_skipped_until_workspace_changes(self):
+        approvals = []
+        replies = iter([
+            {"tool_calls": [tool("run_command", command="echo ok")]},
+            {"tool_calls": [tool("run_command", command="echo ok")]},
+            {"tool_calls": [tool("write_file", path="note.txt", content="hi\n")]},
+            {"tool_calls": [tool("run_command", command="echo ok")]},
+            {"content": "Done."},
+        ])
+        seen = []
+
+        def model(messages, _tools, _think):
+            seen.append(messages)
+            return next(replies)
+
+        Agent(model, lambda *_, **__: None, lambda: None, lambda *a: approvals.append(a) or True,
+              workspace=self.workspace, mode="auto", web=False).run("System", [], "Run check.")
+        cmd_approvals = [a for a in approvals if a[0] == "command"]
+        self.assertEqual(len(cmd_approvals), 2, "second identical command before any edit should not re-prompt")
+        tool_msgs = [m["content"] for m in seen[-1] if m["role"] == "tool"]
+        self.assertIn("already ran with no workspace changes", tool_msgs[1])
+
+    def test_html_write_auto_runs_check_page_in_default_mode(self):
+        self.workspace.write_text("notes.md", "# Notes\n")
+        replies = iter([
+            {"tool_calls": [tool("write_file", path="index.html", content='<a href="notes.md">Notes</a>')]},
+            {"content": "Created index.html."},
+        ])
+        seen = []
+
+        def model(messages, _tools, _think):
+            seen.append(messages)
+            return next(replies)
+
+        work = Agent(model, lambda *_, **__: None, lambda: None, lambda *_: True,
+                     workspace=self.workspace, mode="auto", web=False)
+        work.run("System", [], "Create index.html.")
+        tool_msg = next(m["content"] for m in seen[-1] if m["role"] == "tool")
+        self.assertIn("static link and anchor check", tool_msg)
+        self.assertTrue(any(o["path"] == "index.html" and o.get("checks") for o in work.outputs))
+
+    def test_agent_panels_keeps_browser_method_callable(self):
+        import server
+        panels = server.AgentPanels({"changed": None, "browser": {}}, lambda *_, **__: None, None, True, self.workspace.path)
+        self.assertTrue(panels.has_browser)
+        self.assertTrue(callable(panels.browser))
+        names = {t["function"]["name"] for t in agent.available_tools(self.workspace, "ask", False, False, panels=panels)}
+        self.assertIn("browser_open", names)
+        self.assertIn("browser_read", names)
+        self.assertIn("terminal_read", names)
+        self.assertIn("terminal_run", names)
+        restricted = server.AgentPanels({"changed": None, "browser": {}}, lambda *_, **__: None, None, False, self.workspace.path, allow_terminal=False)
+        restricted_names = {t["function"]["name"] for t in agent.available_tools(self.workspace, "ask", False, False, panels=restricted)}
+        self.assertNotIn("browser_open", restricted_names)
+        self.assertNotIn("terminal_read", restricted_names)
+        self.assertNotIn("terminal_run", restricted_names)
+
+    def test_thought_watch_catches_repeated_content_output(self):
+        import server
+        watch = server.ThoughtWatch(window=120, limit=None, every=100, message="repeated output")
+        chunk = "This exact sentence keeps repeating over and over again in the model output without making progress. "
+        with self.assertRaisesRegex(server.ThinkingLoop, "repeated output"):
+            for _ in range(10):
+                watch.add(chunk)

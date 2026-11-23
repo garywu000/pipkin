@@ -5,7 +5,7 @@
 <p align="center"><strong>A local AI chat and workspace agent for the Mac you already have.</strong><br>
 Turn your own files into finished work with a model that runs on your machine.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v1.1.0"><strong>Download v1.1</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v1.2.0"><strong>Download v1.2</strong></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#try-site">Try /site</a> ·
   <a href="#roadmap">Roadmap</a> ·
@@ -45,7 +45,7 @@ The goal is narrow on purpose: help a mid-size local model, on an ordinary Mac, 
    ~~~sh
    ollama pull qwen3:8b
    ~~~
-2. Download the [v1.1 release](https://github.com/garywu000/pipkin/releases/tag/v1.1.0), unzip it, and open Pipkin. This build is Apple silicon only and ad-hoc signed. If macOS blocks it, [build it yourself](#build-from-source).
+2. Download the [v1.2 release](https://github.com/garywu000/pipkin/releases/tag/v1.2.0), unzip it, and open Pipkin. This build is Apple silicon only and ad-hoc signed. If macOS blocks it, [build it yourself](#build-from-source).
 3. Pick your model in the top bar, then choose **Chat** or **Agent**. In Agent, choose a project folder and keep **Ask first** on so you review every edit and command.
 
 Use **Unload model** in the top bar to free memory without quitting.
@@ -75,6 +75,13 @@ Select an Agent workspace, then ask for the output directly.
 - “Create a printable PDF handout from `brief.md`.”
 
 Pipkin previews the content for approval in **Ask first**, saves the file, and shows a clickable output. `/word`, `/powerpoint`, and `/pdf` are optional shortcuts. Office exports use editable text and templates. The PowerPoint template supports one to nine slides. Check the names, numbers, and wording in the preview before approving.
+
+## New in v1.2
+
+- **Harness panel.** Open saved outputs from Review and switch between the browser and terminal in Pipkin.
+- **Undo All.** Review which files were restored, removed, or skipped if a multi-file undo stops.
+- **Model telemetry and usage.** See current model memory and lifetime token counts in Settings.
+- **Desktop polish.** First-run setup with five palettes, resizable chat history, scrolling titles, and text attachments for long pastes.
 
 ## New in v1.1
 
@@ -115,13 +122,14 @@ Pipkin's bet: the most useful local agent is the one that **finishes**. Each rel
 - **A Work benchmark.** [Six fixture tasks](benchmarks/README.md) graded on the files they leave on disk, with time to first verified output, total time, and memory use.
 - **Result cards you can trust and undo**, plus plan-first runs and recovery from stuck actions.
 
-### v1.2: ready for everyone
+### After v1.2
 
 - **Signed and notarized builds**, a clean-Mac install guide, and a chosen license.
 - **Live benchmark comparisons** with matched model, context, and Mac settings, published with the results.
-- **Undo for whole runs**, building on per-file undo.
 
 ### v2: long documents and long runs
+
+- **Windows app.** Start with local Chat, then add folder-based Agent work with approvals and undo.
 
 - **Document-first workflows.** Drop in a PDF packet, syllabus, or brief and get a navigable site, a study guide, or a checklist, with every claim linked to its page.
 - **Working memory that survives trimming.** The agent keeps short notes of what it has learned, so it stops re-reading files it already read.
@@ -140,7 +148,7 @@ Have an idea or a task Pipkin should finish? [Open an issue](https://github.com/
 
 ## Build from source
 
-The app targets macOS 12 or later. The v1.1 download was built and tested on Apple silicon. You need the Xcode Command Line Tools and Ollama.
+The app targets macOS 12 or later. The v1.2 download was built and tested on Apple silicon. You need the Xcode Command Line Tools and Ollama.
 
 ~~~sh
 git clone https://github.com/garywu000/pipkin.git

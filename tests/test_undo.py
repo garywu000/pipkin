@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from agent import Agent, UndoConflict, UndoStore, Workspace
 import artifacts
@@ -93,6 +94,84 @@ class UndoTest(unittest.TestCase):
         self.assertTrue((self.root / "agenda.docx").exists())
         self.assertEqual(self.store.apply(self.workspace, self.undo_id("agenda.docx"))["action"], "removed")
         self.assertFalse((self.root / "agenda.docx").exists())
+
+    def test_apply_many_undoes_entire_run_atomically(self):
+        (self.root / "notes.md").write_text("Before\n")
+        self.run_agent([
+            {"tool_calls": [
+                tool("edit_file", path="notes.md", old_text="Before", new_text="After"),
+                tool("write_file", path="extra.txt", content="Created by Pipkin\n"),
+            ]},
+            {"content": "Done."},
+        ])
+        notes_id = self.undo_id("notes.md")
+        extra_id = self.undo_id("extra.txt")
+        outcome = self.store.apply_many(self.workspace, [notes_id, extra_id, notes_id])
+        self.assertEqual(
+            outcome["results"],
+            [
+                {"id": notes_id, "action": "restored", "path": "notes.md"},
+                {"id": extra_id, "action": "removed", "path": "extra.txt"},
+            ],
+        )
+        self.assertEqual((self.root / "notes.md").read_text(), "Before\n")
+        self.assertFalse((self.root / "extra.txt").exists())
+
+    def test_apply_many_leaves_all_files_untouched_on_conflict(self):
+        (self.root / "notes.md").write_text("Before\n")
+        self.run_agent([
+            {"tool_calls": [
+                tool("edit_file", path="notes.md", old_text="Before", new_text="After"),
+                tool("write_file", path="extra.txt", content="Created by Pipkin\n"),
+            ]},
+            {"content": "Done."},
+        ])
+        notes_id = self.undo_id("notes.md")
+        extra_id = self.undo_id("extra.txt")
+        (self.root / "extra.txt").write_text("Created by Pipkin\nUser kept editing\n")
+        with self.assertRaises(UndoConflict) as ctx:
+            self.store.apply_many(self.workspace, [notes_id, extra_id])
+        self.assertIn(extra_id, ctx.exception.conflicts)
+        self.assertNotIn(notes_id, ctx.exception.conflicts)
+        # Neither file was touched because preflight caught the conflict first.
+        self.assertEqual((self.root / "notes.md").read_text(), "After\n")
+        self.assertIn("User kept editing", (self.root / "extra.txt").read_text())
+        # The unchanged file can still be undone individually.
+        self.assertEqual(self.store.apply(self.workspace, notes_id)["action"], "restored")
+        self.assertEqual((self.root / "notes.md").read_text(), "Before\n")
+
+    def test_apply_many_rejects_empty_and_wrong_folder(self):
+        undo_id = self.store.record(self.workspace, "a.txt", None, b"x")
+        with self.assertRaisesRegex(ValueError, "Invalid undo"):
+            self.store.apply_many(self.workspace, [])
+        other = TemporaryDirectory(prefix="pipkin-undo-other-")
+        self.addCleanup(other.cleanup)
+        with self.assertRaisesRegex(ValueError, "different folder"):
+            self.store.apply_many(Workspace(other.name), [undo_id])
+
+    def test_apply_many_reports_partial_work_and_keeps_failed_file_intact(self):
+        paths = ("first.txt", "second.txt", "third.txt")
+        ids = []
+        for path in paths:
+            (self.root / path).write_text("After")
+            ids.append(self.store.record(self.workspace, path, "Before", b"After"))
+
+        restore = self.workspace.restore_text
+
+        def restore_or_fail(path, content, expected_digest):
+            if path == "second.txt":
+                with patch("agent.os.fsync", side_effect=OSError("Simulated disk error")):
+                    return restore(path, content, expected_digest)
+            return restore(path, content, expected_digest)
+
+        with patch.object(self.workspace, "restore_text", side_effect=restore_or_fail):
+            outcome = self.store.apply_many(self.workspace, ids)
+        self.assertEqual(outcome["results"], [{"id": ids[0], "action": "restored", "path": paths[0]}])
+        self.assertIn("Undid 1 of 3 files", outcome["error"])
+        self.assertEqual(set(outcome["issues"]), set(ids[1:]))
+        self.assertEqual([(self.root / path).read_text() for path in paths], ["Before", "After", "After"])
+        self.assertEqual(list(self.root.glob(".pipkin-*")), [])
+        self.assertEqual(len(self.store.apply_many(self.workspace, ids[1:])["results"]), 2)
 
 
 if __name__ == "__main__":

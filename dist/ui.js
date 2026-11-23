@@ -56,9 +56,15 @@
     const box = document.getElementById("toast");
     if (!box) return;
     box.textContent = message;
+    box.classList.remove("toast-pop");
     box.hidden = false;
+    void box.offsetWidth;
+    box.classList.add("toast-pop");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { box.hidden = true; }, 1800);
+    toastTimer = setTimeout(() => {
+      box.hidden = true;
+      box.classList.remove("toast-pop");
+    }, 2000);
   }
 
   async function copyText(text, button) {

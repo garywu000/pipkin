@@ -388,12 +388,14 @@ class WorkCheckpoint:
 
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
+    "/welcome": ("index.html", "text/html; charset=utf-8"),
     "/favicon.png": ("favicon.png", "image/png"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/ui.js": ("ui.js", "text/javascript; charset=utf-8"),
     "/skills.js": ("skills.js", "text/javascript; charset=utf-8"),
     "/agent-view.js": ("agent-view.js", "text/javascript; charset=utf-8"),
     "/chat.js": ("chat.js", "text/javascript; charset=utf-8"),
+    "/onboarding.js": ("onboarding.js", "text/javascript; charset=utf-8"),
     "/panels.js": ("panels.js", "text/javascript; charset=utf-8"),
     "/vendor/katex.min.js": ("vendor/katex.min.js", "text/javascript; charset=utf-8"),
     "/vendor/xterm.js": ("vendor/xterm.js", "text/javascript; charset=utf-8"),
@@ -562,6 +564,88 @@ def set_residency(keep_alive, model, num_ctx, *, timeout=60, cancelable=False):
         connection.close()
 
 
+_TOTAL_RAM = None
+
+
+def parse_pressure_level(raw):
+    """Map macOS kern.memorystatus_vm_pressure_level (1=normal, 2=warning, 4=critical)."""
+    value = str(raw or "").strip()
+    if value == "1":
+        return "normal"
+    if value == "2":
+        return "warning"
+    if value == "4":
+        return "critical"
+    return "unknown"
+
+
+def memory_pressure():
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+            capture_output=True, text=True, timeout=1.0, check=False,
+        )
+        return parse_pressure_level(result.stdout) if result.returncode == 0 else "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def total_memory_bytes():
+    global _TOTAL_RAM
+    if _TOTAL_RAM is not None:
+        return _TOTAL_RAM
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.memsize"],
+            capture_output=True, text=True, timeout=1.0, check=False,
+        )
+        _TOTAL_RAM = int(result.stdout.strip()) if result.returncode == 0 else 0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        _TOTAL_RAM = 0
+    return _TOTAL_RAM
+
+
+def parse_running_models(payload):
+    items = []
+    for entry in (payload or {}).get("models") or []:
+        if not isinstance(entry, dict) or not entry.get("name"):
+            continue
+        size = int(entry.get("size") or 0)
+        vram = int(entry.get("size_vram") or 0)
+        ctx = int(entry.get("context_length") or 0)
+        items.append({
+            "name": str(entry["name"]),
+            "size": max(0, size),
+            "size_vram": max(0, vram),
+            "context_length": max(0, ctx),
+            "expires_at": str(entry.get("expires_at") or ""),
+        })
+    return items
+
+
+def running_models():
+    try:
+        connection, response = ollama_request("GET", "/api/ps", timeout=1.5)
+    except (OSError, http.client.HTTPException):
+        return []
+    try:
+        if response.status != 200:
+            return []
+        return parse_running_models(json.load(response))
+    except (OSError, http.client.HTTPException, ValueError):
+        return []
+    finally:
+        connection.close()
+
+
+def system_telemetry():
+    return {
+        "pressure": memory_pressure(),
+        "total_ram": total_memory_bytes(),
+        "loaded": running_models(),
+    }
+
+
 def undo_store(port):
     """Undo history for this server's port, kept next to the settings file and capped in size."""
     return UndoStore(SETTINGS_FILE.parent / "undo" / str(port))
@@ -579,8 +663,10 @@ class ModelGlitch(Exception):
     """Ollama's runner failed mid-generation (for example after a macOS GPU reset)."""
 
 
-AGENT_TIME_LIMIT = 6 * 60
-AGENT_STEP_TIME_LIMIT = 2 * 60
+AGENT_TIME_LIMIT = 10 * 60
+AGENT_STEP_IDLE_LIMIT = 3 * 60
+AGENT_STEP_ACTIVE_LIMIT = 5 * 60
+AGENT_STEP_TIME_LIMIT = AGENT_STEP_ACTIVE_LIMIT
 
 
 class ThinkingLoop(Exception):
@@ -588,27 +674,31 @@ class ThinkingLoop(Exception):
 
 
 class ThoughtWatch:
-    """Watches a step's streamed reasoning and stops it when it loops or rambles.
+    """Watches a step's streamed reasoning or output and stops it when it loops or rambles.
 
     Small quantized models sometimes fall into restating the same paragraph forever; at ~10 tokens a second
-    that silently burns many minutes. A repeated 240-character tail, or 16,000 characters with no action, ends the step.
+    that silently burns many minutes. A repeated tail, or exceeding limit with no action, ends the step.
     """
     WINDOW, LIMIT, EVERY = 240, 16_000, 400
 
-    def __init__(self):
+    def __init__(self, *, window=None, limit=None, every=None, message=None):
+        self.window = self.WINDOW if window is None else window
+        self.limit = self.LIMIT if limit is None else limit
+        self.every = self.EVERY if every is None else every
+        self.message = message or "The model started repeating the same thoughts, so this step was cut short."
         self.text, self.checked = "", 0
 
     def add(self, piece):
         self.text += piece
-        if len(self.text) > self.LIMIT:
+        if self.limit is not None and len(self.text) > self.limit:
             raise ThinkingLoop("The model thought for a long time without acting, so this step was cut short.")
-        if len(self.text) - self.checked < self.EVERY or len(self.text) < 3 * self.WINDOW:
+        if len(self.text) - self.checked < self.every or len(self.text) < 3 * self.window:
             return
         self.checked = len(self.text)
-        tail = " ".join(self.text[-self.WINDOW:].split())
-        earlier = " ".join(self.text[:-self.WINDOW].split())
-        if tail in earlier:
-            raise ThinkingLoop("The model started repeating the same thoughts, so this step was cut short.")
+        tail = " ".join(self.text[-self.window:].split())
+        earlier = " ".join(self.text[:-self.window].split())
+        if len(tail) >= self.window // 2 and tail in earlier:
+            raise ThinkingLoop(self.message)
 
 
 GLITCH_MARKERS = ("compute error", "command buffer", "failed to compute", "llama runner process has terminated")
@@ -834,8 +924,9 @@ class AgentPanels:
     """What an agent run may use of the user's terminal panel and browser pane. Browser requests go
     through the page (the pane is native), which posts the result to /api/agent/browser."""
 
-    def __init__(self, run, emit, terminal_id, browser, cwd):
-        self.run, self.emit, self.terminal_id, self.browser, self.cwd = run, emit, terminal_id, browser, cwd
+    def __init__(self, run, emit, terminal_id, browser, cwd, *, allow_terminal=True):
+        self.run, self.emit, self.terminal_id = run, emit, terminal_id if allow_terminal else None
+        self.has_browser, self.has_terminal, self.cwd = bool(browser), bool(allow_terminal), cwd
 
     def terminal(self):
         terminal = TERMINALS.get(self.terminal_id) if self.terminal_id else None
@@ -865,17 +956,23 @@ class AgentPanels:
                 return terminal_text(bytes(terminal.output[first - terminal.start:])).split("\n")
 
         deadline, seen, last_change, finished = time.monotonic() + 20, start, time.monotonic(), False
+        prompt_suffixes = ("%", "$", "#", "❯", "›", "➜", ">")
         while time.monotonic() < deadline:
             check()
             _, offset, code = terminal.read(seen, 0.4)
             if offset != seen:
                 seen, last_change = offset, time.monotonic()
             lines = captured()
-            # Done when the shell prints its prompt again, or (prompt unknown) after a quiet spell.
-            if code is not None or (prompt and len(lines) >= 2 and lines[-1].strip() == prompt):
+            last_line = lines[-1].strip() if lines else ""
+            quiet = time.monotonic() - last_change
+            # Done when the shell exits, prints its prompt again, or settles quietly on a prompt (even if exit status changed it).
+            if code is not None or (prompt and len(lines) >= 2 and last_line == prompt):
                 finished = True
                 break
-            if not prompt and time.monotonic() - last_change > 4:
+            if seen != start and len(lines) >= 2 and quiet > 1.8 and last_line.endswith(prompt_suffixes):
+                finished = True
+                break
+            if seen != start and quiet > (4.0 if not prompt else 5.0):
                 finished = True
                 break
         lines = captured()
@@ -1117,6 +1214,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(503 if SESSIONS.stopping else 200, {"app": "local.browser-model"})
         elif self.path == "/api/models":
             self.list_models()
+        elif self.path == "/api/telemetry":
+            self.send_json(200, system_telemetry())
         elif self.path == "/api/usage":
             try:
                 usage = token_usage()
@@ -1180,6 +1279,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/agent/undo":
             self.undo_file()
+            return
+        if self.path == "/api/agent/undo-run":
+            self.undo_run()
             return
         if self.path == "/api/agent/forget":
             self.forget_workspace()
@@ -1447,6 +1549,35 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": str(error)})
         except OSError:
             self.send_json(503, {"error": "Pipkin could not change that file. Check that it is not open elsewhere."})
+
+    def undo_run(self):
+        """Check the whole run before undoing files and return any partial results."""
+        try:
+            payload = self.read_json(4096)
+            key, undo_ids = payload["workspace"], payload["ids"]
+            if (
+                not valid_workspace_key(key)
+                or not isinstance(undo_ids, list)
+                or not 1 <= len(undo_ids) <= 50
+                or not all(isinstance(item, str) for item in undo_ids)
+            ):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            self.send_json(400, {"error": "Invalid undo request."})
+            return
+        workspace = authorized_workspace(key)
+        if workspace is None:
+            self.send_json(403, {"error": "Choose this run's workspace folder again to undo it.", "code": "workspace_required"})
+            return
+        try:
+            result = undo_store(self.server.server_port).apply_many(workspace, undo_ids)
+            self.send_json(409 if "error" in result else 200, result)
+        except UndoConflict as conflict:
+            self.send_json(409, {"error": str(conflict), "conflict": True, "conflicts": conflict.conflicts})
+        except ValueError as error:
+            self.send_json(400, {"error": str(error)})
+        except OSError:
+            self.send_json(503, {"error": "Pipkin could not change one of those files. Check that it is not open elsewhere."})
 
     def chat_title(self):
         """Name a chat from its first exchange. Uses the model only when it is already loaded and idle."""
@@ -1839,7 +1970,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             history = payload.get("history", [])
             terminal_id = payload.get("terminal")
             has_browser = payload.get("browser", False)
-            if terminal_id is not None and not isinstance(terminal_id, str) or not isinstance(has_browser, bool):
+            allow_terminal = payload.get("allowTerminal", True)
+            if terminal_id is not None and not isinstance(terminal_id, str) or not isinstance(has_browser, bool) or not isinstance(allow_terminal, bool):
                 raise ValueError()
             if not isinstance(task, str) or not task.strip() or len(task) > 40_000:
                 raise ValueError()
@@ -1882,7 +2014,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         # The limit counts the agent's own working time; time spent waiting on the user's approval is excluded.
         started_at, waited = time.monotonic(), 0.0
-        approval_started = step_started = None
+        approval_started = step_started = step_last_packet = None
         run_id = token_urlsafe(12)
         run = {"changed": Condition(), "pending": set(), "decisions": {}, "stop_after_step": Event(),
                "steering": [], "steering_seen": 0, "browser": {}}
@@ -1903,9 +2035,11 @@ class ChatHandler(BaseHTTPRequestHandler):
                 now = time.monotonic()
                 waiting = now - approval_started if approval_started is not None else 0
                 if now - started_at - waited - waiting >= AGENT_TIME_LIMIT:
-                    return "Work reached its six-minute active-time limit."
-                if step_started is not None and now - step_started >= AGENT_STEP_TIME_LIMIT:
-                    return "One model step took more than two minutes. Try a smaller next step when you resume."
+                    return "Work reached its ten-minute active-time limit. Resume Work to continue."
+                if step_last_packet is not None and now - step_last_packet >= AGENT_STEP_IDLE_LIMIT:
+                    return "Ollama stopped sending output for more than three minutes. Resume Work from the last completed step."
+                if step_started is not None and now - step_started >= AGENT_STEP_ACTIVE_LIMIT:
+                    return "One model step took more than five minutes. Try a smaller next step when you resume."
             return None
 
         def watch_client():
@@ -1943,14 +2077,22 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         def emit(event, **fields):
+            nonlocal step_started, step_last_packet
+            if event == "step":
+                with run["changed"]:
+                    step_started = step_last_packet = time.monotonic()
+            elif event in ("thinking", "delta"):
+                with run["changed"]:
+                    if step_started is not None:
+                        step_last_packet = time.monotonic()
             check()
             send_event(event, **fields)
 
         def request_step(messages, tools, think_now, *, schema=None):
-            nonlocal step_started
+            nonlocal step_started, step_last_packet
             check()
             with run["changed"]:
-                step_started = time.monotonic()
+                step_started = step_last_packet = time.monotonic()
             try:
                 if schema is not None:
                     def emit_plan_step(event, **data):
@@ -1961,7 +2103,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             finally:
                 reason = budget_reason()
                 with run["changed"]:
-                    step_started = None
+                    step_started = step_last_packet = None
                 if reason:
                     raise WorkPaused(reason)
 
@@ -2068,7 +2210,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                     emit("notice", text="Pipkin couldn't keep the Mac awake for this run.")
             SESSIONS.ensure_loaded()
             settings = current()
-            panels = AgentPanels(run, emit, terminal_id, has_browser, str(workspace.path if workspace else Path.home()))
+            panels = AgentPanels(run, emit, terminal_id, has_browser, str(workspace.path if workspace else Path.home()),
+                                 allow_terminal=allow_terminal)
             agent = Agent(
                 request_step,
                 emit, check, approve, workspace=workspace, mode=mode, web=web, memory=allow_memory,
@@ -2252,7 +2395,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             try:
                 if not tools:
                     return self.agent_step(messages, tools, think, check, emit)
-                reply = self.agent_step(messages, tools, think, check, emit, output_limit=2200)
+                reply = self.agent_step(messages, tools, think, check, emit, output_limit=3400 if think else 2400)
                 if reply.get("finish_reason") != "length":
                     return reply
                 if attempt:
@@ -2269,6 +2412,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             except ThinkingLoop as loop:
                 if stop_requested():
                     return None
+                if attempt:
+                    raise WorkPaused(str(loop) + " Resume Work with a smaller next step.") from loop
                 emit("notice", text=str(loop) + " Retrying this step without extended thinking…")
                 think = False
                 continue
@@ -2316,6 +2461,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             emit("step")
             chunks, calls = [], []
             thought = ThoughtWatch()
+            content_watch = ThoughtWatch(
+                window=320, limit=None, every=500,
+                message="The model started repeating the same output, so this step was cut short.",
+            )
             for _, packet in ollama_chat_packets(response):
                 check()
                 if packet.get("error"):
@@ -2330,6 +2479,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if message.get("content"):
                     chunks.append(message["content"])
                     emit("delta", text=message["content"])
+                    if output_schema is None and not calls:
+                        content_watch.add(message["content"])
                 calls.extend(message.get("tool_calls") or [])
                 if packet.get("done"):
                     timings = {

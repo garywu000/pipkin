@@ -11,6 +11,7 @@
 /// Opens url in the current tab (or a new one if there is none).
 - (void)openURL:(NSURL *)url;
 - (void)openURLInNewTab:(NSURL *)url;
+- (void)openInput:(NSString *)text;
 - (void)newTab;
 - (void)closeCurrentTab;
 /// Opens the home page if nothing has been loaded yet.

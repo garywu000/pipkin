@@ -440,6 +440,35 @@ class Workspace:
                 raise ValueError("Only regular files can be removed.")
             os.unlink(parts[-1], dir_fd=parent)
 
+    def restore_text(self, path, content, expected_digest):
+        parts = validate_path(path)
+        if not parts:
+            raise ValueError("Give a file path inside the workspace.")
+        data = content.encode("utf-8")
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError("That file is too large to restore.")
+        with self._directory(parts[:-1]) as parent:
+            name = parts[-1]
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("Only regular, unlinked files can be restored.")
+            staging = ".pipkin-" + token_hex(12)
+            fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fchmod(stream.fileno(), info.st_mode & 0o777)
+                    os.fsync(stream.fileno())
+                if self.file_digest(path) != expected_digest:
+                    raise UndoConflict(f"{path} changed before it could be restored.")
+                os.replace(staging, name, src_dir_fd=parent, dst_dir_fd=parent)
+            finally:
+                try:
+                    os.unlink(staging, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+
     def write_new_artifact(self, path, data):
         parts = validate_path(path)
         if not parts or len(data) > 2_000_000:
@@ -663,35 +692,88 @@ class UndoStore:
             self._prune()
             return record["id"]
 
-    def apply(self, workspace, undo_id):
-        """Undo one file. Returns {"action": "restored" | "removed"} or raises UndoConflict / ValueError."""
-        with self.lock:
-            record = self._load(undo_id)
-            if record["folder"] != str(workspace.path) or tuple(record["identity"]) != tuple(workspace.identity):
-                raise ValueError("This undo belongs to a different folder. Select that folder and try again.")
-            if record["state"] != "ready":
-                raise UndoConflict(f"{record['path']} was already undone.")
-            current = workspace.file_digest(record["path"])
-            if current != record["after_sha256"]:
-                if current is None and record["before"] is None:
-                    action = "removed"  # Already gone; nothing of the user's is at risk.
-                elif current is None:
-                    raise UndoConflict(f"{record['path']} was deleted after Pipkin edited it, so there is nothing to restore into.")
-                else:
-                    raise UndoConflict(f"{record['path']} changed after Pipkin saved it. Undo was skipped to keep your changes.")
-            elif record["before"] is None:
-                workspace.remove_file(record["path"])
-                action = "removed"
-            else:
-                workspace.write_text(record["path"], record["before"])
-                action = "restored"
-            record.update(state="undone", undone=time.time())
+    def _plan(self, workspace, undo_id):
+        record = self._load(undo_id)
+        if record["folder"] != str(workspace.path) or tuple(record["identity"]) != tuple(workspace.identity):
+            raise ValueError("This undo belongs to a different folder. Select that folder and try again.")
+        if record["state"] != "ready":
+            raise UndoConflict(f"{record['path']} was already undone.")
+        current = workspace.file_digest(record["path"])
+        if current != record["after_sha256"]:
+            if current is None and record["before"] is None:
+                return record, "removed_already"  # Already gone; nothing of the user's is at risk.
+            if current is None:
+                raise UndoConflict(f"{record['path']} was deleted after Pipkin edited it, so there is nothing to restore into.")
+            raise UndoConflict(f"{record['path']} changed after Pipkin saved it. Undo was skipped to keep your changes.")
+        return record, ("removed" if record["before"] is None else "restored")
+
+    def _commit(self, workspace, record, planned):
+        if planned == "removed":
+            workspace.remove_file(record["path"])
+            action = "removed"
+        elif planned == "removed_already":
+            action = "removed"
+        else:
+            workspace.restore_text(record["path"], record["before"], record["after_sha256"])
+            action = "restored"
+        record.update(state="undone", undone=time.time())
+        result = {"id": record["id"], "action": action, "path": record["path"]}
+        try:
             self._save(record)
-            return {"action": action, "path": record["path"]}
+        except OSError:
+            result["warning"] = "Undo changed this file, but Pipkin could not save its undo receipt."
+        return result
+
+    def apply(self, workspace, undo_id):
+        """Undo one file. Returns {"action": "restored" | "removed", "path": ...} or raises UndoConflict / ValueError."""
+        with self.lock:
+            record, planned = self._plan(workspace, undo_id)
+            result = self._commit(workspace, record, planned)
+            return {key: value for key, value in result.items() if key != "id"}
+
+    def apply_many(self, workspace, undo_ids):
+        """Preflight the run, then report individual outcomes if undo stops partway through."""
+        ids = list(dict.fromkeys(undo_ids))
+        if not ids or len(ids) > 50:
+            raise ValueError("Invalid undo request.")
+        with self.lock:
+            planned = []
+            conflicts = {}
+            for undo_id in ids:
+                try:
+                    planned.append(self._plan(workspace, undo_id))
+                except UndoConflict as conflict:
+                    conflicts[undo_id] = str(conflict)
+            if conflicts:
+                message = (
+                    next(iter(conflicts.values()))
+                    if len(conflicts) == 1
+                    else f"{len(conflicts)} files changed after Pipkin saved them. No files were undone."
+                )
+                raise UndoConflict(message, conflicts=conflicts)
+            results = []
+            for index, (record, _) in enumerate(planned):
+                try:
+                    current, action = self._plan(workspace, record["id"])
+                    results.append(self._commit(workspace, current, action))
+                except (UndoConflict, ValueError, OSError) as error:
+                    path = record["path"]
+                    reason = str(error) if not isinstance(error, OSError) else "Could not change this file on disk."
+                    issues = {record["id"]: reason}
+                    issues.update({pending["id"]: f"Skipped after undo stopped at {path}."
+                                   for pending, _ in planned[index + 1:]})
+                    count = len(results)
+                    message = f"Undo stopped at {path}. Undid {count} of {len(planned)} files."
+                    return {"results": results, "issues": issues, "error": message}
+            return {"results": results}
 
 
 class UndoConflict(Exception):
     """The file no longer matches what Pipkin wrote, so undoing it would discard someone's later work."""
+
+    def __init__(self, message, conflicts=None):
+        super().__init__(message)
+        self.conflicts = conflicts or {}
 
 
 class Sources:
@@ -932,7 +1014,13 @@ def web_search(query, sources=None):
 
 # ---------------------------------------------------------------- commands
 
-COMMAND_IDLE = 30
+COMMAND_IDLE = 20
+BUILTIN_TOOL_NAMES = frozenset({
+    "check_page", "read_file", "read_files", "write_file", "edit_file", "write_page",
+    "list_files", "search_text", "outline_file", "map_document", "update_plan",
+    "web_search", "web_fetch", "remember", "browser_open", "browser_read",
+    "terminal_read", "terminal_run",
+})
 # Commands that never finish on their own: servers, watchers, pagers, editors, and interactive tools.
 NEVER_EXITS = re.compile(
     r"(?:^|[;&|(]\s*|\b(?:then|do|sudo|exec|nohup)\s+)(?:python3?\s+-m\s+http\.server|http-server|live-server|npx\s+serve|"
@@ -940,6 +1028,18 @@ NEVER_EXITS = re.compile(
     r"tail\s+-[a-zA-Z]*f|watch\s|top\b|htop|less\b|more\b|man\s|vim?\b|nano\b|emacs\b|ssh\s|"
     r"ping\s+(?!.*-c\s*\d)|cat\s*(?:$|[;&|])|read\b)",
 )
+
+
+def builtin_tool_command(command, available=None):
+    """Catch models trying to run a Pipkin built-in tool name (like `check_page index.html`) in a shell."""
+    head = command.strip().split(None, 1)[0] if command.strip() else ""
+    if head in BUILTIN_TOOL_NAMES:
+        if available is not None and head not in available:
+            return (f"Not run: `{head}` is a Pipkin tool, not a shell command, and it is not enabled in this session. "
+                    "Use one of your available tools or skip that step.")
+        return (f"Not run: `{head}` is a built-in Pipkin tool, not a shell command. "
+                f"Call the `{head}` tool directly instead of running it in the shell.")
+    return None
 
 
 def long_running(command):
@@ -1058,6 +1158,9 @@ READ_TOOLS = [
             },
         }}},
     }},
+    schema("check_page", "Check an HTML file for broken local asset links, missing in-page anchors, and duplicate IDs. Static check only.", [
+        ("path", "string", "Relative workspace HTML path"),
+    ]),
 ]
 WRITE_TOOLS = [
     schema("write_file", "Create a file or replace its entire contents.", [
@@ -1118,9 +1221,6 @@ SITE_TOOLS = [
             "queries": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
         }},
     }},
-    schema("check_page", "Check an HTML file for broken local asset links, missing in-page anchors, and duplicate IDs. Static check only.", [
-        ("path", "string", "Relative workspace HTML path"),
-    ]),
 ]
 
 
@@ -1152,10 +1252,11 @@ def available_tools(workspace, mode, web, memory, panels=None, workflow=None):
     if web:
         tools += WEB_TOOLS
     if panels is not None:
-        tools.append(TERMINAL_READ_TOOL)
-        if mode != "read":
-            tools.append(TERMINAL_RUN_TOOL)
-        if panels.browser:
+        if getattr(panels, "has_terminal", True):
+            tools.append(TERMINAL_READ_TOOL)
+            if mode != "read":
+                tools.append(TERMINAL_RUN_TOOL)
+        if getattr(panels, "has_browser", False):
             tools += BROWSER_TOOLS
     if memory:
         tools.append(MEMORY_TOOL)
@@ -1207,9 +1308,20 @@ def system_prompt(workspace, mode, web, memory, memories, instructions, context,
     if web:
         lines.append("- For current facts, research, and writing that depends on external facts, use web_search, then web_fetch the strongest relevant public sources.")
     if panels is not None:
-        lines.append("- Pipkin has a terminal panel" + (" and a browser pane" if panels.browser else "") + " the user can see. "
-                     "terminal_read shows what is in their terminal" + ("; browser_open and browser_read use their browser" if panels.browser else "")
-                     + ". Use them when the user mentions their terminal or browser, or when they should watch the result.")
+        has_terminal = getattr(panels, "has_terminal", True)
+        has_browser = getattr(panels, "has_browser", False)
+        if has_terminal and has_browser:
+            lines.append("- Pipkin has a terminal panel and a browser pane the user can see. "
+                         "terminal_read shows what is in their terminal; browser_open and browser_read use their browser. "
+                         "Use them when the user mentions their terminal or browser, or when they should watch the result.")
+        elif has_terminal:
+            lines.append("- Pipkin has a terminal panel the user can see. "
+                         "terminal_read shows what is in their terminal. "
+                         "Use it when the user mentions their terminal or when they should watch the result.")
+        elif has_browser:
+            lines.append("- Pipkin has a browser pane the user can see. "
+                         "browser_open and browser_read use their browser. "
+                         "Use them when the user mentions their browser or when they should watch the result.")
     lines.append(SOURCE_GUIDANCE)
     if memory:
         lines.append("- Use remember only for lasting preferences or facts the user would want kept across chats.")
@@ -1382,6 +1494,7 @@ class Agent:
         self.compactions = 0
         self.steering_texts = []
         self.results = {}
+        self.ran_commands = set()
         self.task = ""
         self.approval_seconds = 0.0
         self.plan = []
@@ -1739,6 +1852,9 @@ class Agent:
             command = require_str(args, "command", 2000).strip()
             if "\n" in command or "\r" in command:
                 raise ValueError("Send one command line at a time.")
+            blocked = builtin_tool_command(command, self.tool_names)
+            if blocked:
+                raise ValueError(blocked)
             if not self.approve("command", "Run in your terminal", command):
                 return "The user declined to run this command. Do not retry it."
             self.begin_effect(describe(name, args))
@@ -1831,7 +1947,7 @@ class Agent:
             added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
             removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
             result = f"{'Created' if before is None else 'Updated'} {path} (+{added} −{removed} lines)."
-            if self.workflow == "site" and path.casefold().endswith(".html"):
+            if path.casefold().endswith(".html"):
                 try:
                     report = workspace.check_page(path, self.check)
                     result += "\n\n" + report
@@ -1841,7 +1957,7 @@ class Agent:
             return result
         if name == "run_command":
             command = require_str(args, "command", 2000).strip()
-            blocked = long_running(command)
+            blocked = builtin_tool_command(command, self.tool_names) or long_running(command)
             if blocked:
                 raise ValueError(blocked)
             if not self.approve("command", "Run a command in " + workspace.path.name, command):
@@ -2017,12 +2133,16 @@ class Agent:
                 try:
                     if name in WRITE_TOOL_NAMES and key in self.seen:
                         raise ValueError("You already made this exact change. Read the file if you need to check it.")
-                    if name in WORKSPACE_READS and self.visible(messages, key):
+                    if name == "run_command" and key in self.ran_commands:
+                        output = "This exact command already ran with no workspace changes since. Use its output above or run a different command."
+                    elif name in WORKSPACE_READS and self.visible(messages, key):
                         output = "This exact call's result is already above in this conversation. Use it instead of calling again."
                     else:
                         output = self.execute(name, args)
                         if name in WRITE_TOOL_NAMES:
                             self.seen.add(key)
+                        elif name == "run_command" and not output.startswith("The user declined") and not command_failed(output):
+                            self.ran_commands.add(key)
                     if output.startswith("The user declined"):
                         ok = None
                 except (AgentStopped, BrokenPipeError, ConnectionResetError):
@@ -2051,9 +2171,15 @@ class Agent:
                         site_needs_page = False
                 if name in WRITE_TOOL_NAMES:
                     advanced = advanced or bool(self.saved_file)
-                elif (ok and not output.startswith("This exact call's result") and (name != "update_plan" or last_plan != self.plan)
+                elif (ok and not output.startswith(("This exact call's result", "This exact command already ran"))
+                      and not (name == "terminal_read" and output == "The user has no terminal open in Pipkin.")
+                      and not (name in ("browser_open", "browser_read") and output.startswith("The browser pane did not"))
+                      and (name != "update_plan" or last_plan != self.plan)
                       and not (name == "run_command" and command_failed(output))):
                     advanced = True
+                if (name == "update_plan" and ok and len(calls[:4]) == 1
+                        and any(step.get("status") != "completed" for step in self.plan)):
+                    output += " (Pair update_plan with your next tool call in the same reply to save a step.)"
                 new_sources = self.sources.items[source_start:]
                 if new_sources:
                     outcome["sources"] = new_sources
@@ -2097,7 +2223,10 @@ class Agent:
                 messages.append({"role": "tool", "tool_name": str(name), "content": clip(output, 14000)})
                 if name in {"run_command", "terminal_run"}:
                     self.results.clear()
+                    if name == "terminal_run":
+                        self.ran_commands.clear()
                 elif self.saved_file:
+                    self.ran_commands.clear()
                     changed_path = path_identity(self.saved_file)
                     self.results = {key: (result, paths) for key, (result, paths) in self.results.items()
                                     if paths is not None and changed_path not in paths}

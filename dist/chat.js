@@ -45,6 +45,15 @@ const attachButton = byId("attach-files");
 const agentMode = byId("agent-mode");
 const appMode = byId("app-mode");
 const activeChatTitle = byId("active-chat-title");
+// Declared before startup code runs: syncAgentControls() reaches the Harness panel during boot.
+const harnessPanel = byId("harness-panel");
+const harnessToggle = byId("toggle-harness");
+const harnessDot = byId("harness-dot");
+const hpOmnibox = byId("hp-omnibox");
+const hpGoalInput = byId("hp-goal-input");
+const hpContextInput = byId("hp-context-input");
+let hpContextTimer = null;
+let hpActiveView = "home";
 const activeChatName = byId("active-chat-name");
 let pendingChatTitle = "";
 const workspaceButton = byId("choose-workspace");
@@ -85,11 +94,21 @@ const chatDragType = "application/x-local-model-chat";
 const narrow = window.matchMedia("(max-width: 860px)");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
+const PALETTES = [
+  { id: "emerald", name: "Emerald", note: "Forest & mist", a: "#0d8a5e", b: "#38d9d9", bg: "#edf3f1" },
+  { id: "ocean", name: "Ocean", note: "Slate & cobalt", a: "#1d68b8", b: "#38bdf8", bg: "#edf2f7" },
+  { id: "amber", name: "Amber", note: "Sand & gold", a: "#b86318", b: "#f0a34b", bg: "#f5f1ea" },
+  { id: "rose", name: "Rose", note: "Blossom & plum", a: "#b83b68", b: "#c084fc", bg: "#f6eff2" },
+  { id: "graphite", name: "Graphite", note: "Calm mono", a: "#374151", b: "#94a3b8", bg: "#f2f3f5" },
+];
+const PALETTE_IDS = PALETTES.map((p) => p.id);
+
 const defaultSettings = {
-  theme: "system", enterToSend: true, showStats: true, temperature: 0.7, instructions: "",
+  theme: "system", palette: "emerald", enterToSend: true, showStats: true, temperature: 0.7, instructions: "",
   memoryEnabled: true, permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
   sidebarCollapsed: false, sidebarWidth: 268,
 };
+const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
 let settings = { ...defaultSettings, ...readLocal(settingsKey, {}) };
 if (!["auto", "on", "off"].includes(settings.webMode)) settings.webMode = settings.web === false ? "off" : "auto";
 delete settings.web;
@@ -173,13 +192,53 @@ function saveMemories() {
   renderMemories();
 }
 
-function applyTheme() {
+let themeTransitionTimer = 0;
+function syncPaletteChoice() {
+  const wrap = byId("palette-choice");
+  if (!wrap) return;
+  const active = PALETTE_IDS.includes(settings.palette) ? settings.palette : "emerald";
+  if (!wrap.childNodes.length) {
+    for (const p of PALETTES) {
+      const btn = el("button", {
+        type: "button", className: "palette-swatch", title: `${p.name} · ${p.note}`,
+        "aria-label": `${p.name} color palette`, "aria-pressed": String(p.id === active),
+        dataset: { palette: p.id },
+      });
+      btn.style.setProperty("--sw-a", p.a);
+      btn.style.setProperty("--sw-b", p.b);
+      btn.addEventListener("click", () => {
+        saveSettings({ palette: p.id });
+        applyTheme(true);
+      });
+      wrap.append(btn);
+    }
+    return;
+  }
+  for (const btn of wrap.children) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.palette === active));
+  }
+}
+
+function applyTheme(animate = false) {
+  if (animate && !reducedMotion.matches) {
+    document.documentElement.classList.add("theme-transition");
+    clearTimeout(themeTransitionTimer);
+    themeTransitionTimer = setTimeout(() => document.documentElement.classList.remove("theme-transition"), 460);
+  }
   if (settings.theme === "system") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.dataset.theme = settings.theme;
-  requestAnimationFrame(() => notifyShell({ type: "theme", background: getComputedStyle(document.body).backgroundColor }));
+  const palette = PALETTE_IDS.includes(settings.palette) ? settings.palette : "emerald";
+  if (palette === "emerald") document.documentElement.removeAttribute("data-palette");
+  else document.documentElement.dataset.palette = palette;
+  syncPaletteChoice();
+  requestAnimationFrame(() => notifyShell({
+    type: "theme",
+    background: getComputedStyle(document.body).backgroundColor,
+    scheme: settings.theme,
+  }));
 }
 applyTheme();
-window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applyTheme(true));
 
 /* ====================================================================== */
 /* Storage                                                                 */
@@ -544,10 +603,9 @@ function projectSection(project, chats) {
   const section = el("section", { className: "project" });
   const list = el("nav", { className: "project-chats chat-list", id: "project-chats-" + project.id, "aria-label": project.name + " chats" });
   const toggle = el("button", { type: "button", className: "project-toggle", title: project.name, "aria-controls": list.id },
-    icon("folder"), el("span", { text: project.name }));
+    icon("chevron-right", "icon project-chev"), icon("folder"), el("span", { text: project.name }));
   const setExpanded = (expanded) => {
     toggle.setAttribute("aria-expanded", String(expanded));
-    toggle.querySelector("use").setAttribute("href", expanded ? "#i-folder" : "#i-folder");
     list.hidden = !expanded;
   };
   setExpanded(!collapsedProjects.has(project.id));
@@ -822,6 +880,7 @@ function renderContextInfo() {
   const status = byId("compact-status");
   status.textContent = compactTurns ? `Compacted ${compactTurns} ${compactTurns === 1 ? "turn" : "turns"}` : "";
   status.hidden = !compactTurns;
+  if (typeof syncHarnessPanel === "function") syncHarnessPanel();
 }
 
 function openProjectDialog(id = null) {
@@ -1233,7 +1292,12 @@ function saveSkillList(skills) {
 function renderConversation() {
   messagesBox.replaceChildren();
   empty.hidden = history.length > 0;
-  history.forEach((message) => addMessage(message));
+  history.forEach((message) => addMessage(message, { animate: false }));
+  if (history.length && !reducedMotion.matches) {
+    messagesBox.classList.remove("chat-fade");
+    void messagesBox.offsetWidth;
+    messagesBox.classList.add("chat-fade");
+  }
   syncTurns();
   scrollToLatest();
   updateTokenMeter();
@@ -1395,6 +1459,7 @@ function updateControls() {
   const command = Skills.parse(promptBox.value);
   const localCommand = !replying && Skills.commands.some(({ name }) => name === command?.name);
   const needsSkillBrief = Boolean(Skills.workflows[command?.name] && !command.input && !files.length);
+  composer.dataset.busy = String(replying);
   sendButton.disabled = steering ? sendingSteering || !textLength || textLength > 2000 :
     composerBusy || choosingWorkspace || (!localCommand && !modelCanReply()) || !hasInput || needsSkillBrief;
   newChatButton.disabled = composerBusy;
@@ -1437,9 +1502,146 @@ function showState(nextState, loaded = modelLoaded) {
   };
   byId("model-status").dataset.state = state;
   byId("status-label").textContent = labels[state] || "Connecting";
-  byId("model-status").title = labels[state] || "";
+  byId("model-status").title = (labels[state] || "") + " · Click for model & Mac memory details";
   if (!activeReply && !storageUpdateBlocked) announce(messages[state] || "", ["offline", "missing", "error"].includes(state));
   updateControls();
+  if (["ready", "idle", "offline"].includes(state)) void refreshTelemetry();
+}
+
+/* Live Mac memory pressure & loaded Ollama model residency HUD. */
+let telemetry = { pressure: "unknown", total_ram: 0, loaded: [] };
+let telemetryPanel = null;
+const PRESSURE_LABELS = {
+  normal: { label: "Normal", note: "Plenty of headroom for local models." },
+  warning: { label: "Elevated", note: "Memory is getting tight. Consider a smaller context or unloading when idle." },
+  critical: { label: "Critical", note: "macOS is under heavy memory pressure. Unload the model to avoid swapping." },
+  unknown: { label: "Unavailable", note: "Memory pressure telemetry is available on macOS." },
+};
+
+function renderTelemetryBadge() {
+  const pill = byId("model-status");
+  const ram = byId("status-ram");
+  if (!pill || !ram) return;
+  const loadedBytes = (telemetry.loaded || []).reduce((sum, item) => sum + (item.size || 0), 0);
+  if (loadedBytes > 0) {
+    ram.textContent = formatSize(loadedBytes);
+    ram.hidden = false;
+  } else {
+    ram.textContent = "";
+    ram.hidden = true;
+  }
+  pill.dataset.pressure = telemetry.pressure || "unknown";
+}
+
+function closeTelemetryPopover(restoreFocus = false) {
+  if (!telemetryPanel) return;
+  telemetryPanel.remove();
+  telemetryPanel = null;
+  const anchor = byId("model-status");
+  anchor?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) anchor?.focus({ preventScroll: true });
+}
+
+function positionTelemetryPopover() {
+  if (!telemetryPanel) return;
+  const anchor = byId("model-status");
+  if (!anchor) return;
+  const bounds = anchor.getBoundingClientRect();
+  const inset = 12;
+  const width = telemetryPanel.offsetWidth;
+  const height = telemetryPanel.offsetHeight;
+  const left = Math.max(inset, Math.min(bounds.right - width, window.innerWidth - width - inset));
+  const top = Math.max(inset, Math.min(bounds.bottom + 8, window.innerHeight - height - inset));
+  telemetryPanel.style.left = left + "px";
+  telemetryPanel.style.top = top + "px";
+}
+
+function renderTelemetryPopover() {
+  if (!telemetryPanel) return;
+  const p = PRESSURE_LABELS[telemetry.pressure] || PRESSURE_LABELS.unknown;
+  const totalRam = telemetry.total_ram ? formatSize(telemetry.total_ram) : "";
+  const loaded = telemetry.loaded || [];
+  const totalLoaded = loaded.reduce((sum, item) => sum + (item.size || 0), 0);
+  const ramShare = telemetry.total_ram && totalLoaded ? Math.min(100, Math.round((totalLoaded / telemetry.total_ram) * 100)) : 0;
+
+  const modelRows = loaded.length
+    ? loaded.map((item) => {
+        const meta = [
+          item.size ? formatSize(item.size) + " RAM" : null,
+          item.size_vram && item.size && item.size_vram < item.size ? formatSize(item.size_vram) + " GPU" : null,
+          item.context_length ? Math.round(item.context_length / 1024) + "K context" : null,
+        ].filter(Boolean).join(" · ");
+        return el("div", { className: "tel-model" },
+          el("strong", { text: shortModelName(item.name), title: item.name }),
+          el("span", { text: meta || "Loaded" }));
+      })
+    : [el("p", { className: "tel-empty", text: state === "offline" ? "Ollama is offline." : "No model in memory — loads on your next message." })];
+
+  const unloadBtn = el("button", {
+    type: "button", className: "button small", text: modelUnloading ? "Unloading…" : "Unload model",
+    disabled: (!loaded.length && !modelLoaded) || modelUnloading,
+  });
+  unloadBtn.addEventListener("click", async () => {
+    closeTelemetryPopover();
+    await unloadModel();
+    void refreshTelemetry();
+  });
+  const settingsBtn = el("button", { type: "button", className: "button small", text: "Model settings…" });
+  settingsBtn.addEventListener("click", () => {
+    closeTelemetryPopover();
+    openSettings("tab-model");
+  });
+
+  const metricLine = totalLoaded
+    ? el("div", { className: "tel-metric" },
+        el("strong", { text: formatSize(totalLoaded) }),
+        el("span", { text: totalRam ? `of ${totalRam} (${ramShare}%)` : "in Ollama" }))
+    : totalRam
+      ? el("div", { className: "tel-metric" }, el("strong", { text: "Idle" }), el("span", { text: `${totalRam} unified` }))
+      : null;
+
+  telemetryPanel.replaceChildren(
+    el("div", { className: "tel-section" },
+      el("div", { className: "tel-head" },
+        el("span", { className: "tel-kicker", text: "Mac memory" }),
+        el("span", { className: "tel-pill", dataset: { pressure: telemetry.pressure }, text: p.label })),
+      metricLine,
+      el("div", { className: "tel-bar", dataset: { pressure: telemetry.pressure }, "aria-hidden": "true" },
+        el("i", { style: `width:${loaded.length ? Math.max(8, ramShare) : 0}%` })),
+      el("p", { className: "tel-note", text: p.note })),
+    el("div", { className: "tel-section" },
+      el("div", { className: "tel-head" },
+        el("span", { className: "tel-kicker", text: "Loaded in Ollama" }),
+        el("span", { className: "tel-count", text: loaded.length ? `${loaded.length} active` : "Idle" })),
+      el("div", { className: "tel-models" }, ...modelRows)),
+    el("div", { className: "tel-actions" }, unloadBtn, settingsBtn));
+  positionTelemetryPopover();
+}
+
+function toggleTelemetryPopover() {
+  if (telemetryPanel) {
+    closeTelemetryPopover(true);
+    return;
+  }
+  closePopover();
+  const anchor = byId("model-status");
+  telemetryPanel = el("div", { className: "telemetry-popover", role: "dialog", "aria-label": "Model and Mac memory telemetry" });
+  document.body.append(telemetryPanel);
+  anchor.setAttribute("aria-expanded", "true");
+  renderTelemetryPopover();
+  void refreshTelemetry();
+}
+
+async function refreshTelemetry() {
+  try {
+    const response = await fetch("/api/telemetry");
+    if (!response.ok) return;
+    telemetry = await response.json();
+    renderTelemetryBadge();
+    renderTelemetryPopover();
+  } catch {
+    // Ignore transient polling failures.
+  }
 }
 
 function shortModelName(name) {
@@ -1519,17 +1721,72 @@ function renderWorkResult(container, run) {
     if (!known.has(path.toLowerCase())) records.push({ path, legacy: true });
   }
   const detailed = records.some((record) => !record.legacy);
+  const rerender = () => renderWorkResult(container, run);
   const rows = records.map((record) => record.legacy
     ? localOutput(record.path, record.path, run, true)
     : el("div", { className: "result-file" }, localOutput(record.path, record.path, run, true),
-      resultDetails(record, run, () => renderWorkResult(container, run))));
+      resultDetails(record, run, rerender)));
   const failed = records.some((record) => record.checks?.some((check) => !check.ok));
+  const undoAll = detailed ? undoRunControl(records, run, rerender) : null;
   const head = detailed ? el("div", { className: "result-head", dataset: { failed: String(failed) } },
     icon(failed ? "alert" : "check"), el("span", { text: "Work result" }),
-    el("span", { className: "result-count", text: resultSummary(records) })) : null;
+    el("span", { className: "result-count", text: resultSummary(records) }), undoAll) : null;
   container.replaceChildren(...(head ? [head] : []), ...rows);
   container.classList.toggle("work-result", detailed);
   container.hidden = !records.length;
+}
+
+/**
+ * Undo a whole run after checking every file. Record completed actions even if a later file fails.
+ */
+function undoRunControl(records, run, rerender) {
+  const undoable = records.filter((record) => !record.legacy && record.undo && !record.undone);
+  if (undoable.length < 2) return null;
+  const label = "Undo all";
+  const button = el("button", { type: "button", className: "button small result-undo result-undo-all",
+    title: `Restore or remove all ${undoable.length} files from this run` }, label);
+  let armed = 0;
+  button.addEventListener("click", async () => {
+    if (!armed) {
+      button.textContent = `Click again to undo ${undoable.length} files`;
+      button.dataset.armed = "true";
+      armed = setTimeout(() => { armed = 0; button.textContent = label; delete button.dataset.armed; }, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    armed = 0;
+    button.disabled = true;
+    try {
+      const { key } = outputLocation(undoable[0].path, run);
+      if (!key) throw new Error("Select this run's workspace folder to undo it.");
+      const response = await fetch("/api/agent/undo-run", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace: key, ids: undoable.map((record) => record.undo) }),
+      });
+      const data = await response.json().catch(() => ({}));
+      const byId = new Map((data.results || []).map((item) => [item.id, item]));
+      const notes = data.issues || data.conflicts || {};
+      let restored = 0, removed = 0;
+      for (const record of undoable) {
+        const result = byId.get(record.undo);
+        if (notes[record.undo] || result?.warning) record.undoNote = notes[record.undo] || result.warning;
+        else delete record.undoNote;
+        if (!result) continue;
+        record.undone = result.action;
+        if (result.action === "removed") removed += 1;
+        else restored += 1;
+      }
+      if (!response.ok) throw new Error(data.error || "Could not undo this run.");
+      const parts = [restored && `${restored} restored`, removed && `${removed} removed`].filter(Boolean);
+      toast(`Undid ${restored + removed} files` + (parts.length ? ` (${parts.join(", ")})` : ""));
+    } catch (error) {
+      toast(error.message || "Could not undo this run.");
+    } finally {
+      rerender();
+      if (history.some((message) => message.agentRun === run)) void saveHistory([...history]);
+    }
+  });
+  return button;
 }
 
 function resultSummary(records) {
@@ -1577,7 +1834,8 @@ function undoControl(record, run, rerender) {
         throw new Error(data.error || "Could not undo this file.");
       }
       record.undone = data.action;
-      delete record.undoNote;
+      if (data.warning) record.undoNote = data.warning;
+      else delete record.undoNote;
       toast(data.action === "removed" ? `Removed ${record.path}` : `Restored ${record.path}`);
     } catch (error) {
       toast(error.message || "Could not undo this file.");
@@ -1608,11 +1866,21 @@ function resultDetails(record, run = null, rerender = () => {}) {
   const undo = run ? undoControl(record, run, rerender) : null;
   if (undo) line.append(undo);
   details.append(line);
-  if (record.undoNote && !record.undone) details.append(el("div", { className: "result-conflict", role: "status", text: record.undoNote }));
+  if (record.undoNote) details.append(el("div", { className: "result-conflict", role: "status", text: record.undoNote }));
   if (record.sources?.length) {
     details.append(el("div", { className: "result-sources", text: "Sources: " + record.sources.join(", ") }));
   }
   return details;
+}
+
+async function openLocalOutput(path, run) {
+  const { root, key } = outputLocation(path, run);
+  if (!key) throw new Error("Select this file’s workspace to open it.");
+  const response = await fetch("/api/agent/open-file", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace: key, root, path }),
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "Could not open this output.");
 }
 
 function localOutput(path, label, run, chip = false) {
@@ -1622,18 +1890,12 @@ function localOutput(path, label, run, chip = false) {
     className: chip ? "button small" : "local-path-link" },
   chip ? icon("file") : null, el("span", { text: label }));
   button.addEventListener("click", async () => {
-    const { root, key, fullPath } = outputLocation(path, run);
     fallback.hidden = true;
     button.disabled = true;
     try {
-      if (!key) throw new Error("Select this file’s workspace to open it.");
-      const response = await fetch("/api/agent/open-file", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace: key, root, path }),
-      });
-      if (!response.ok) throw new Error((await response.json()).error);
+      await openLocalOutput(path, run);
     } catch (error) {
-      fallback.textContent = " (" + fullPath + ")";
+      fallback.textContent = " (" + outputLocation(path, run).fullPath + ")";
       fallback.hidden = false;
       toast(error.message || "Could not open this output.");
     } finally {
@@ -1656,8 +1918,8 @@ function showLocalLinks(body, run) {
   }
 }
 
-function addMessage(message) {
-  const article = el("article", { className: "message " + message.role });
+function addMessage(message, { animate = true } = {}) {
+  const article = el("article", { className: "message " + message.role + (animate ? " message-enter" : "") });
   const body = el("div", { className: "message-body" + (message.humanized ? " rewritten-draft" : message.role === "assistant" ? " md" : "") });
   const actions = el("div", { className: "message-actions" });
   const evidencePanel = el("details", { className: "web-details reply-sources", hidden: true });
@@ -1672,9 +1934,18 @@ function addMessage(message) {
     if (!message.humanized) showLocalLinks(body, message.agentRun);
   };
   let draftText;
+  let lastDraftRender = 0;
   const renderDraft = (content) => {
     if (!content) {
       if (draftText?.isConnected) draftText.parentElement.remove();
+      else body.replaceChildren();
+      return;
+    }
+    if (!message.humanized) {
+      const now = performance.now();
+      if (now - lastDraftRender < 90 && body.childNodes.length) return;
+      lastDraftRender = now;
+      renderMarkdown(body, content);
       return;
     }
     if (!draftText?.isConnected) {
@@ -2384,6 +2655,8 @@ function renderModelControls() {
   };
   options(modelSelect, false);
   options(byId("setting-model"), true);
+  const pickerLabel = byId("model-picker-label");
+  if (pickerLabel) pickerLabel.textContent = modelSelect.selectedOptions[0]?.textContent || "No models found";
   const current = modelInfo.models.find((model) => model.name === modelInfo.model);
   modelSelect.title = modelInfo.model;
   byId("model-details").textContent = current
@@ -2451,6 +2724,7 @@ function setAgentWorkspace(folder) {
   workspaceButton.title = folder ? "Change folder" : "Choose a folder for the agent";
   workspaceButton.dataset.active = String(Boolean(folder));
   updateControls();
+  if (typeof syncHarnessPanel === "function") syncHarnessPanel();
 }
 
 async function chooseAgentWorkspace() {
@@ -2818,12 +3092,14 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
   // WebKit pauses animation frames while the window is in the background, and a pending frame used to hold back
   // every later update (an approval could wait unseen for minutes). A timer draws the update if the frame is late.
   let paintTimer = 0;
+  let paintClosed = false;
   const paint = (content) => {
-    if (frame || paintTimer) return;
+    if (paintClosed || frame || paintTimer) return;
     const draw = () => {
       cancelAnimationFrame(frame);
       clearTimeout(paintTimer);
       frame = paintTimer = 0;
+      if (paintClosed) return;
       const text = content();
       view.renderDraft(text || "");
       if (view.activity) view.activity.render();
@@ -2908,7 +3184,9 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
           } } : {}),
           allowMemory: !workflow && !starter && !tools.length && settings.memoryEnabled, memories: settings.memoryEnabled ? memories.slice(0, 60) : [],
           instructions: settings.instructions.slice(0, 6000), maxSteps: Number(settings.maxSteps) || 24,
-          terminal: window.PipkinPanels?.activeTerminalId() || null, browser: Boolean(window.PipkinPanels?.hasBrowser),
+          terminal: window.PipkinPanels?.terminalAllowed?.() ? (window.PipkinPanels?.activeTerminalId() || null) : null,
+          allowTerminal: window.PipkinPanels?.terminalAllowed?.() ?? true,
+          browser: Boolean(window.PipkinPanels?.browserAllowed?.()),
         }),
         signal: controller.signal,
       });
@@ -3036,7 +3314,10 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
     if (error.name === "AbortError") announce("Reply stopped.");
     else announce(error.message, true);
   } finally {
+    paintClosed = true;
     cancelAnimationFrame(frame);
+    clearTimeout(paintTimer);
+    frame = paintTimer = 0;
     finishThinking();
     if (agentRun) {
       for (const [id, note] of queuedSteering) {
@@ -3237,6 +3518,7 @@ function syncAgentControls() {
   webModeButton.dataset.mode = settings.webMode;
   webModeButton.title = "Web search: " + WEB_MODES[settings.webMode].detail;
   thinkToggle.setAttribute("aria-pressed", String(settings.think));
+  if (typeof syncHarnessPanel === "function") syncHarnessPanel();
 }
 
 /* Small anchored menu used by the composer's +, web, folder and permission buttons. */
@@ -3467,22 +3749,32 @@ async function switchMode(mode) {
     await selectChat(null, draftContext?.projectId ?? chatTitles.get(chatId)?.projectId ?? null);
     if (chatId !== null || history.length) return;
     checkMode(mode);
-    showMode();
+    showMode(true);
     announce(mode === "work" ? "Started a new Agent task. Chats and tasks stay separate." : "Started a new chat. Chats and tasks stay separate.");
     return;
   }
   checkMode(mode);
-  showMode();
+  showMode(true);
 }
 
-function showMode() {
+function showMode(animate = false) {
   const agent = agentMode.checked;
-  appMode.dataset.mode = agent ? "work" : "chat";
+  const mode = agent ? "work" : "chat";
+  appMode.dataset.mode = mode;
+  document.body.dataset.appMode = mode;
   byId("agent-controls").hidden = !agent;
   byId("welcome-heading").textContent = agent ? "What should we work on?" : "How can I help?";
   byId("welcome-sub").textContent = agent
     ? (agentWorkspace ? `Working in “${agentWorkspace.name}”. I can plan, read, edit, run commands and search the web.` : "Pick a folder to let me read and edit files, or just ask me to research the web.")
     : "Private chat with your local model. Nothing leaves your Mac.";
+  if (animate && !empty.hidden && !reducedMotion.matches) {
+    const welcome = empty.querySelector(".welcome");
+    if (welcome) {
+      welcome.classList.remove("mode-swap");
+      void welcome.offsetWidth;
+      welcome.classList.add("mode-swap");
+    }
+  }
   renderSuggestions();
   saveSettings({ appMode: agent ? "work" : "chat" });
   updateControls();
@@ -3492,6 +3784,10 @@ function showMode() {
 /* Wiring                                                                  */
 /* ====================================================================== */
 
+if (!reducedMotion.matches) {
+  document.body.classList.add("app-boot");
+  setTimeout(() => document.body.classList.remove("app-boot"), 850);
+}
 document.body.toggleAttribute("data-sidebar-collapsed", Boolean(settings.sidebarCollapsed));
 applySidebarWidth(settings.sidebarWidth);
 scrollChatTitle(activeChatTitle, activeChatName.parentElement);
@@ -3516,6 +3812,14 @@ restoreHistory().finally(() => {
 loadModels();
 restoreAgentWorkspace();
 
+byId("suggestions").addEventListener("pointermove", (event) => {
+  if (reducedMotion.matches) return;
+  const card = event.target.closest?.(".suggestion");
+  if (!card) return;
+  const rect = card.getBoundingClientRect();
+  card.style.setProperty("--mx", (event.clientX - rect.left) + "px");
+  card.style.setProperty("--my", (event.clientY - rect.top) + "px");
+}, { passive: true });
 composer.addEventListener("submit", sendMessage);
 promptBox.addEventListener("input", () => {
   autoGrow();
@@ -3624,9 +3928,31 @@ permissionButton.addEventListener("click", () => openPopover(permissionButton, O
 }))));
 document.addEventListener("pointerdown", (event) => {
   if (popover && !popover.menu.contains(event.target) && !popover.anchor.contains(event.target)) closePopover();
+  if (telemetryPanel && !telemetryPanel.contains(event.target) && !byId("model-status").contains(event.target)) closeTelemetryPopover();
 });
-window.addEventListener("resize", () => closePopover());
-modelSelect.addEventListener("change", () => chooseModel(modelSelect.value, modelInfo.num_ctx));
+window.addEventListener("resize", () => {
+  closePopover();
+  closeTelemetryPopover();
+});
+byId("model-status").addEventListener("click", toggleTelemetryPopover);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && telemetryPanel) {
+    event.preventDefault();
+    closeTelemetryPopover(true);
+  }
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) void refreshTelemetry();
+});
+setInterval(() => {
+  if (!document.hidden) void refreshTelemetry();
+}, 12000);
+void refreshTelemetry();
+modelSelect.addEventListener("change", () => {
+  const pickerLabel = byId("model-picker-label");
+  if (pickerLabel) pickerLabel.textContent = modelSelect.selectedOptions[0]?.textContent || "";
+  chooseModel(modelSelect.value, modelInfo.num_ctx);
+});
 workspaceButton.addEventListener("click", async () => {
   if (!agentWorkspace) {
     await chooseAgentWorkspace();
@@ -3857,12 +4183,16 @@ settingsDialog.querySelector(".settings-tabs").addEventListener("keydown", (even
 });
 byId("theme-choice").addEventListener("change", (event) => {
   saveSettings({ theme: event.target.value });
-  applyTheme();
+  applyTheme(true);
 });
 byId("setting-enter").addEventListener("change", (event) => saveSettings({ enterToSend: event.target.checked }));
 byId("setting-stats").addEventListener("change", (event) => {
   saveSettings({ showStats: event.target.checked });
   renderConversation();
+});
+byId("replay-welcome").addEventListener("click", () => {
+  settingsDialog.close();
+  window.PipkinOnboarding?.open({ preview: true });
 });
 byId("setting-temperature").addEventListener("input", (event) => {
   saveSettings({ temperature: Number(event.target.value) });
@@ -4070,12 +4400,316 @@ if (nativeShell) {
   if (note) note.textContent = "Runs locally · saved on this Mac";
 }
 
+window.PipkinOnboardingHost = {
+  isFirstRun: () => !hadSavedSettings,
+  getSettings: () => ({ ...settings }),
+  getModels: () => ({ models: [...modelInfo.models], model: modelInfo.model, state, shortModelName }),
+  getPalettes: () => PALETTES,
+  previewTheme(theme) {
+    saveSettings({ theme });
+    applyTheme(true);
+  },
+  previewPalette(palette) {
+    if (!PALETTE_IDS.includes(palette)) return;
+    saveSettings({ palette });
+    applyTheme(true);
+  },
+  applyPreferences(changes = {}) {
+    const next = {};
+    if (["system", "light", "dark"].includes(changes.theme)) next.theme = changes.theme;
+    if (PALETTE_IDS.includes(changes.palette)) next.palette = changes.palette;
+    if (["chat", "work"].includes(changes.appMode)) next.appMode = changes.appMode;
+    if (["read", "ask", "auto"].includes(changes.permission)) next.permission = changes.permission;
+    if (["auto", "on", "off"].includes(changes.webMode)) next.webMode = changes.webMode;
+    if (typeof changes.memoryEnabled === "boolean") next.memoryEnabled = changes.memoryEnabled;
+    if (typeof changes.instructions === "string") next.instructions = changes.instructions.trim().slice(0, 4000);
+    if (Object.keys(next).length) saveSettings(next);
+    if (next.theme || next.palette) applyTheme(true);
+    if (next.appMode && !history.length) {
+      checkMode(next.appMode);
+      showMode(false);
+    }
+    syncAgentControls();
+    updateTokenMeter();
+    if (changes.model && changes.model !== modelInfo.model && modelInfo.models.some((m) => m.name === changes.model)) {
+      void chooseModel(changes.model, modelInfo.num_ctx);
+    }
+  },
+  triggerBoot() {
+    if (reducedMotion.matches) return;
+    document.body.classList.remove("app-boot");
+    void document.body.offsetWidth;
+    document.body.classList.add("app-boot");
+    setTimeout(() => document.body.classList.remove("app-boot"), 850);
+  },
+  focusComposer: () => promptBox.focus({ preventScroll: true }),
+};
+
+/* ---------- Harness Side Panel ---------- */
+// Harness panel elements are declared with the other element lookups near the top of this file.
+
+const HP_TITLES = { review: "Review", files: "Open File", terminal: "Terminal", context: "Chat Context" };
+
+function showHarnessView(view) {
+  if (!harnessPanel) return;
+  const target = HP_TITLES[view] ? view : "home";
+  if (hpActiveView === "terminal" && target !== "terminal") {
+    window.PipkinPanels?.undockTerminal?.();
+  }
+  hpActiveView = target;
+  document.body.dataset.harnessView = target;
+  const isHome = target === "home";
+  const home = byId("hp-home");
+  const sub = byId("hp-sub");
+  if (home) home.hidden = !isHome;
+  if (sub) sub.hidden = isHome;
+  if (!isHome) {
+    const titleEl = byId("hp-sub-title");
+    if (titleEl) titleEl.textContent = HP_TITLES[target];
+    for (const key of Object.keys(HP_TITLES)) {
+      const section = byId("hp-sub-" + key);
+      if (section) section.hidden = key !== target;
+    }
+    if (target === "terminal") {
+      window.PipkinPanels?.dockTerminal?.(byId("hp-terminal-slot"));
+    } else if (target === "review") {
+      renderHarnessFiles();
+    } else if (target === "files") {
+      renderOpenFilesView();
+    } else if (target === "context") {
+      const ctx = currentChatContext();
+      if (hpGoalInput) hpGoalInput.value = ctx.goal || "";
+      if (hpContextInput) hpContextInput.value = ctx.notes || "";
+    }
+  } else if (hpOmnibox) {
+    hpOmnibox.value = "";
+    filterHarnessLauncher("");
+  }
+}
+
+function setHarnessOpen(open, persist = true) {
+  if (!harnessPanel) return;
+  const on = Boolean(open);
+  if (on && window.PipkinPanels?.browserOpen?.()) {
+    window.PipkinPanels?.hideBrowser?.();
+  }
+  if (!on && hpActiveView === "terminal") {
+    window.PipkinPanels?.undockTerminal?.();
+    hpActiveView = "home";
+    document.body.dataset.harnessView = "home";
+    const home = byId("hp-home");
+    const sub = byId("hp-sub");
+    if (home) home.hidden = false;
+    if (sub) sub.hidden = true;
+  }
+  document.body.toggleAttribute("data-harness-open", on);
+  harnessPanel.setAttribute("aria-hidden", String(!on));
+  harnessToggle?.setAttribute("aria-expanded", String(on));
+  harnessToggle?.setAttribute("aria-pressed", String(on));
+  if (persist) writeLocal("pipkin-harness-open", on);
+  if (on) {
+    syncHarnessPanel();
+    if (hpActiveView === "home") setTimeout(() => hpOmnibox?.focus({ preventScroll: true }), 160);
+  }
+}
+
+function toggleHarnessPanel() {
+  if (window.PipkinPanels?.browserOpen?.()) {
+    window.PipkinPanels?.hideBrowser?.();
+    setHarnessOpen(true);
+    showHarnessView("home");
+    return;
+  }
+  setHarnessOpen(!document.body.hasAttribute("data-harness-open"));
+}
+
+function filterHarnessLauncher(query) {
+  if (!harnessPanel) return;
+  const q = query.trim().toLowerCase();
+  for (const btn of harnessPanel.querySelectorAll(".hp-launch-item")) {
+    if (btn.id === "hp-go-browser" && !window.PipkinPanels?.hasBrowser) {
+      btn.hidden = true;
+      continue;
+    }
+    const hay = ((btn.textContent || "") + " " + (btn.dataset.search || "")).toLowerCase();
+    btn.hidden = Boolean(q) && !hay.includes(q);
+  }
+}
+
+function openWorkspaceFileTile({ path, action, run }) {
+  const tile = el("button", { type: "button", className: "hp-file-tile", title: outputLocation(path, run).fullPath },
+    icon("file"), el("span", { text: path }), action ? el("small", { text: action }) : null);
+  tile.addEventListener("click", async () => {
+    tile.disabled = true;
+    try {
+      await openLocalOutput(path, run);
+    } catch (error) {
+      toast(error.message || "Could not open " + path);
+    } finally {
+      tile.disabled = false;
+    }
+  });
+  return tile;
+}
+
+function collectRunFiles() {
+  const seen = new Map();
+  for (const message of history) {
+    const run = message.agentRun;
+    for (const item of run?.outputs || []) {
+      if (!item?.path) continue;
+      const { root } = outputLocation(item.path, run);
+      seen.set(JSON.stringify([root || run.workspace, item.path]), { path: item.path, action: item.action || "saved", run });
+    }
+  }
+  return [...seen.values()];
+}
+
+function renderHarnessFiles() {
+  const list = byId("hp-files-list");
+  if (!list) return;
+  const entries = collectRunFiles();
+  const badge = byId("hp-review-badge");
+  if (badge) {
+    badge.textContent = String(entries.length);
+    badge.hidden = entries.length === 0;
+  }
+  if (!entries.length) {
+    list.replaceChildren(el("p", { className: "hp-empty", text: "Files created or edited during Work appear here for quick review." }));
+    return;
+  }
+  list.replaceChildren(...entries.map(openWorkspaceFileTile));
+}
+
+function renderOpenFilesView() {
+  const list = byId("hp-open-files-list");
+  const wsName = byId("hp-workspace-name");
+  const wsBtn = byId("hp-choose-workspace");
+  if (wsName) wsName.textContent = agentWorkspace?.name || "No folder selected";
+  if (wsBtn) wsBtn.textContent = agentWorkspace?.name ? "Change…" : "Choose…";
+  if (!list) return;
+  const entries = collectRunFiles();
+  if (!agentWorkspace?.key) {
+    list.replaceChildren(el("p", { className: "hp-empty", text: "Choose a workspace folder to open its files." }));
+    return;
+  }
+  if (!entries.length) {
+    list.replaceChildren(el("p", { className: "hp-empty", text: `Workspace “${agentWorkspace.name}” is connected. Files touched by Work appear here.` }));
+    return;
+  }
+  list.replaceChildren(...entries.map(openWorkspaceFileTile));
+}
+
+function syncHarnessPanel() {
+  if (!harnessPanel) return;
+  const panels = window.PipkinPanels;
+  const hasNativeBrowser = Boolean(panels?.hasBrowser);
+  const browserItem = byId("hp-go-browser");
+  if (browserItem) browserItem.hidden = !hasNativeBrowser;
+  const browserOpen = Boolean(panels?.browserOpen?.());
+  const browserDot = byId("hp-browser-dot");
+  if (browserDot) browserDot.hidden = !browserOpen;
+  if (harnessDot) harnessDot.hidden = !browserOpen;
+  const termDot = byId("hp-term-dot");
+  if (termDot) termDot.hidden = !panels?.terminalOpen?.();
+  const wsBadge = byId("hp-ws-badge");
+  if (wsBadge) {
+    wsBadge.textContent = agentWorkspace?.name || "";
+    wsBadge.hidden = !agentWorkspace?.name;
+  }
+  const ctx = currentChatContext();
+  const ctxDot = byId("hp-ctx-dot");
+  if (ctxDot) ctxDot.hidden = !(ctx.goal?.trim() || ctx.notes?.trim());
+  if (hpGoalInput && document.activeElement !== hpGoalInput) hpGoalInput.value = ctx.goal || "";
+  if (hpContextInput && document.activeElement !== hpContextInput) hpContextInput.value = ctx.notes || "";
+  renderHarnessFiles();
+  if (hpActiveView === "files") renderOpenFilesView();
+}
+
+if (harnessPanel) {
+  harnessToggle?.addEventListener("click", toggleHarnessPanel);
+  byId("harness-close")?.addEventListener("click", () => setHarnessOpen(false));
+  byId("harness-close-sub")?.addEventListener("click", () => setHarnessOpen(false));
+  byId("hp-back")?.addEventListener("click", () => showHarnessView("home"));
+
+  byId("hp-go-review")?.addEventListener("click", () => showHarnessView("review"));
+  byId("hp-go-files")?.addEventListener("click", () => showHarnessView("files"));
+  byId("hp-go-terminal")?.addEventListener("click", () => showHarnessView("terminal"));
+  byId("hp-go-browser")?.addEventListener("click", () => {
+    setHarnessOpen(false);
+    window.PipkinPanels?.showBrowser?.();
+  });
+  byId("hp-go-context")?.addEventListener("click", () => showHarnessView("context"));
+  byId("hp-go-settings")?.addEventListener("click", () => openSettings("tab-general"));
+  byId("hp-choose-workspace")?.addEventListener("click", () => void chooseAgentWorkspace());
+
+  hpOmnibox?.addEventListener("input", () => filterHarnessLauncher(hpOmnibox.value));
+  byId("hp-omnibox-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const q = (hpOmnibox?.value || "").trim();
+    if (!q) return;
+    const looksLikeUrl = !/\s/.test(q) && (q.includes(".") || q.startsWith("localhost") || /^https?:\/\//i.test(q));
+    const visibleItems = [...harnessPanel.querySelectorAll(".hp-launch-item:not([hidden])")];
+    if (!looksLikeUrl && visibleItems.length === 1) {
+      visibleItems[0].click();
+      return;
+    }
+    if (window.PipkinPanels?.hasBrowser) {
+      hpOmnibox.value = "";
+      filterHarnessLauncher("");
+      setHarnessOpen(false);
+      window.PipkinPanels.navigateBrowser(q);
+    } else {
+      window.open(looksLikeUrl ? (/^https?:\/\//i.test(q) ? q : "https://" + q) : "https://www.google.com/search?q=" + encodeURIComponent(q), "_blank", "noopener");
+    }
+  });
+
+  const scheduleContextSave = () => {
+    const savedBadge = byId("hp-context-saved");
+    if (savedBadge) savedBadge.textContent = "Saving…";
+    clearTimeout(hpContextTimer);
+    hpContextTimer = setTimeout(async () => {
+      const notesEl = byId("chat-notes");
+      const goalEl = byId("chat-goal");
+      if (notesEl && hpContextInput) notesEl.value = hpContextInput.value;
+      if (goalEl && hpGoalInput) goalEl.value = hpGoalInput.value;
+      await saveChatContext();
+      if (savedBadge) savedBadge.textContent = "Saved";
+    }, 260);
+  };
+  hpGoalInput?.addEventListener("input", scheduleContextSave);
+  hpContextInput?.addEventListener("input", scheduleContextSave);
+
+  document.addEventListener("pipkin-panels-ready", () => {
+    const syncPanels = () => {
+      if (window.PipkinPanels.browserOpen() && document.body.hasAttribute("data-harness-open")) {
+        setHarnessOpen(false, false);
+      }
+      syncHarnessPanel();
+    };
+    window.PipkinPanels.onStateChange(syncPanels);
+    syncPanels();
+  }, { once: true });
+  showHarnessView("home");
+  setHarnessOpen(Boolean(readLocal("pipkin-harness-open", false)), false);
+}
+
 // Keyboard shortcuts
 document.addEventListener("keydown", (event) => {
+  if (document.body.hasAttribute("data-onboarding")) return;
   const mod = event.metaKey || event.ctrlKey;
   const key = event.key.toLowerCase();
   if (event.key === "Escape" && activeReply && !document.querySelector("dialog[open]")) {
     activeReply.abort();
+    return;
+  }
+  if (event.key === "Escape" && document.body.hasAttribute("data-harness-open") && window.innerWidth <= 960 && !document.querySelector("dialog[open]")) {
+    setHarnessOpen(false);
+    return;
+  }
+  if (mod && event.shiftKey && key === "p") {
+    event.preventDefault();
+    toggleHarnessPanel();
     return;
   }
   if (mod && event.shiftKey && key === "o") {

@@ -240,6 +240,7 @@
     if (show && spawn && !terminals.length) newTerminal();
     else if (show) select(active || terminals[0] || null);
     else document.getElementById("prompt")?.focus({ preventScroll: true });
+    queueMicrotask(() => { if (typeof notifyPanels === "function") notifyPanels(); });
   }
 
   function togglePanel() {
@@ -304,8 +305,14 @@
     if (panel.hidden) for (const term of terminals) term.element.hidden = true;
   }
 
-  /* Browser pane (native, only inside the Pipkin app). */
-  browserButton.hidden = !shell;
+  /* Browser pane (native, only inside the Pipkin app) and selective capability flags. */
+  let browserIsOpen = false;
+  let browserAllowed = Boolean(store.get("pipkin-allow-browser", true));
+  let terminalAllowed = Boolean(store.get("pipkin-allow-terminal", true));
+  const panelListeners = new Set();
+  const notifyPanels = () => { for (const fn of panelListeners) { try { fn(); } catch {} } };
+
+  browserButton.hidden = true;
   browserButton.addEventListener("click", () => shell?.postMessage({ type: "browser", action: "toggle" }));
 
   /** Shows a terminal the agent opened on the server. */
@@ -343,18 +350,67 @@
     }).catch(() => {});
   }
 
+  let dockedSlot = null;
+  const terminalBar = panel.querySelector(".terminal-bar");
+
+  function dockTerminal(slot) {
+    if (!slot || !terminalBar || !host) return;
+    dockedSlot = slot;
+    panel.hidden = true;
+    slot.append(terminalBar, host);
+    if (!terminals.length) newTerminal();
+    else select(active || terminals[0]);
+    setTimeout(() => { if (active) fit(active); active?.instance?.focus(); }, 280);
+    notifyPanels();
+  }
+
+  function undockTerminal() {
+    if (!dockedSlot || !terminalBar || !host) return;
+    panel.append(terminalBar, host);
+    dockedSlot = null;
+    panel.hidden = true;
+    toggleButton.setAttribute("aria-pressed", "false");
+    notifyPanels();
+  }
+
   window.PipkinPanels = {
-    toggleTerminal: togglePanel,
+    toggleTerminal: () => { if (dockedSlot) undockTerminal(); togglePanel(); notifyPanels(); },
+    terminalOpen: () => !panel.hidden || Boolean(dockedSlot),
+    dockTerminal,
+    undockTerminal,
     newTerminal,
     attachTerminal,
     browserRequest,
     browserReply,
     hasBrowser: Boolean(shell),
+    browserOpen: () => browserIsOpen,
+    browserAllowed: () => Boolean(shell) && browserAllowed,
+    setBrowserAllowed: (on) => {
+      browserAllowed = Boolean(on);
+      store.set("pipkin-allow-browser", browserAllowed);
+      notifyPanels();
+    },
+    terminalAllowed: () => terminalAllowed,
+    setTerminalAllowed: (on) => {
+      terminalAllowed = Boolean(on);
+      store.set("pipkin-allow-terminal", terminalAllowed);
+      notifyPanels();
+    },
+    toggleBrowser: () => shell?.postMessage({ type: "browser", action: "toggle" }),
+    showBrowser: () => shell?.postMessage({ type: "browser", action: "show" }),
+    hideBrowser: () => shell?.postMessage({ type: "browser", action: "hide" }),
+    navigateBrowser: (query) => shell?.postMessage({ type: "browser", action: "navigate", query: String(query || "") }),
+    onStateChange: (fn) => { panelListeners.add(fn); return () => panelListeners.delete(fn); },
     /** The terminal the user is looking at, for the agent's terminal tools. */
-    activeTerminalId: () => (active && !active.exited && !panel.hidden ? active.id : terminals.find((term) => !term.exited)?.id) || null,
+    activeTerminalId: () => (active && !active.exited && (!panel.hidden || dockedSlot) ? active.id : terminals.find((term) => !term.exited)?.id) || null,
     /** Called by the app shell when the browser pane opens or closes. */
-    browserState: (open) => browserButton.setAttribute("aria-pressed", String(Boolean(open))),
+    browserState: (open) => {
+      browserIsOpen = Boolean(open);
+      browserButton.setAttribute("aria-pressed", String(browserIsOpen));
+      notifyPanels();
+    },
     openInBrowser: (url) => shell?.postMessage({ type: "browser", action: "open", url }),
     get terminals() { return terminals.map(({ id, title, exited, instance }) => ({ id, title, exited, cols: instance.cols, rows: instance.rows })); },
   };
+  document.dispatchEvent(new Event("pipkin-panels-ready"));
 })();

@@ -158,7 +158,7 @@ class AgentTest(unittest.TestCase):
         result = ChatHandler.agent_model(Runner(), [{"role": "user", "content": "Build the site"}], [tool("write_file")],
                                          True, lambda: None, self.emit, workflow="site")
         self.assertEqual(result["tool_calls"], [tool("write_file", path="index.html")])
-        self.assertEqual([values[1:] for values in calls], [(True, 2200), (False, 2200)])
+        self.assertEqual([values[1:] for values in calls], [(True, 3400), (False, 2400)])
         self.assertIn("one small, complete change", calls[1][0][-1]["content"])
         self.assertFalse((self.path / "incomplete.html").exists())
 
