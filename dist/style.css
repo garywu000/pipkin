@@ -795,6 +795,24 @@ body:not([data-sidebar-collapsed]) #history-toggle, body:not([data-sidebar-colla
 .pressure-banner-copy { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pressure-banner-copy .icon { width: 15px; height: 15px; flex: none; }
 .pressure-banner-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.working-notes {
+  border-top: 1px solid var(--rule); padding: 6px 14px 8px; font-size: .81rem; color: var(--ink-2);
+  background: color-mix(in srgb, var(--surface-2) 38%, transparent);
+}
+.working-notes summary {
+  display: flex; align-items: center; gap: 7px; cursor: pointer; list-style: none;
+  font-weight: 560; color: var(--muted); user-select: none; padding: 2px 0;
+}
+.working-notes summary::-webkit-details-marker { display: none; }
+.working-notes summary .icon { width: 14px; height: 14px; color: var(--accent-text); }
+.working-notes summary .chev-sm { margin-left: auto; color: var(--muted); transition: transform .18s var(--ease-out); }
+.working-notes[open] summary .chev-sm { transform: rotate(90deg); }
+.working-notes ul { margin: 6px 0 2px; padding-left: 16px; display: grid; gap: 4px; }
+.working-notes li { line-height: 1.42; }
+.working-notes li code {
+  margin-right: 6px; padding: 1px 5px; border-radius: 5px; font-size: .75rem;
+  background: var(--code-bg); color: var(--ink);
+}
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; transition: background-color .22s, box-shadow .22s; }
 .model-status[data-state="ready"] {
   border-color: color-mix(in srgb, var(--accent) 30%, var(--rule));

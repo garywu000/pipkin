@@ -232,3 +232,33 @@ class RepeatedFailureTest(PlanFirstTest):
         with self.assertRaisesRegex(server.ThinkingLoop, "repeated output"):
             for _ in range(10):
                 watch.add(chunk)
+
+    def test_working_memory_and_read_ledger_survive_compaction_and_checkpoints(self):
+        self.workspace.write_text("brief.md", "# Project Alpha\nBudget is $42,000.\n" + ("Detail line.\n" * 180))
+        replies = iter([
+            {"tool_calls": [tool("read_file", path="brief.md", start_line=1, count=120)]},
+            {"tool_calls": [tool("save_note", note="Budget is $42,000", file="brief.md")]},
+            {"tool_calls": [tool("read_file", path="brief.md", start_line=121, count=100)]},
+            {"tool_calls": [tool("list_files", path=".")]},
+            {"content": "Summary ready."},
+        ])
+        seen = []
+        saved_checkpoint = {}
+        events = []
+
+        def model(messages, _tools, _think):
+            seen.append(messages)
+            return next(replies)
+
+        work = Agent(model, lambda ev, **d: events.append((ev, d)), lambda: None, lambda *_: True,
+                     workspace=self.workspace, mode="auto", web=False, num_ctx=1024)
+        work.run("System", [], "Summarize brief.md.",
+                 save_checkpoint=lambda **fields: saved_checkpoint.update(fields))
+        self.assertTrue(any(ev == "notes" and d["notes"][0]["text"] == "Budget is $42,000" for ev, d in events))
+        self.assertGreaterEqual(work.compactions, 1, "tight num_ctx should trigger fit() compaction")
+        task_msg = seen[-1][1]["content"]
+        self.assertIn("Working memory", task_msg)
+        self.assertIn("[brief.md] Budget is $42,000", task_msg)
+        self.assertIn("Read brief.md", task_msg)
+        self.assertEqual(saved_checkpoint["working_notes"], [{"text": "Budget is $42,000", "file": "brief.md"}])
+        self.assertIn("brief.md", saved_checkpoint["read_ledger"])

@@ -17,7 +17,7 @@
       version: 2, state: "working", startedAt: Date.now(), endedAt: null,
       workspace: meta.workspace || null, workspacePath: meta.workspacePath || null,
       mode: meta.mode || "ask", web: Boolean(meta.web),
-      plan: [], entries: [], files: [], draft: "", answer: "", usage: null, runId: null, checkpointId: meta.checkpointId || null,
+      plan: [], workingNotes: [], entries: [], files: [], draft: "", answer: "", usage: null, runId: null, checkpointId: meta.checkpointId || null,
     };
   }
 
@@ -81,6 +81,7 @@
         break;
       case "checkpoint_restored":
         run.plan = event.plan;
+        if (Array.isArray(event.notes)) run.workingNotes = event.notes;
         for (const action of event.activity) {
           if (action.type === "text") {
             run.entries.push({ type: "text", text: action.text });
@@ -128,7 +129,7 @@
         break;
       case "tool":
         settleDraft(run);
-        if (event.name === "update_plan") break;
+        if (event.name === "update_plan" || event.name === "save_note") break;
         run.entries.push({ type: "tool", id: event.id, name: event.name, label: event.label, state: "running", output: "", diff: "", open: false });
         break;
       case "tool_result": {
@@ -156,6 +157,9 @@
       }
       case "plan":
         run.plan = (event.steps || []).map((step) => ({ text: step.text, status: step.status }));
+        break;
+      case "notes":
+        run.workingNotes = Array.isArray(event.notes) ? event.notes : [];
         break;
       case "memory":
         settleDraft(run);
@@ -446,7 +450,7 @@
     }
     let open = true;
     let timer = 0;
-    let state, badgesKey, planKey, planState;
+    let state, badgesKey, planKey, planState, notesKey;
     const rows = new WeakMap();
     const groups = new WeakMap();
     const glyph = el("span", { className: "agent-summary-icon" });
@@ -454,8 +458,9 @@
     const summary = el("button", { type: "button", className: "agent-summary" }, glyph, label, icon("chevron-right", "icon chev"));
     const badges = el("div", { className: "agent-badges" });
     const plan = el("div");
+    const notesSlot = el("div");
     const timeline = el("ol", { className: "timeline" });
-    const body = el("div", { className: "agent-body" }, plan, timeline);
+    const body = el("div", { className: "agent-body" }, plan, notesSlot, timeline);
     const busyText = el("span");
     const busyRow = el("li", { className: "step-now" }, el("span", { className: "step-icon" }, spinner()), busyText);
     root.append(el("div", { className: "agent-head" }, summary, badges), body);
@@ -566,6 +571,22 @@
         planState = state;
         plan.replaceChildren(...(run.plan.length ? [planCard(run.plan, "Plan", state === "working")] : []));
         plan.className = run.plan.length && state === "working" ? "plan-pin" : "";
+      }
+      const nextNotes = run.workingNotes || [];
+      if (nextNotes !== notesKey) {
+        notesKey = nextNotes;
+        if (nextNotes.length) {
+          const wasOpen = notesSlot.querySelector("details")?.open ?? false;
+          notesSlot.replaceChildren(
+            el("details", { className: "working-notes", open: wasOpen },
+              el("summary", {}, icon("brain"), el("span", { text: `Working notes · ${nextNotes.length}` }), icon("chevron-right", "icon chev-sm")),
+              el("ul", {}, ...nextNotes.map((item) => el("li", {},
+                item.file ? el("code", { text: item.file }) : null,
+                el("span", { text: item.text }))))),
+          );
+        } else {
+          notesSlot.replaceChildren();
+        }
       }
 
       let batch = [];

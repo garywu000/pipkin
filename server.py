@@ -2291,7 +2291,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             emit("run", id=run_id, workspace=workspace.path.name if workspace else None,
                  workspacePath=str(workspace.path) if workspace else None, mode=mode, notes=notes_name)
             if restored is not None:
-                emit("checkpoint_restored", plan=restored.get("plan", []), activity=restored.get("activity", []),
+                emit("checkpoint_restored", plan=restored.get("plan", []), notes=restored.get("working_notes", []),
+                     activity=restored.get("activity", []),
                      uncertain=list(restored.get("uncertain", {}).values()), sources=restored.get("sources", []),
                      files=restored.get("files", []), outputs=restored.get("outputs", []))
                 if restored.get("result"):

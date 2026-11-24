@@ -1017,7 +1017,7 @@ def web_search(query, sources=None):
 COMMAND_IDLE = 20
 BUILTIN_TOOL_NAMES = frozenset({
     "check_page", "read_file", "read_files", "write_file", "edit_file", "write_page",
-    "list_files", "search_text", "outline_file", "map_document", "update_plan",
+    "list_files", "search_text", "outline_file", "map_document", "update_plan", "save_note",
     "web_search", "web_fetch", "remember", "browser_open", "browser_read",
     "terminal_read", "terminal_run",
 })
@@ -1211,6 +1211,11 @@ BROWSER_TOOLS = [
 MEMORY_TOOL = schema("remember", "Save a durable fact about the user or their preferences for future conversations.", [
     ("fact", "string", "One short sentence"),
 ])
+NOTE_TOOL = schema("save_note", "Save a brief working note for this run (key facts, findings, decisions, or file locations). "
+                   "Notes survive context trimming so you never need to re-read files you already inspected.", [
+    ("note", "string", "One concise fact or finding (under 240 characters)"),
+    ("file", "string", "Optional relative workspace path this note came from"),
+], optional=("file",))
 
 
 SITE_TOOLS = [
@@ -1242,7 +1247,7 @@ class _PageReferences(HTMLParser):
 
 
 def available_tools(workspace, mode, web, memory, panels=None, workflow=None):
-    tools = [PLAN_TOOL]
+    tools = [PLAN_TOOL, NOTE_TOOL]
     if workspace is not None:
         tools += READ_TOOLS
         if workflow == "site":
@@ -1373,6 +1378,8 @@ def describe(name, args):
         return "Fetch " + str(args.get("url", ""))[:140]
     if name == "remember":
         return "Save a memory"
+    if name == "save_note":
+        return "Save working note"
     if name == "terminal_read":
         return "Read your terminal"
     if name == "terminal_run":
@@ -1491,6 +1498,8 @@ class Agent:
         self.since_plan = 0
         self.exploring = 0
         self.summary = []
+        self.working_notes = []
+        self.read_ledger = {}
         self.compactions = 0
         self.steering_texts = []
         self.results = {}
@@ -1547,11 +1556,44 @@ class Agent:
             self.write_task(messages)
         return list(messages)
 
+    def record_read(self, path, detail, output):
+        """Remember what files and ranges were read so the model stops re-reading after compaction."""
+        clean = str(path or "").strip()
+        if not clean:
+            return
+        snippet = ""
+        for raw in str(output or "").splitlines():
+            line = re.sub(r"^\s*\d+\|\s*", "", raw).strip()
+            if not line or line.startswith(("File:", "Lines ", "Showing ", "Source ", "---")):
+                continue
+            snippet = clip(" ".join(line.split()), 110)
+            break
+        entry = self.read_ledger.get(clean) or {"ranges": [], "snippet": ""}
+        if detail and detail not in entry["ranges"]:
+            entry["ranges"] = [*entry["ranges"][-3:], detail]
+        if snippet:
+            entry["snippet"] = snippet
+        self.read_ledger[clean] = entry
+        if len(self.read_ledger) > 24:
+            self.read_ledger.pop(next(iter(self.read_ledger)))
+
     def write_task(self, messages):
         text = self.task
         if self.steering_texts:
             text += ("\n\nUpdates from the user during this run. Follow newer updates when they change the task.\n\n"
                      + "\n\n".join(self.steering_texts))
+        if self.working_notes or self.read_ledger:
+            lines = []
+            for item in self.working_notes[-24:]:
+                prefix = f"[{item['file']}] " if item.get("file") else ""
+                lines.append(f"- {prefix}{item['text']}")
+            for path, info in list(self.read_ledger.items())[-16:]:
+                ranges = ", ".join(info.get("ranges") or [])
+                loc = f"{path} ({ranges})" if ranges else path
+                snip = f": {info['snippet']}" if info.get("snippet") else ""
+                lines.append(f"- Read {loc}{snip}")
+            text += ("\n\nWorking memory (survived context trimming — use these facts instead of re-reading unchanged files):\n"
+                     + "\n".join(lines))
         if self.summary:
             text += ("\n\nEarlier steps of this run (their full results were removed to save space; call a tool "
                      "again only if you need the exact text):\n" + "\n".join("- " + line for line in self.summary))
@@ -1842,6 +1884,14 @@ class Agent:
             fact = require_str(args, "fact", 300).strip()
             self.emit("memory", text=fact)
             return "Saved to the user's memory."
+        if name == "save_note":
+            note = require_str(args, "note", 240).strip()
+            file_ref = str(args.get("file") or "").strip()[:160]
+            item = {"text": note, **({"file": file_ref} if file_ref else {})}
+            if not any(existing.get("text") == note and existing.get("file", "") == file_ref for existing in self.working_notes):
+                self.working_notes = [*self.working_notes[-23:], item]
+                self.emit("notes", notes=list(self.working_notes))
+            return "Working note saved."
         if name == "web_search":
             return web_search(require_str(args, "query", 300).strip(), sources=self.sources)
         if name == "web_fetch":
@@ -1878,13 +1928,19 @@ class Agent:
         if name == "search_text":
             return workspace.search_text(args.get("path") or ".", require_str(args, "query", 200).strip(), self.check)
         if name == "outline_file":
-            return workspace.outline(require_str(args, "path", 500))
+            path = require_str(args, "path", 500)
+            out = workspace.outline(path)
+            self.record_read(path, "outline", out)
+            return out
         if name == "map_document":
+            path = require_str(args, "path", 500)
             queries = args.get("queries", [])
             if not isinstance(queries, list) or len(queries) > 8:
                 raise ValueError("Provide up to eight anchor queries.")
             queries = [require_str({"query": query}, "query", 80).strip() for query in queries]
-            return workspace.map_document(require_str(args, "path", 500), queries, self.check)
+            out = workspace.map_document(path, queries, self.check)
+            self.record_read(path, "mapped", out)
+            return out
         if name == "check_page":
             path = require_str(args, "path", 500)
             report = workspace.check_page(path, self.check)
@@ -1893,9 +1949,11 @@ class Agent:
         if name == "read_file":
             path = require_str(args, "path", 500)
             site = self.workflow == "site"
-            return workspace.read_file(path, as_int(args.get("start_line"), 1, 1, 10_000_000),
-                                       as_int(args.get("count"), 80 if site else 200, 1, 400),
-                                       sources=self.sources, limit=4200 if site else 12_000)
+            start = as_int(args.get("start_line"), 1, 1, 10_000_000)
+            count = as_int(args.get("count"), 80 if site else 200, 1, 400)
+            out = workspace.read_file(path, start, count, sources=self.sources, limit=4200 if site else 12_000)
+            self.record_read(path, f"lines {start}–{start + count - 1}", out)
+            return out
         if name == "read_files":
             files = args.get("files")
             if not isinstance(files, list) or not 1 <= len(files) <= 4 or not all(isinstance(item, dict) for item in files):
@@ -1904,9 +1962,12 @@ class Agent:
             for item in files:
                 self.check()
                 path = require_str(item, "path", 500)
+                start = as_int(item.get("start_line"), 1, 1, 10_000_000)
+                count = as_int(item.get("count"), 80, 1, 200)
                 try:
-                    excerpts.append(workspace.read_file(path, as_int(item.get("start_line"), 1, 1, 10_000_000),
-                                     as_int(item.get("count"), 80, 1, 200), sources=self.sources, limit=2400))
+                    excerpt = workspace.read_file(path, start, count, sources=self.sources, limit=2400)
+                    self.record_read(path, f"lines {start}–{start + count - 1}", excerpt)
+                    excerpts.append(excerpt)
                 except (ValueError, OSError) as error:
                     detail = str(error) if isinstance(error, ValueError) else "The file could not be opened."
                     excerpts.append(f"{path}: {detail}")
@@ -1941,6 +2002,7 @@ class Agent:
             if path not in self.saved_files:
                 self.saved_files.append(path)
             self.saved_file = path
+            self.read_ledger[path] = {"ranges": ["modified in this run"], "snippet": ""}
             self.emit("diff", id=self.current_id, text=diff)
             self.record_output(path, action="created" if before is None else "edited",
                                undo=self.remember_undo(path, before, after.encode("utf-8")))
@@ -1979,6 +2041,8 @@ class Agent:
         self.seen.update(saved.get("seen", []))
         self.counter = saved.get("counter", 0)
         self.summary = list(saved.get("summary", []))
+        self.working_notes = list(saved.get("working_notes", []))
+        self.read_ledger = dict(saved.get("read_ledger", {}))
         self.task = task
         activity = list(saved.get("activity", []))
         last_action = next((item for item in reversed(activity) if item.get("name")), {})
@@ -2035,7 +2099,7 @@ class Agent:
             path.casefold().endswith(".html") for path in self.saved_files
         )
         steering_texts = self.steering_texts
-        if self.summary:
+        if self.summary or self.working_notes or self.read_ledger:
             self.write_task(messages)
         for step in range(self.max_steps + 1):
             self.check()
@@ -2235,12 +2299,13 @@ class Agent:
                 if save_checkpoint:
                     if ok:
                         self.uncertain.pop(self.current_id, None)
-                    if name != "update_plan":
+                    if name not in ("update_plan", "save_note"):
                         activity = [*activity[-39:], {"name": str(name), "label": label,
                                                      **{key: value for key, value in outcome.items() if key != "sources"}}]
                     save_checkpoint(evidence=deepcopy(messages[self.history_len + 2:]), seen=sorted(self.seen), plan=self.plan,
                                     counter=self.counter, activity=activity, uncertain=dict(self.uncertain),
-                                    sources=self.sources.items, summary=self.summary, files=self.saved_files,
+                                    sources=self.sources.items, summary=self.summary, working_notes=self.working_notes,
+                                    read_ledger=self.read_ledger, files=self.saved_files,
                                     outputs=self.outputs, pending_edit_path=canceled_path)
                 self.emit("tool_result", **outcome)
             if not accepted_calls:
