@@ -103,9 +103,30 @@ const PALETTES = [
 ];
 const PALETTE_IDS = PALETTES.map((p) => p.id);
 
+const DEFAULT_SHORTCUTS = {
+  newChat: "Mod+Shift+O",
+  search: "Mod+K",
+  sidebar: "Mod+Shift+S",
+  harness: "Mod+Shift+P",
+  switchMode: "Mod+Shift+A",
+  settings: "Mod+,",
+  focusPrompt: "/",
+};
+const SHORTCUT_ITEMS = [
+  ["newChat", "New chat"],
+  ["search", "Search chats"],
+  ["sidebar", "Toggle sidebar"],
+  ["harness", "Toggle right panel"],
+  ["switchMode", "Switch Chat / Agent"],
+  ["settings", "Settings"],
+  ["focusPrompt", "Focus the message box"],
+];
+const RESERVED_SHORTCUTS = new Set(["Mod+Q", "Mod+W", "Mod+C", "Mod+V", "Mod+X", "Mod+A", "Mod+Z", "Mod+R"]);
+
 const defaultSettings = {
   theme: "system", palette: "emerald", enterToSend: true, showStats: true, temperature: 0.7, instructions: "",
-  memoryEnabled: true, protectMemory: true, allowShell: false, exploreModel: "", permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
+  memoryEnabled: true, protectMemory: true, allowShell: false, exploreModel: "", shortcuts: {},
+  permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
   sidebarCollapsed: false, sidebarWidth: 268,
 };
 const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
@@ -734,6 +755,11 @@ function canRenameChat(id) {
 function openChatDialog(id, dialog) {
   const chat = chatTitles.get(id);
   if (!chat || dialog.open || (dialog === renameDialog ? !canRenameChat(id) : sidebarContent.inert)) return;
+  if (dialog === deleteDialog && activeReply && id === activeReplyChatId) {
+    closeChatMenu();
+    toast("Stop the active run before deleting this chat");
+    return;
+  }
   closeChatMenu();
   dialogChatId = id;
   dialog.returnValue = "";
@@ -3750,6 +3776,7 @@ function openSettings(tabId = "tab-general") {
   if (protectBox) protectBox.checked = settings.protectMemory !== false;
   const shellBox = byId("setting-allow-shell");
   if (shellBox) shellBox.checked = Boolean(settings.allowShell);
+  if (typeof renderShortcutsEditor === "function") renderShortcutsEditor();
   renderContextRecommendation(modelInfo.models.find((m) => m.name === modelInfo.model));
   byId("setting-temperature").value = settings.temperature;
   byId("temperature-value").textContent = Number(settings.temperature).toFixed(2);
@@ -4972,11 +4999,112 @@ if (harnessPanel) {
   setHarnessOpen(Boolean(readLocal("pipkin-harness-open", false)), false);
 }
 
+/* ---------- Customizable Keyboard Shortcuts ---------- */
+let recordingShortcut = null;
+
+function shortcutMap() {
+  const custom = settings.shortcuts && typeof settings.shortcuts === "object" ? settings.shortcuts : {};
+  return { ...DEFAULT_SHORTCUTS, ...custom };
+}
+
+function formatShortcutParts(combo) {
+  if (!combo) return [];
+  return combo.split("+").map((part) => (
+    part === "Mod" ? "⌘" : part === "Shift" ? "⇧" : part === "Alt" ? "⌥" : part === "Ctrl" ? "⌃" : part
+  ));
+}
+
+function eventToShortcut(event) {
+  const raw = event.key;
+  if (!raw || ["Meta", "Control", "Shift", "Alt"].includes(raw)) return null;
+  const parts = [];
+  if (event.metaKey) parts.push("Mod");
+  else if (event.ctrlKey) parts.push("Ctrl");
+  if (event.altKey) parts.push("Alt");
+  if (event.shiftKey && raw.length === 1 && /[a-z]/i.test(raw)) parts.push("Shift");
+  else if (event.shiftKey && raw.length > 1) parts.push("Shift");
+  const key = raw === " " ? "Space" : raw.length === 1 ? raw.toUpperCase() : raw;
+  parts.push(key);
+  return parts.join("+");
+}
+
+function syncShortcutHints() {
+  const map = shortcutMap();
+  const fmt = (id) => formatShortcutParts(map[id]).join("");
+  const newKbd = byId("new-chat")?.querySelector("kbd");
+  if (newKbd) newKbd.textContent = fmt("newChat");
+  const searchKbd = byId("chat-search")?.parentElement?.querySelector("kbd");
+  if (searchKbd) searchKbd.textContent = fmt("search");
+  const settingsKbd = byId("open-settings")?.querySelector("kbd");
+  if (settingsKbd) settingsKbd.textContent = fmt("settings");
+  if (byId("topbar-new")) byId("topbar-new").title = `New chat (${fmt("newChat")})`;
+  if (byId("toggle-harness")) byId("toggle-harness").title = `Harness panel (${fmt("harness")})`;
+}
+
+function renderShortcutsEditor() {
+  const list = byId("shortcuts-editor");
+  if (!list) return;
+  const map = shortcutMap();
+  const rows = SHORTCUT_ITEMS.map(([id, label]) => {
+    const isRec = recordingShortcut === id;
+    const btn = el("button", {
+      type: "button", className: "shortcut-btn",
+      dataset: { recording: String(isRec) },
+      "aria-label": `${label}: ${formatShortcutParts(map[id]).join(" ")}. Click to customize.`,
+    }, ...(isRec ? [el("span", { text: "Press keys…" })] : formatShortcutParts(map[id]).map((k) => el("kbd", { text: k }))));
+    btn.addEventListener("click", () => {
+      recordingShortcut = recordingShortcut === id ? null : id;
+      renderShortcutsEditor();
+    });
+    return el("div", { className: "shortcut-row", role: "listitem" }, el("span", { text: label }), btn);
+  });
+  rows.push(el("div", { className: "shortcut-row", role: "listitem" },
+    el("span", { text: "Stop the reply" }),
+    el("span", { className: "shortcut-btn", "aria-disabled": "true" }, el("kbd", { text: "Esc" }))));
+  list.replaceChildren(...rows);
+}
+
+byId("reset-shortcuts")?.addEventListener("click", () => {
+  recordingShortcut = null;
+  saveSettings({ shortcuts: {} });
+  renderShortcutsEditor();
+  syncShortcutHints();
+  toast("Shortcuts reset to defaults");
+});
+settingsDialog.addEventListener("close", () => { recordingShortcut = null; });
+syncShortcutHints();
+
 // Keyboard shortcuts
 document.addEventListener("keydown", (event) => {
+  if (recordingShortcut) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      recordingShortcut = null;
+      renderShortcutsEditor();
+      return;
+    }
+    const combo = eventToShortcut(event);
+    if (!combo) return;
+    if (RESERVED_SHORTCUTS.has(combo)) {
+      toast(`${formatShortcutParts(combo).join("")} is reserved by macOS`);
+      return;
+    }
+    const current = shortcutMap();
+    const conflict = SHORTCUT_ITEMS.find(([id]) => id !== recordingShortcut && current[id] === combo);
+    if (conflict) {
+      toast(`${formatShortcutParts(combo).join("")} is already used by ${conflict[1]}`);
+      return;
+    }
+    const next = { ...(settings.shortcuts || {}), [recordingShortcut]: combo };
+    recordingShortcut = null;
+    saveSettings({ shortcuts: next });
+    renderShortcutsEditor();
+    syncShortcutHints();
+    toast("Shortcut updated");
+    return;
+  }
   if (document.body.hasAttribute("data-onboarding")) return;
-  const mod = event.metaKey || event.ctrlKey;
-  const key = event.key.toLowerCase();
   if (event.key === "Escape" && activeReply && !document.querySelector("dialog[open]")) {
     activeReply.abort();
     return;
@@ -4985,33 +5113,37 @@ document.addEventListener("keydown", (event) => {
     setHarnessOpen(false);
     return;
   }
-  if (mod && event.shiftKey && key === "p") {
+  const combo = eventToShortcut(event);
+  if (!combo) return;
+  const map = shortcutMap();
+  const inInput = Boolean(event.target.closest("input, textarea, select, [contenteditable]"));
+  const dialogOpen = Boolean(document.querySelector("dialog[open]"));
+  if (!combo.includes("+") && (inInput || dialogOpen)) return;
+  if (combo === map.harness) {
     event.preventDefault();
     toggleHarnessPanel();
-    return;
-  }
-  if (mod && event.shiftKey && key === "o") {
+  } else if (combo === map.newChat) {
     event.preventDefault();
     selectChat(null);
-  } else if (mod && !event.shiftKey && key === "k") {
+  } else if (combo === map.search) {
     event.preventDefault();
     if (narrow.matches) showHistory(true);
     else if (document.body.hasAttribute("data-sidebar-collapsed")) toggleSidebar();
     searchInput.focus();
     searchInput.select();
-  } else if (mod && event.shiftKey && key === "s") {
+  } else if (combo === map.sidebar) {
     event.preventDefault();
     toggleSidebar();
-  } else if (mod && event.shiftKey && key === "a") {
+  } else if (combo === map.switchMode) {
     event.preventDefault();
     if (!agentMode.disabled) switchMode(agentMode.checked ? "chat" : "work");
-  } else if (mod && key === ",") {
+  } else if (combo === map.settings) {
     event.preventDefault();
     openSettings();
-  } else if (event.key === "/" && !mod && !event.target.closest("input, textarea, select, [contenteditable]") && !document.querySelector("dialog[open]")) {
+  } else if (combo === map.focusPrompt && !inInput && !dialogOpen) {
     event.preventDefault();
     promptBox.focus();
-    if (!promptBox.value && !promptBox.readOnly) {
+    if (combo === "/" && !promptBox.value && !promptBox.readOnly) {
       promptBox.value = "/";
       updateControls();
       updateTokenMeter();

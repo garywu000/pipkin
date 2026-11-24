@@ -2152,6 +2152,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ValueError()
             if explore_model == current().get("model"):
                 explore_model = None
+            elif explore_model:
+                local_names = {m["name"] for m in installed_models() if m.get("size") and not m["name"].endswith(":cloud")}
+                if explore_model not in local_names:
+                    explore_model = None
             if not isinstance(task, str) or not task.strip() or len(task) > 40_000:
                 raise ValueError()
             if key is not None and not valid_workspace_key(key):
