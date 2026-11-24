@@ -77,6 +77,25 @@ class TelemetryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "memory pressure is critical"):
                 sessions.ensure_loaded()
 
+    def test_parse_vm_stat_and_swap_usage(self):
+        sample_vm = (
+            "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+            "Pages wired down: 100000.\n"
+            "Pages purgeable: 10000.\n"
+            "File-backed pages: 50000.\n"
+            "Anonymous pages: 210000.\n"
+            "Pages occupied by compressor: 50000.\n"
+        )
+        info = server.parse_vm_stat(sample_vm)
+        self.assertEqual(info["app"], 200000 * 16384)
+        self.assertEqual(info["wired"], 100000 * 16384)
+        self.assertEqual(info["compressed"], 50000 * 16384)
+        self.assertEqual(info["cached"], 60000 * 16384)
+        self.assertEqual(info["used"], 350000 * 16384)
+        swap = server.parse_swap_usage("total = 4096.00M  used = 2048.00M  free = 2048.00M  (encrypted)")
+        self.assertEqual(swap["swap_total"], 4096 * 1024 * 1024)
+        self.assertEqual(swap["swap_used"], 2048 * 1024 * 1024)
+
 
 if __name__ == "__main__":
     unittest.main()

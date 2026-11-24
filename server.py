@@ -696,13 +696,94 @@ class MemoryGuard:
         return None, None
 
 
+_MEMORY_HISTORY = []
+_MEMORY_HISTORY_LOCK = Lock()
+
+
+def parse_vm_stat(raw):
+    """Parse macOS `vm_stat` output into Activity Monitor memory breakdown in bytes."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    page_match = re.search(r"page size of (\d+) bytes", raw)
+    page_size = int(page_match.group(1)) if page_match else 4096
+    counts = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, _, rest = line.partition(":")
+        val = re.sub(r"[^\d]", "", rest)
+        if val:
+            counts[key.strip().strip('"').casefold()] = int(val)
+    if not counts:
+        return None
+    anon = counts.get("anonymous pages", counts.get("pages active", 0))
+    purgeable = counts.get("pages purgeable", 0)
+    wired = counts.get("pages wired down", 0)
+    compressed = counts.get("pages occupied by compressor", 0)
+    file_backed = counts.get("file-backed pages", 0)
+    app_bytes = max(0, anon - purgeable) * page_size
+    wired_bytes = max(0, wired) * page_size
+    compressed_bytes = max(0, compressed) * page_size
+    cached_bytes = max(0, file_backed + purgeable) * page_size
+    used_bytes = app_bytes + wired_bytes + compressed_bytes
+    return {
+        "used": used_bytes,
+        "app": app_bytes,
+        "wired": wired_bytes,
+        "compressed": compressed_bytes,
+        "cached": cached_bytes,
+    }
+
+
+def parse_swap_usage(raw):
+    """Parse `sysctl -n vm.swapusage` (e.g. 'total = 4096.00M  used = 2703.38M  free = 1392.62M')."""
+    if not isinstance(raw, str) or not raw.strip():
+        return {"swap_total": 0, "swap_used": 0}
+    units = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+    out = {"swap_total": 0, "swap_used": 0}
+    for key, field in (("total", "swap_total"), ("used", "swap_used")):
+        match = re.search(rf"\b{key}\s*=\s*(\d+(?:\.\d+)?)([KMGT])", raw, re.IGNORECASE)
+        if match:
+            out[field] = int(float(match.group(1)) * units[match.group(2).upper()])
+    return out
+
+
+def mac_memory_breakdown(total_ram):
+    if sys.platform != "darwin":
+        return None
+    try:
+        vm = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=1.0, check=False)
+        info = parse_vm_stat(vm.stdout) if vm.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        info = None
+    if not info:
+        return None
+    try:
+        sw = subprocess.run(["/usr/sbin/sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=1.0, check=False)
+        swap = parse_swap_usage(sw.stdout) if sw.returncode == 0 else {"swap_total": 0, "swap_used": 0}
+    except (OSError, subprocess.SubprocessError):
+        swap = {"swap_total": 0, "swap_used": 0}
+    info.update(swap)
+    info["used_pct"] = min(100, round((info["used"] / total_ram) * 100)) if total_ram else 0
+    return info
+
+
 def system_telemetry():
     loaded = running_models()
     total_ram = total_memory_bytes()
+    pressure = memory_pressure()
+    memory = mac_memory_breakdown(total_ram)
     active_size = sum(item.get("size", 0) for item in loaded)
+    with _MEMORY_HISTORY_LOCK:
+        if memory is not None:
+            _MEMORY_HISTORY.append({"pct": memory["used_pct"], "pressure": pressure})
+            del _MEMORY_HISTORY[:-30]
+        history = list(_MEMORY_HISTORY)
     return {
-        "pressure": memory_pressure(),
+        "pressure": pressure,
         "total_ram": total_ram,
+        "memory": memory,
+        "history": history,
         "loaded": loaded,
         "recommended_ctx": recommend_num_ctx(total_ram, active_size) if active_size else None,
         "auto_protect": bool(load_settings().get("protect_memory", True)),

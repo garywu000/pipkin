@@ -1557,10 +1557,54 @@ function positionTelemetryPopover() {
   telemetryPanel.style.top = top + "px";
 }
 
+function buildMemoryGraph(samples, pressure) {
+  const NS = "http://www.w3.org/2000/svg";
+  const W = 300, H = 64, padY = 6;
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("class", "tel-graph-svg");
+  svg.setAttribute("aria-hidden", "true");
+  for (const frac of [0.25, 0.5, 0.75]) {
+    const y = (H - padY) - frac * (H - padY * 2);
+    const grid = document.createElementNS(NS, "line");
+    grid.setAttribute("x1", "0");
+    grid.setAttribute("x2", String(W));
+    grid.setAttribute("y1", y.toFixed(1));
+    grid.setAttribute("y2", y.toFixed(1));
+    grid.setAttribute("class", "tel-grid");
+    svg.append(grid);
+  }
+  const pts = (samples && samples.length ? samples : [{ pct: telemetry.memory?.used_pct || 0, pressure }]).slice(-30);
+  const series = pts.length === 1 ? [pts[0], pts[0]] : pts;
+  const coords = series.map((item, idx) => {
+    const x = (idx / (series.length - 1)) * (W - 6) + 3;
+    const pct = Math.max(2, Math.min(100, Number(item.pct) || 0));
+    const y = (H - padY) - (pct / 100) * (H - padY * 2);
+    return [x, y];
+  });
+  const lineD = coords.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
+  const areaD = `${lineD} L${coords[coords.length - 1][0].toFixed(1)} ${H} L${coords[0][0].toFixed(1)} ${H} Z`;
+  const area = document.createElementNS(NS, "path");
+  area.setAttribute("d", areaD);
+  area.setAttribute("class", "tel-area");
+  const line = document.createElementNS(NS, "path");
+  line.setAttribute("d", lineD);
+  line.setAttribute("class", "tel-line");
+  const [lx, ly] = coords[coords.length - 1];
+  const dot = document.createElementNS(NS, "circle");
+  dot.setAttribute("cx", lx.toFixed(1));
+  dot.setAttribute("cy", ly.toFixed(1));
+  dot.setAttribute("r", "3.2");
+  dot.setAttribute("class", "tel-end-dot");
+  svg.append(area, line, dot);
+  return el("div", { className: "tel-graph", dataset: { pressure: pressure || "normal" } }, svg);
+}
+
 function renderTelemetryPopover() {
   if (!telemetryPanel) return;
   const p = PRESSURE_LABELS[telemetry.pressure] || PRESSURE_LABELS.unknown;
   const totalRam = telemetry.total_ram ? formatSize(telemetry.total_ram) : "";
+  const mem = telemetry.memory || null;
   const loaded = telemetry.loaded || [];
   const totalLoaded = loaded.reduce((sum, item) => sum + (item.size || 0), 0);
   const ramShare = telemetry.total_ram && totalLoaded ? Math.min(100, Math.round((totalLoaded / telemetry.total_ram) * 100)) : 0;
@@ -1593,13 +1637,40 @@ function renderTelemetryPopover() {
     openSettings("tab-model");
   });
 
-  const metricLine = totalLoaded
+  const metricLine = mem && telemetry.total_ram
     ? el("div", { className: "tel-metric" },
-        el("strong", { text: formatSize(totalLoaded) }),
-        el("span", { text: totalRam ? `of ${totalRam} (${ramShare}%)` : "in Ollama" }))
-    : totalRam
-      ? el("div", { className: "tel-metric" }, el("strong", { text: "Idle" }), el("span", { text: `${totalRam} unified` }))
-      : null;
+        el("strong", { text: formatSize(mem.used) }),
+        el("span", { text: `of ${totalRam} used (${mem.used_pct}%)` }))
+    : totalLoaded
+      ? el("div", { className: "tel-metric" },
+          el("strong", { text: formatSize(totalLoaded) }),
+          el("span", { text: totalRam ? `of ${totalRam} (${ramShare}%)` : "in Ollama" }))
+      : totalRam
+        ? el("div", { className: "tel-metric" }, el("strong", { text: "Idle" }), el("span", { text: `${totalRam} unified` }))
+        : null;
+
+  let breakdown = null;
+  if (mem && telemetry.total_ram) {
+    const pct = (bytes) => Math.max(0, Math.min(100, (bytes / telemetry.total_ram) * 100)).toFixed(1) + "%";
+    const segBar = el("div", { className: "tel-seg-bar", "aria-hidden": "true" },
+      el("i", { className: "seg-app", style: `width:${pct(mem.app)}` }),
+      el("i", { className: "seg-wired", style: `width:${pct(mem.wired)}` }),
+      el("i", { className: "seg-comp", style: `width:${pct(mem.compressed)}` }));
+    const stat = (label, value, dotClass) => el("div", { className: "tel-stat" },
+      el("span", { className: "tel-stat-label" }, dotClass ? el("i", { className: "tel-stat-dot " + dotClass }) : null, label),
+      el("strong", { text: value }));
+    const statsGrid = el("div", { className: "tel-stats" },
+      stat("App", formatSize(mem.app), "seg-app"),
+      stat("Wired", formatSize(mem.wired), "seg-wired"),
+      stat("Compressed", formatSize(mem.compressed), "seg-comp"),
+      stat("Cached", formatSize(mem.cached)),
+      stat("Swap used", mem.swap_used ? formatSize(mem.swap_used) : "0 MB"),
+      stat("Ollama", totalLoaded ? formatSize(totalLoaded) : "Idle"));
+    breakdown = el("div", { className: "tel-breakdown" },
+      buildMemoryGraph(telemetry.history, telemetry.pressure),
+      segBar,
+      statsGrid);
+  }
 
   telemetryPanel.replaceChildren(
     el("div", { className: "tel-section" },
@@ -1607,7 +1678,7 @@ function renderTelemetryPopover() {
         el("span", { className: "tel-kicker", text: "Mac memory" }),
         el("span", { className: "tel-pill", dataset: { pressure: telemetry.pressure }, text: p.label })),
       metricLine,
-      el("div", { className: "tel-bar", dataset: { pressure: telemetry.pressure }, "aria-hidden": "true" },
+      breakdown || el("div", { className: "tel-bar", dataset: { pressure: telemetry.pressure }, "aria-hidden": "true" },
         el("i", { style: `width:${loaded.length ? Math.max(8, ramShare) : 0}%` })),
       el("p", { className: "tel-note", text: p.note })),
     el("div", { className: "tel-section" },
@@ -1639,12 +1710,22 @@ function renderPressureBanner() {
   }
   banner.dataset.level = level;
   const loaded = telemetry.loaded || [];
+  const mem = telemetry.memory;
+  const ramReadout = mem && telemetry.total_ram
+    ? ` (${formatSize(mem.used)} / ${formatSize(telemetry.total_ram)} · ${mem.used_pct}%)`
+    : "";
   const rec = telemetry.recommended_ctx;
   const canLower = rec && modelInfo.num_ctx > rec && modelInfo.contextSizes.includes(rec);
   const msg = level === "critical"
-    ? "Mac memory pressure is critical — Work will pause before swapping."
-    : "Mac memory is getting tight. Lowering context or unloading idle models helps.";
+    ? `Mac memory is critical${ramReadout} — Work will pause before swapping.`
+    : `Mac memory is getting tight${ramReadout}. Lowering context or unloading idle models helps.`;
   const actions = [];
+  const graphBtn = el("button", { type: "button", className: "button small", text: "Memory graph" });
+  graphBtn.addEventListener("click", () => {
+    if (!telemetryPanel) toggleTelemetryPopover();
+    else renderTelemetryPopover();
+  });
+  actions.push(graphBtn);
   if (canLower) {
     const lowerBtn = el("button", { type: "button", className: "button small", text: `Use ${rec / 1024}K` });
     lowerBtn.addEventListener("click", () => { if (modelInfo.model) void chooseModel(modelInfo.model, rec); });
@@ -1652,7 +1733,7 @@ function renderPressureBanner() {
   }
   if (loaded.length || modelLoaded) {
     const unloadBtn = el("button", { type: "button", className: "button small", text: modelUnloading ? "Unloading…" : "Unload", disabled: modelUnloading });
-    unloadBtn.addEventListener("click", () => void unloadLocalModel());
+    unloadBtn.addEventListener("click", () => void unloadModel());
     actions.push(unloadBtn);
   }
   const dismiss = el("button", { type: "button", className: "icon-button small", title: "Dismiss", "aria-label": "Dismiss memory warning" }, icon("x"));
