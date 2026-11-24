@@ -1727,7 +1727,7 @@ class Agent:
         """Return False when a site needs the general editing workflow."""
         if not inputs or saved.get("artifact_fallback") or self.mode == "read" or not self.workspace:
             return False
-        site = self.workflow == "site"
+        site = self.workflow in artifacts.HTML_WORKFLOWS
         steering = take_steering()
         for note in steering:
             self.emit("steering", **note)
@@ -2023,7 +2023,7 @@ class Agent:
             return report
         if name == "read_file":
             path = require_str(args, "path", 500)
-            site = self.workflow == "site"
+            site = self.workflow in artifacts.HTML_WORKFLOWS
             start = as_int(args.get("start_line"), 1, 1, 10_000_000)
             count = as_int(args.get("count"), 80 if site else 200, 1, 400)
             out = workspace.read_file(path, start, count, sources=self.sources, limit=4200 if site else 12_000)

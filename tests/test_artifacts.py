@@ -157,3 +157,34 @@ class StagedChecklistTests(unittest.TestCase):
         self.run_export(self.agent(lambda *_: False), lambda *_: {"content": json.dumps(plan("agenda.docx"))})
         self.assertEqual(self.plans()[-1][-1], {"text": "Save agenda.docx after your approval", "status": "pending"})
         self.assertFalse((self.root / "agenda.docx").exists())
+
+    def test_study_guide_and_checklist_require_per_section_page_citations_and_render_toc(self):
+        sources = [
+            {"id": "S1", "name": "syllabus.pdf", "page": 2, "path": "syllabus.pdf", "href": "syllabus.pdf#page=2", "excerpt": "Midterm is Oct 15."},
+            {"id": "S2", "name": "syllabus.pdf", "page": 5, "path": "syllabus.pdf", "href": "syllabus.pdf#page=5", "excerpt": "Final project due Dec 1."},
+        ]
+        by_id = {s["id"]: s for s in sources}
+        missing_cite = {
+            "route": "render", "path": "guide.html", "title": "Course Study Guide", "intro": "Key dates.",
+            "sections": [
+                {"heading": "Exams", "items": ["Midterm is Oct 15."], "sources": ["S1"]},
+                {"heading": "Project", "items": ["Final project due Dec 1."], "sources": []},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "Every section"):
+            artifacts.checked_plan(missing_cite, "study-guide", sources)
+
+        valid_checklist = {
+            "route": "render", "path": "tasks.html", "title": "Course Checklist", "intro": "All deadlines.",
+            "sections": [
+                {"heading": "Exams", "items": ["Prepare for Oct 15 midterm"], "sources": ["S1"]},
+                {"heading": "Project", "items": ["Submit final project by Dec 1"], "sources": ["S2"]},
+            ],
+        }
+        checked = artifacts.checked_plan(valid_checklist, "checklist", sources)
+        html = artifacts.render("checklist", checked, by_id).decode()
+        self.assertIn('<nav class="toc"', html)
+        self.assertIn('type="checkbox"', html)
+        self.assertIn('href="syllabus.pdf#page=2"', html)
+        self.assertIn('href="syllabus.pdf#page=5"', html)
+        self.assertIn("Referenced sources", html)

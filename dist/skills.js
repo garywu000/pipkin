@@ -34,6 +34,14 @@
       ].join("\n"),
     },
     {
+      name: "study-guide", icon: "book", description: "Turn a PDF packet, syllabus, or notes into a page-linked study guide.",
+      instructions: "Build a navigable HTML study guide from the supplied document or brief. Organize key concepts, definitions, and review questions into clear sections, and link every section to its supporting source page.",
+    },
+    {
+      name: "checklist", icon: "list", description: "Turn a brief, syllabus, or packet into a page-linked action checklist.",
+      instructions: "Build an interactive HTML action checklist from the supplied document or brief. List every concrete task, requirement, and deadline, and link every section to its supporting source page.",
+    },
+    {
       name: "word", icon: "file", description: "Write an editable Word document in the selected Work folder.",
       instructions: "Create a structured Word document from the brief or attachments. Keep headings descriptive and preserve source facts.",
     },
@@ -74,9 +82,11 @@
       "Use the attached document or pasted excerpt. Cite its section or filename. Ask the user to attach the document if none is available." },
   ];
   const reserved = new Set([...starters, ...commands].map(({ name }) => name));
-  const workflows = { __proto__: null, site: "site", word: "word", powerpoint: "slides", pdf: "pdf" };
+  const workflows = { __proto__: null, site: "site", "study-guide": "study-guide", checklist: "checklist", word: "word", powerpoint: "slides", pdf: "pdf" };
   const deliverables = {
     site: /\b(?:web\s?page|web\s?site|site|landing page|html page)\b|\.html?(?=\W|$)/i,
+    "study-guide": /\bstudy\s+guide\b/i,
+    checklist: /\b(?:action\s+)?checklist\b/i,
     word: /\b(?:microsoft word|word (?:doc(?:ument)?|report)|(?:in|as) word|docx)\b|\.docx(?=\W|$)/i,
     slides: /\b(?:powerpoint|pptx|slide deck|slides?|presentation)\b|\.pptx(?=\W|$)/i,
     pdf: /\bpdf\b|\.pdf(?=\W|$)/i,

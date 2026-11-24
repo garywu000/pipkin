@@ -9,8 +9,12 @@ import subprocess
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
 
-FORMATS = {"site": ".html", "word": ".docx", "slides": ".pptx", "pdf": ".pdf"}
-LABELS = {"site": "HTML page", "word": "Word document", "slides": "PowerPoint deck", "pdf": "PDF"}
+FORMATS = {"site": ".html", "study-guide": ".html", "checklist": ".html", "word": ".docx", "slides": ".pptx", "pdf": ".pdf"}
+HTML_WORKFLOWS = {"site", "study-guide", "checklist"}
+LABELS = {
+    "site": "HTML page", "study-guide": "Study guide", "checklist": "Action checklist",
+    "word": "Word document", "slides": "PowerPoint deck", "pdf": "PDF",
+}
 PDF_HELPER = Path(__file__).with_name("read-pdf")
 PAGE_MARK = re.compile(r"(?m)^## PDF page ([1-9]\d{0,3})[ \t]*\r?$")
 MENTIONED_PATH = re.compile(
@@ -122,7 +126,7 @@ def source_catalog(inputs, load, limit):
             content = content.strip()
             if not content:
                 continue
-            if limit <= 0 or len(sources) >= 12:
+            if limit <= 0 or len(sources) >= 20:
                 omitted = True
                 break
             excerpt = content[:min(2400, limit)]
@@ -149,6 +153,13 @@ def planner_messages(workflow, inputs, sources, omitted, context):
         instructions += ("The renderer creates one responsive HTML page with plain text, bullet lists, and verified source links. "
                          "Choose route agent for additional outputs, existing-site changes, required custom code, forms, or interactivity. "
                          "For the agent route, return empty strings and an empty sections list. ")
+    elif workflow == "study-guide":
+        instructions += ("Build a structured study guide with clear topic headings, key concepts, definitions, and review questions. "
+                         "Every section must cite the exact source IDs (and pages) that support its claims. ")
+    elif workflow == "checklist":
+        instructions += ("Build a concrete, actionable checklist grouped by phase or category. "
+                         "Each item should be one clear requirement, deliverable, or deadline. "
+                         "Every section must cite the exact source IDs (and pages) that support its items. ")
     if workflow == "slides":
         instructions += ("Pipkin generates the cover from title and intro. Sections are content slides only. "
                          "Give each section one takeaway and up to four items of at most 160 characters. ")
@@ -223,6 +234,8 @@ def checked_plan(raw, workflow, sources, *, copy_lines=False):
             "items": items,
             "sources": list(dict.fromkeys(ids)),
         })
+    if by_id and workflow in {"study-guide", "checklist"} and not all(section["sources"] for section in result):
+        raise ValueError("Every section in a study guide or checklist must cite its supporting source IDs.")
     if by_id and not any(section["sources"] for section in result):
         raise ValueError("Cite the supplied source IDs beside the sections they support.")
     return {
@@ -251,50 +264,82 @@ def preview(plan, sources):
     return "\n".join(lines).strip()
 
 
-def html_page(plan, sources):
+def html_page(plan, sources, workflow="site"):
     title = escape(plan["title"])
     intro = escape(plan["intro"])
+    is_checklist = workflow == "checklist"
+    kicker = {"study-guide": "Study guide", "checklist": "Action checklist"}.get(workflow, "")
+    toc_links = []
     sections = []
+    used_sources = {}
     for index, section in enumerate(plan["sections"], 1):
         title_text = escape(section["heading"])
+        toc_links.append(f'<a href="#section-{index}">{title_text}</a>')
         items = [escape(value) for value in section["items"]]
-        body = "<ul>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>" if len(items) > 1 else f"<p>{items[0]}</p>"
+        if is_checklist:
+            body = '<ul class="checklist">' + "".join(
+                f'<li><label class="check-item"><input type="checkbox"><span>{item}</span></label></li>' for item in items
+            ) + "</ul>"
+        else:
+            body = "<ul>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>" if len(items) > 1 else f"<p>{items[0]}</p>"
         refs = []
         for source in cited_sources(section, sources):
+            used_sources[source["id"]] = source
             label = escape(source_label(source))
             link = source.get("href")
             refs.append(f'<a href="{escape(link, quote=True)}">{label}</a>' if link else label)
         citations = '<p class="sources">' + " · ".join(refs) + "</p>" if refs else ""
         sections.append(f'<section id="section-{index}"><h2>{title_text}</h2>{body}{citations}</section>')
+    toc_html = ('<nav class="toc" aria-label="Contents">' + "".join(toc_links) + "</nav>") if len(toc_links) >= 2 else ""
+    kicker_html = f'<p class="kicker">{escape(kicker)}</p>' if kicker else ""
+    intro_html = f'<p class="intro">{intro}</p>' if intro else ""
+    footer_refs = []
+    for source in used_sources.values():
+        label = escape(source_label(source))
+        link = source.get("href")
+        footer_refs.append(f'<li><a href="{escape(link, quote=True)}">{label}</a></li>' if link else f"<li>{label}</li>")
+    footer_html = ('<footer class="source-index"><h3>Referenced sources</h3><ul>' + "".join(footer_refs) + "</ul></footer>") if footer_refs else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title}</title>
 <style>
-:root {{ color-scheme: light; background: #f6f7f3; color: #202a27; }}
+:root {{ color-scheme: light dark; --bg: #f4f7f5; --card: #ffffff; --ink: #12201b; --muted: #53665e; --accent: #0d8a5e; --rule: #d5e2dc; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg: #0c100e; --card: #151b19; --ink: #edf2ef; --muted: #93a39b; --accent: #3ed598; --rule: #25302c; }} }}
 * {{ box-sizing: border-box; }}
-body {{ margin: 0; font: 1rem/1.65 system-ui, sans-serif; overflow-wrap: anywhere; }}
-header, main {{ max-width: 56rem; margin: auto; padding-inline: clamp(1.35rem, 6vw, 4rem); }}
-header {{ padding-top: clamp(2.75rem, 8vw, 6rem); padding-bottom: 1.8rem; }}
-h1, h2 {{ margin: 0; line-height: 1.12; font-family: Georgia, serif; font-weight: 500; }}
-h1 {{ font-size: clamp(2.35rem, 7vw, 4.5rem); letter-spacing: -.035em; }}
-h2 {{ font-size: clamp(1.32rem, 3vw, 1.8rem); }}
-p, ul {{ margin: .65rem 0 0; max-width: 68ch; }}
-ul {{ padding-left: 1.25rem; }}
-li + li {{ margin-top: .25rem; }}
-main {{ padding-bottom: 3rem; }}
-section {{ border-top: 1px solid #cdd9d2; padding: 1.45rem 0; }}
-.sources {{ color: #4b6258; font-size: .86rem; }}
-a {{ color: #145d46; text-underline-offset: .16em; }}
-@media print {{ :root {{ background: white; color: black; }} header, main {{ padding-inline: 0; }}
-header {{ padding-top: 0; }} section {{ break-inside: avoid; }} }}
+body {{ margin: 0; font: 16px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; background: var(--bg); color: var(--ink); }}
+main {{ max-width: 780px; margin: 0 auto; padding: 36px 22px 64px; }}
+.kicker {{ margin: 0 0 6px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }}
+h1 {{ margin: 0 0 10px; font-size: clamp(1.7rem, 3vw, 2.2rem); letter-spacing: -.025em; line-height: 1.15; }}
+.intro {{ margin: 0 0 22px; color: var(--muted); font-size: 1.03rem; }}
+.toc {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 22px; }}
+.toc a {{ padding: 5px 11px; border-radius: 999px; background: var(--card); border: 1px solid var(--rule); color: var(--ink); text-decoration: none; font-size: 13px; }}
+.toc a:hover {{ border-color: var(--accent); color: var(--accent); }}
+section {{ background: var(--card); border: 1px solid var(--rule); border-radius: 14px; padding: 20px 22px; margin-bottom: 14px; }}
+h2 {{ margin: 0 0 10px; font-size: 1.15rem; letter-spacing: -.015em; }}
+ul {{ margin: 0; padding-left: 20px; }}
+li {{ margin: 6px 0; }}
+.checklist {{ list-style: none; padding-left: 0; }}
+.check-item {{ display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }}
+.check-item input {{ margin-top: 5px; accent-color: var(--accent); width: 16px; height: 16px; flex: none; }}
+.check-item input:checked + span {{ text-decoration: line-through; color: var(--muted); }}
+.sources {{ margin: 14px 0 0; padding-top: 10px; border-top: 1px solid var(--rule); font-size: 13px; color: var(--muted); }}
+.sources a, .source-index a {{ color: var(--accent); text-decoration: none; }}
+.sources a:hover, .source-index a:hover {{ text-decoration: underline; }}
+.source-index {{ margin-top: 26px; padding: 16px 20px; border-radius: 14px; border: 1px dashed var(--rule); font-size: 14px; color: var(--muted); }}
+.source-index h3 {{ margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .07em; }}
 </style>
 </head>
 <body>
-<header><h1>{title}</h1>{f"<p>{intro}</p>" if intro else ""}</header>
-<main>{''.join(sections)}</main>
+<main>
+{kicker_html}<h1>{title}</h1>
+{intro_html}
+{toc_html}
+{"".join(sections)}
+{footer_html}
+</main>
 </body>
 </html>
 """
@@ -477,8 +522,8 @@ def presentation(plan, sources):
 
 
 def render(workflow, plan, sources):
-    if workflow == "site":
-        return html_page(plan, sources).encode()
+    if workflow in HTML_WORKFLOWS:
+        return html_page(plan, sources, workflow=workflow).encode()
     if workflow == "word":
         return word_document(plan, sources)
     if workflow == "slides":
