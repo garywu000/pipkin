@@ -54,7 +54,7 @@ class UndoTest(unittest.TestCase):
         with self.assertRaisesRegex(UndoConflict, "changed after Pipkin saved it"):
             self.store.apply(self.workspace, undo_id)
         self.assertIn("The user added a line", (self.root / "new.txt").read_text(), "the user's work is kept")
-        (self.root / "new.txt").write_text("Pipkin wrote this.\n")
+        (self.root / "new.txt").write_bytes(b"Pipkin wrote this.\n")
         self.assertEqual(self.store.apply(self.workspace, undo_id)["action"], "removed")
         self.assertFalse((self.root / "new.txt").exists())
         with self.assertRaisesRegex(UndoConflict, "already undone"):

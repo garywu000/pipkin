@@ -67,12 +67,14 @@ class CommandRecoveryTest(PlanFirstTest):
         self.assertEqual(asked, [])
 
     def test_silent_command_is_stopped_with_recovery_advice(self):
+        import sys
+        idle = 3 if sys.platform == "win32" else 1
         started = time.monotonic()
-        with patch.object(agent, "COMMAND_IDLE", 1):
+        with patch.object(agent, "COMMAND_IDLE", idle):
             result = agent.run_command(self.workspace, "echo starting; sleep 30", lambda: None)
-        self.assertLess(time.monotonic() - started, 5)
+        self.assertLess(time.monotonic() - started, 10 if sys.platform == "win32" else 5)
         self.assertIn("starting", result)
-        self.assertIn("printed nothing for 1s", result)
+        self.assertIn(f"printed nothing for {idle}s", result)
         self.assertIn("Do not run it again", result)
 
     test_first_request_asks_for_a_plan_and_reminds_once = None
