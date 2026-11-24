@@ -375,14 +375,16 @@ class WorkCheckpoint:
         with self.lock:
             data = {**self.data, **fields}
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as stream:
-                temporary = Path(stream.name)
-                try:
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as stream:
+                    temporary = Path(stream.name)
                     json.dump(data, stream, separators=(",", ":"))
                     stream.flush()
                     os.fsync(stream.fileno())
-                    os.replace(temporary, self.path)
-                finally:
+                os.replace(temporary, self.path)
+            finally:
+                if temporary is not None:
                     temporary.unlink(missing_ok=True)
             self.data = data
 
