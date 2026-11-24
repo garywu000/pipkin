@@ -5,7 +5,7 @@
 <p align="center"><strong>Local AI chat and a workspace agent for macOS and Windows.</strong><br>
 Turn your own files into finished work with a model that runs on your machine.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v1.9.0"><strong>Download v1.9.0</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.0.0"><strong>Download v2.0.0</strong></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#chat-and-projects">Features</a> ·
   <a href="#try-site">Try /site</a> ·
@@ -21,13 +21,13 @@ Pipkin is a desktop app for [Ollama](https://ollama.com) on macOS and Windows. U
 
 ### macOS
 
-1. Download [Pipkin for Apple silicon](https://github.com/garywu000/pipkin/releases/download/v1.9.0/Pipkin-macos-arm64.zip), unzip it, and open **Pipkin.app**. This preview is ad-hoc signed. If macOS blocks the download, use the [source build](#build-from-source).
+1. Download [Pipkin for Apple silicon](https://github.com/garywu000/pipkin/releases/download/v2.0.0/Pipkin-macos-arm64.zip), unzip it, and open **Pipkin.app**. This preview is ad-hoc signed. If macOS blocks the download, use the [source build](#build-from-source).
 2. Install [Ollama for macOS](https://ollama.com/download/mac) and download a local model. First-run setup has an Ollama guide if no model is installed.
 
 ### Windows
 
-1. On an x64 PC running Windows 11 or Windows 10 22H2, install [Ollama for Windows](https://ollama.com/download/windows), [Python 3.9 or later](https://www.python.org/downloads/windows/) with **Add Python to PATH**, and the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0). Install the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if it is missing.
-2. Download [Pipkin for Windows x64](https://github.com/garywu000/pipkin/releases/download/v1.9.0/Pipkin-windows-x64.zip), extract the full **Pipkin** folder, and double-click **Pipkin.exe**. Pipkin manages its own local server, so opening a terminal is only needed for tasks such as downloading a model.
+1. On an x64 PC running Windows 11 or Windows 10 22H2, install [Ollama for Windows](https://ollama.com/download/windows) and [Python 3.9 or later](https://www.python.org/downloads/windows/) with **Add Python to PATH**. Install the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if it is missing (pre-installed on Windows 11). The Windows ZIP is self-contained — no separate .NET install is required.
+2. Download [Pipkin for Windows x64](https://github.com/garywu000/pipkin/releases/download/v2.0.0/Pipkin-windows-x64.zip), extract the full **Pipkin** folder, and double-click **Pipkin.exe**. Pipkin manages its own local server, so opening a terminal is only needed for tasks such as downloading a model.
 
 See the [Windows guide](windows/README.md) for details. The [Windows build and test run](https://github.com/garywu000/pipkin/actions/runs/45325460976) produced the ZIP attached to v1.9.0.
 
@@ -124,6 +124,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.0.0](https://github.com/garywu000/pipkin/releases/tag/v2.0.0) | Cross-device backup & handoff without a cloud account: optional client-side AES-256-GCM encrypted `.pipkin-backup` files, smart import preview & merge, and Folder Handoff (iCloud Drive, OneDrive, Dropbox, or USB). Self-contained Windows ZIP (no separate .NET install) with native `.ico` icon, MIT `LICENSE`, updated `SECURITY.md`, and dual macOS + Windows CI. |
 | [v1.9.0](https://github.com/garywu000/pipkin/releases/tag/v1.9.0) | Windows gained workspace Agent support, native folder selection, file verification and undo, PDF reading and writing, PowerShell, Windows shortcut labels, and taskbar attention indicators. The published Windows ZIP includes follow-up fixes for checkpoint saving, SQLite locking, and PowerShell output handling. |
 | [v1.8.0](https://github.com/garywu000/pipkin/releases/tag/v1.8.0) | First Windows Chat preview using WebView2. A shared platform layer handles app data, model discovery, memory, and native file opening. Added Windows packaging and CI. |
 | [v1.7.1](https://github.com/garywu000/pipkin/releases/tag/v1.7.1) | Custom keyboard shortcuts with conflict detection and reset, Settings layout fixes, local-only Explorer selection, and protection against deleting a chat while its run is active. |

@@ -852,6 +852,42 @@ body:not([data-sidebar-collapsed]) #history-toggle, body:not([data-sidebar-colla
 }
 .shortcut-btn kbd { pointer-events: none; }
 .shortcut-hint { margin: 2px 0 0; font-size: .76rem; color: var(--muted); }
+.handoff-card {
+  display: flex; flex-direction: column; gap: 10px; padding: 12px 14px;
+  border: 1px solid var(--rule); border-radius: 12px; background: var(--surface-2, var(--surface));
+}
+.handoff-meta { display: flex; flex-direction: column; gap: 2px; }
+.handoff-meta strong { font-size: .9rem; }
+.handoff-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.backup-dialog { width: min(460px, calc(100vw - 32px)); padding: 0; border-radius: 16px; }
+.backup-dialog .dialog-panel { display: flex; flex-direction: column; }
+.backup-dialog .dialog-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--rule);
+}
+.backup-dialog .dialog-header h2 { margin: 0; font-size: 1rem; }
+.backup-body { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
+.backup-field { display: flex; flex-direction: column; gap: 6px; font-size: .86rem; }
+.backup-field input, .backup-unlock input {
+  width: 100%; min-height: 38px; padding: 8px 11px; border: 1px solid var(--rule);
+  border-radius: 9px; background: var(--surface); color: var(--ink); font: inherit;
+}
+.backup-unlock { display: flex; flex-direction: column; gap: 10px; }
+.backup-summary-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px;
+}
+.backup-stat {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 12px;
+  border: 1px solid var(--rule); border-radius: 10px; background: var(--surface);
+}
+.backup-stat strong { font-size: 1.05rem; line-height: 1.2; }
+.backup-stat span { font-size: .76rem; color: var(--muted); }
+.backup-check { display: flex; align-items: center; gap: 8px; font-size: .86rem; margin-bottom: 6px; cursor: pointer; }
+.backup-error { margin: 0; font-size: .82rem; color: var(--danger, #c6463d); }
+.backup-footer {
+  display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap;
+  padding: 12px 16px; border-top: 1px solid var(--rule);
+}
 .chat-busy-dot {
   width: 7px; height: 7px; border-radius: 50%; flex: none; margin-right: 4px;
   background: var(--accent); box-shadow: 0 0 8px var(--accent-glow);

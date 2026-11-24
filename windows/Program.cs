@@ -58,6 +58,7 @@ internal sealed class MainWindow : Form
         Height = 780;
         MinimumSize = new Size(760, 520);
         StartPosition = FormStartPosition.CenterScreen;
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
         bool dark = IsWindowsDarkMode();
         BackColor = dark ? Color.FromArgb(14, 19, 17) : Color.FromArgb(245, 247, 246);

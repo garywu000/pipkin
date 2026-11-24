@@ -9,14 +9,14 @@ $repoRoot = Split-Path -Parent $scriptDir
 $outDir = Join-Path $scriptDir "dist\Pipkin"
 $zipPath = Join-Path $scriptDir "dist\Pipkin-windows-x64.zip"
 
-Write-Host "Building Pipkin Windows shell (.NET 8 + WebView2)..."
+Write-Host "Building self-contained Pipkin Windows shell (.NET 8 + WebView2)..."
 if (Test-Path $outDir) { Remove-Item -Recurse -Force $outDir }
 if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
 
 dotnet publish (Join-Path $scriptDir "PipkinWindows.csproj") `
     -c Release `
     -r win-x64 `
-    --self-contained false `
+    --self-contained true `
     -o $outDir
 
 Write-Host "Bundling Python backend and web UI..."

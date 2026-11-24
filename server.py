@@ -48,6 +48,8 @@ USAGE_FILE = SETTINGS_FILE.with_name("usage.sqlite3")
 SETTINGS_LOCK = Lock()
 TRANSFER_FILE = SETTINGS_FILE.parent / "transfer.json"
 TRANSFER_LIMIT = 200 * 1024 * 1024
+HANDOFF_FILENAME = "pipkin-latest.pipkin-backup"
+HANDOFF_LIMIT = 25 * 1024 * 1024
 RUNS = {}
 RUNS_LOCK = Lock()
 ASSETS = Path(__file__).resolve().parent / "dist"
@@ -1428,6 +1430,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.send_json(503, {"error": "Token usage is temporarily unavailable."})
             else:
                 self.send_json(200, usage)
+        elif self.path == "/api/handoff/status":
+            self.handoff_status()
+        elif self.path == "/api/handoff/load":
+            self.load_handoff_snapshot()
         elif self.path in STATIC_FILES:
             name, content_type = STATIC_FILES[self.path]
             body = (ASSETS / name).read_bytes()
@@ -1475,6 +1481,15 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/transfer/load":
             self.load_transfer()
+            return
+        if self.path == "/api/handoff/choose":
+            self.choose_handoff_folder()
+            return
+        if self.path == "/api/handoff/save":
+            self.save_handoff_snapshot()
+            return
+        if self.path == "/api/handoff/clear":
+            self.clear_handoff_folder()
             return
         if self.path == "/api/agent/restore":
             self.restore_workspace()
@@ -1670,6 +1685,179 @@ class ChatHandler(BaseHTTPRequestHandler):
         body = json.dumps({"data": data}).encode()
         self.headers_for(200, "application/json; charset=utf-8", len(body))
         self.wfile.write(body)
+
+    def _handoff_dir(self):
+        try:
+            raw = json.loads(SETTINGS_FILE.read_text()).get("handoff_dir")
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        folder = Path(raw)
+        try:
+            if not folder.is_absolute():
+                return None
+            info = os.lstat(folder)
+            attrs = getattr(info, "st_file_attributes", 0)
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+                return None
+            resolved = folder.resolve(strict=True)
+            if resolved == resolved.parent:
+                return None
+            return resolved
+        except OSError:
+            return None
+
+    def _handoff_status_payload(self, folder):
+        if folder is None:
+            return {"configured": False, "folderName": "", "hasSnapshot": False, "snapshotModified": None, "snapshotSize": 0, "encrypted": None}
+        snap = folder / HANDOFF_FILENAME
+        has_snap = False
+        modified = None
+        size = 0
+        encrypted = None
+        try:
+            info = os.lstat(snap)
+            attrs = getattr(info, "st_file_attributes", 0)
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not stat.S_ISLNK(info.st_mode) and not (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+                has_snap = True
+                modified = info.st_mtime
+                size = info.st_size
+                with snap.open("rb") as fh:
+                    head = fh.read(512).decode("utf-8", "replace")
+                encrypted = '"encrypted":true' in head.replace(" ", "")
+        except OSError:
+            pass
+        return {
+            "configured": True,
+            "folderName": folder.name or str(folder),
+            "hasSnapshot": has_snap,
+            "snapshotModified": modified,
+            "snapshotSize": size,
+            "encrypted": encrypted,
+        }
+
+    def handoff_status(self):
+        self.send_json(200, self._handoff_status_payload(self._handoff_dir()))
+
+    def choose_handoff_folder(self):
+        if not PICKER_LOCK.acquire(blocking=False):
+            self.send_json(409, {"error": "A folder picker is already open."})
+            return
+        try:
+            if sys.platform == "win32":
+                code, folder_str = platform_os.pick_folder_windows(timeout=120)
+                if code:
+                    if code == 3:
+                        self.send_json(200, {"cancelled": True})
+                    else:
+                        self.send_json(400, {"error": "Could not open the Windows folder picker."})
+                    return
+            else:
+                selection = subprocess.run(
+                    [str(ASSETS.parent / "Folder Picker.app" / "Contents" / "MacOS" / "choose-folder")],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if selection.returncode:
+                    if selection.returncode == 3:
+                        self.send_json(200, {"cancelled": True})
+                    else:
+                        self.send_json(400, {"error": "Could not open the macOS folder picker."})
+                    return
+                folder_str = selection.stdout.removesuffix("\n")
+            folder = Path(folder_str)
+            if not folder.is_absolute():
+                raise ValueError("Choose a valid local or synced folder.")
+            info = os.lstat(folder)
+            attrs = getattr(info, "st_file_attributes", 0)
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+                raise ValueError("Choose a real folder, not a symbolic link.")
+            resolved = folder.resolve(strict=True)
+            if resolved == resolved.parent:
+                raise ValueError("Choose a subfolder, not a drive root.")
+            update_settings_file(handoff_dir=str(resolved))
+            self.send_json(200, self._handoff_status_payload(resolved))
+        except ValueError as error:
+            self.send_json(400, {"error": str(error)})
+        except (OSError, subprocess.TimeoutExpired):
+            self.send_json(400, {"error": "Could not select the handoff folder."})
+        finally:
+            PICKER_LOCK.release()
+
+    def save_handoff_snapshot(self):
+        folder = self._handoff_dir()
+        if folder is None:
+            self.send_json(400, {"error": "Choose a handoff folder first."})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= HANDOFF_LIMIT:
+                raise ValueError("Backup is empty or exceeds the 25 MB limit.")
+            raw = self.rfile.read(length)
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid Pipkin backup format.")
+            is_encrypted = data.get("format") == "pipkin-backup" and data.get("encrypted") is True and isinstance(data.get("ciphertext"), str)
+            is_plain = data.get("app") == "pipkin" and isinstance(data.get("stores"), dict)
+            if not (is_encrypted or is_plain):
+                raise ValueError("Send a valid Pipkin backup payload.")
+        except (OSError, ValueError) as error:
+            self.send_json(400, {"error": str(error) or "Invalid Pipkin backup payload."})
+            return
+        target = folder / HANDOFF_FILENAME
+        temporary = None
+        try:
+            if target.exists() or target.is_symlink():
+                info = os.lstat(target)
+                attrs = getattr(info, "st_file_attributes", 0)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_ISLNK(info.st_mode) or (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+                    raise ValueError("Existing handoff file is not a regular file.")
+            with tempfile.NamedTemporaryFile("wb", dir=folder, prefix=".pipkin-handoff-", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if sys.platform != "win32":
+                os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+            temporary = None
+        except ValueError as error:
+            self.send_json(400, {"error": str(error)})
+            return
+        except OSError:
+            self.send_json(500, {"error": "Could not write the handoff snapshot to the selected folder."})
+            return
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        self.send_json(200, self._handoff_status_payload(folder))
+
+    def load_handoff_snapshot(self):
+        folder = self._handoff_dir()
+        if folder is None:
+            self.send_json(400, {"error": "Choose a handoff folder first."})
+            return
+        target = folder / HANDOFF_FILENAME
+        try:
+            info = os.lstat(target)
+            attrs = getattr(info, "st_file_attributes", 0)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_ISLNK(info.st_mode) or (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+                raise ValueError("Handoff file is not a regular file.")
+            if not 0 < info.st_size <= HANDOFF_LIMIT:
+                raise ValueError("Handoff snapshot is empty or exceeds the 25 MB limit.")
+            raw = target.read_bytes()
+        except FileNotFoundError:
+            self.send_json(404, {"error": "No handoff snapshot found in that folder yet."})
+            return
+        except (OSError, ValueError) as error:
+            self.send_json(400, {"error": str(error) or "Could not read the handoff snapshot."})
+            return
+        self.headers_for(200, "application/json; charset=utf-8", len(raw))
+        self.wfile.write(raw)
+
+    def clear_handoff_folder(self):
+        update_settings_file(handoff_dir="")
+        self.send_json(200, self._handoff_status_payload(None))
 
     def restore_workspace(self):
         """Re-grant the folder the user last picked, so work can continue after a restart."""

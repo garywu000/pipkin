@@ -3825,6 +3825,7 @@ function openSettings(tabId = "tab-general") {
   const shellBox = byId("setting-allow-shell");
   if (shellBox) shellBox.checked = Boolean(settings.allowShell);
   if (typeof renderShortcutsEditor === "function") renderShortcutsEditor();
+  if (typeof refreshHandoffStatus === "function") void refreshHandoffStatus();
   renderContextRecommendation(modelInfo.models.find((m) => m.name === modelInfo.model));
   byId("setting-temperature").value = settings.temperature;
   byId("temperature-value").textContent = Number(settings.temperature).toFixed(2);
@@ -4596,10 +4597,116 @@ async function exportAllData() {
   if (!database) throw new Error("Browser storage is unavailable.");
   const stores = {};
   for (const store of dataStores) stores[store] = await storeEntries(database, store);
-  return { app: "pipkin", version: 1, exportedAt: new Date().toISOString(), settings, memories, skills: customSkills, stores };
+  return {
+    app: "pipkin",
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    exportedFrom: PipkinPlatform.osName,
+    settings,
+    memories,
+    skills: customSkills,
+    stores,
+  };
 }
 
-async function importAllData(data) {
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+async function deriveBackupKey(passphrase, salt, iterations = 310000) {
+  if (!window.crypto?.subtle) throw new Error("Web Crypto encryption is unavailable in this browser context.");
+  const raw = new TextEncoder().encode(passphrase);
+  const baseKey = await crypto.subtle.importKey("raw", raw, "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+async function encryptBackupPayload(data, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const iterations = 310000;
+  const key = await deriveBackupKey(passphrase, salt, iterations);
+  const plaintext = new TextEncoder().encode(JSON.stringify(data));
+  const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
+  return {
+    format: "pipkin-backup",
+    version: 2,
+    encrypted: true,
+    kdf: "PBKDF2-SHA256",
+    iterations,
+    exportedAt: data.exportedAt || new Date().toISOString(),
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(encrypted),
+  };
+}
+
+async function decryptBackupPayload(envelope, passphrase) {
+  if (envelope?.format !== "pipkin-backup" || envelope.encrypted !== true || typeof envelope.ciphertext !== "string") {
+    throw new Error("This is not an encrypted Pipkin backup file.");
+  }
+  try {
+    const salt = base64ToBytes(envelope.salt);
+    const iv = base64ToBytes(envelope.iv);
+    const ciphertext = base64ToBytes(envelope.ciphertext);
+    const iterations = Math.min(1_000_000, Math.max(100_000, Number(envelope.iterations) || 310000));
+    const key = await deriveBackupKey(passphrase, salt, iterations);
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+    return JSON.parse(new TextDecoder().decode(plain));
+  } catch {
+    throw new Error("Incorrect passphrase or corrupted backup file.");
+  }
+}
+
+async function summarizeImportData(data) {
+  if (data?.app !== "pipkin" || !data.stores) throw new Error("This is not a Pipkin data file.");
+  const database = await chatDatabase;
+  if (!database) throw new Error("Storage is unavailable.");
+  const existingTitles = new Map((await storeEntries(database, "titles")).map(([key, value]) => [key, value]));
+  const existingProjects = new Set((await storeEntries(database, "projects")).map(([key]) => key));
+  let newChats = 0;
+  let updatedChats = 0;
+  let skippedChats = 0;
+  for (const [id, item] of data.stores.titles || []) {
+    if (!existingTitles.has(id)) newChats++;
+    else if ((item?.updatedAt || 0) > (existingTitles.get(id)?.updatedAt || 0)) updatedChats++;
+    else skippedChats++;
+  }
+  const newProjects = (data.stores.projects || []).filter(([id]) => !existingProjects.has(id)).length;
+  const newMemories = (data.memories || []).filter((m) => typeof m === "string" && !memories.includes(m)).length;
+  const existingSkills = new Set(customSkills.map(({ name }) => name));
+  const newSkills = Skills.normalize(data.skills).filter(({ name }) => !existingSkills.has(name)).length;
+  return {
+    newChats,
+    updatedChats,
+    skippedChats,
+    newProjects,
+    newMemories,
+    newSkills,
+    hasSettings: Boolean(data.settings && typeof data.settings === "object"),
+    exportedAt: data.exportedAt || null,
+    exportedFrom: data.exportedFrom || null,
+  };
+}
+
+async function importAllData(data, { applySettings = true } = {}) {
   if (data?.app !== "pipkin" || !data.stores) throw new Error("This is not a Pipkin data file.");
   const database = await chatDatabase;
   if (!database) throw new Error("Storage is unavailable.");
@@ -4622,7 +4729,7 @@ async function importAllData(data) {
     }
   });
   if (!ok) throw new Error("Could not write the imported chats.");
-  if (data.settings && typeof data.settings === "object") saveSettings({
+  if (applySettings && data.settings && typeof data.settings === "object") saveSettings({
     ...data.settings, sidebarCollapsed: settings.sidebarCollapsed, sidebarWidth: settings.sidebarWidth,
   });
   for (const memory of data.memories || []) if (typeof memory === "string" && !memories.includes(memory)) memories.push(memory);
@@ -4636,29 +4743,304 @@ async function importAllData(data) {
   return added;
 }
 
-async function downloadAllData() {
+/* ---------- Cross-device Backup Dialog, Smart Merge Preview & Handoff Folder ---------- */
+let handoffState = { configured: false, folderName: "", hasSnapshot: false, snapshotModified: null, snapshotSize: 0, encrypted: null };
+let pendingImportEnvelope = null;
+let pendingImportData = null;
+
+function formatRelativeStamp(epochSec) {
+  if (!epochSec) return "";
+  const delta = Math.max(0, Math.round(Date.now() / 1000 - epochSec));
+  if (delta < 60) return "just now";
+  if (delta < 3600) return `${Math.round(delta / 60)} min ago`;
+  if (delta < 86400) return `${Math.round(delta / 3600)} hr ago`;
+  return new Date(epochSec * 1000).toLocaleDateString();
+}
+
+function renderHandoffCard() {
+  const nameEl = byId("handoff-folder-name");
+  const noteEl = byId("handoff-status-note");
+  const chooseBtn = byId("handoff-choose");
+  const saveBtn = byId("handoff-save");
+  const loadBtn = byId("handoff-load");
+  const clearBtn = byId("handoff-clear");
+  if (!nameEl || !noteEl) return;
+  if (!handoffState.configured) {
+    nameEl.textContent = "No handoff folder selected";
+    noteEl.textContent = "Choose a folder to save or pick up snapshots between devices.";
+    if (chooseBtn) chooseBtn.textContent = "Choose folder…";
+    if (saveBtn) saveBtn.hidden = true;
+    if (loadBtn) loadBtn.hidden = true;
+    if (clearBtn) clearBtn.hidden = true;
+    return;
+  }
+  nameEl.textContent = handoffState.folderName;
+  if (handoffState.hasSnapshot) {
+    const lock = handoffState.encrypted ? "Encrypted" : "Unencrypted";
+    const size = formatSize(handoffState.snapshotSize || 0);
+    const when = formatRelativeStamp(handoffState.snapshotModified);
+    noteEl.textContent = `${lock} snapshot · ${size}${when ? ` · saved ${when}` : ""}`;
+  } else {
+    noteEl.textContent = "Folder ready — save a snapshot here to pick it up on another device.";
+  }
+  if (chooseBtn) chooseBtn.textContent = "Change…";
+  if (saveBtn) saveBtn.hidden = false;
+  if (loadBtn) loadBtn.hidden = !handoffState.hasSnapshot;
+  if (clearBtn) clearBtn.hidden = false;
+}
+
+async function refreshHandoffStatus() {
   try {
-    const data = await exportAllData();
-    const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
-    const link = el("a", { href: URL.createObjectURL(blob), download: `Pipkin data ${new Date().toISOString().slice(0, 10)}.json` });
+    const response = await fetch("/api/handoff/status");
+    if (!response.ok) return;
+    handoffState = await response.json();
+    renderHandoffCard();
+  } catch {
+    // Ignore transient status failures.
+  }
+}
+
+async function buildBackupPayload(passphrase) {
+  const data = await exportAllData();
+  if (passphrase) return { payload: await encryptBackupPayload(data, passphrase), encrypted: true };
+  return { payload: data, encrypted: false };
+}
+
+function openBackupDialog(defaultToHandoff = false) {
+  const dialog = byId("backup-dialog");
+  if (!dialog) { void downloadAllData(); return; }
+  const passInput = byId("backup-passphrase");
+  const confirmInput = byId("backup-passphrase-confirm");
+  const confirmWrap = byId("backup-confirm-wrap");
+  const errEl = byId("backup-error");
+  const toHandoffBtn = byId("backup-to-handoff");
+  const downloadBtn = byId("backup-download");
+  if (passInput) passInput.value = "";
+  if (confirmInput) confirmInput.value = "";
+  if (confirmWrap) confirmWrap.hidden = true;
+  if (errEl) { errEl.textContent = ""; errEl.hidden = true; }
+  if (toHandoffBtn) toHandoffBtn.hidden = !handoffState.configured;
+  if (downloadBtn) downloadBtn.textContent = defaultToHandoff && handoffState.configured ? "Save to handoff folder" : "Download backup";
+  dialog.dataset.mode = defaultToHandoff && handoffState.configured ? "handoff" : "download";
+  if (!dialog.open) dialog.showModal();
+  passInput?.focus();
+}
+
+async function runBackupExport(targetMode) {
+  const dialog = byId("backup-dialog");
+  const pass = byId("backup-passphrase")?.value || "";
+  const confirm = byId("backup-passphrase-confirm")?.value || "";
+  const errEl = byId("backup-error");
+  const showErr = (msg) => { if (errEl) { errEl.textContent = msg; errEl.hidden = !msg; } };
+  showErr("");
+  if (pass && pass.length < 4) {
+    showErr("Use a passphrase of at least 4 characters, or leave blank for unencrypted JSON.");
+    return;
+  }
+  if (pass && pass !== confirm) {
+    showErr("Passphrases do not match.");
+    return;
+  }
+  try {
+    const { payload, encrypted } = await buildBackupPayload(pass);
+    const jsonText = JSON.stringify(payload);
+    if (targetMode === "handoff") {
+      const response = await fetch("/api/handoff/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: jsonText,
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save handoff snapshot.");
+      handoffState = result;
+      renderHandoffCard();
+      dialog?.close();
+      toast(encrypted ? "Encrypted snapshot saved to handoff folder" : "Snapshot saved to handoff folder");
+      return;
+    }
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filename = encrypted ? `Pipkin backup ${stamp}.pipkin-backup` : `Pipkin data ${stamp}.json`;
+    const blob = new Blob([jsonText], { type: "application/json" });
+    const link = el("a", { href: URL.createObjectURL(blob), download: filename });
     document.body.append(link);
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(link.href), 4000);
+    dialog?.close();
+    toast(encrypted ? "Encrypted backup downloaded" : "Backup downloaded");
   } catch (error) {
-    announce(error.message || "Could not export your data.", true);
+    showErr(error.message || "Could not create backup.");
   }
+}
+
+async function renderImportSummary(data) {
+  const summary = await summarizeImportData(data);
+  pendingImportData = data;
+  const grid = byId("import-summary-grid");
+  const box = byId("import-summary-box");
+  const unlock = byId("import-unlock-box");
+  const confirmBtn = byId("import-confirm");
+  const errEl = byId("import-error");
+  if (errEl) { errEl.textContent = ""; errEl.hidden = true; }
+  if (unlock) unlock.hidden = true;
+  if (box) box.hidden = false;
+  if (grid) {
+    const stats = [
+      [String(summary.newChats), summary.newChats === 1 ? "New chat" : "New chats"],
+      [String(summary.updatedChats), summary.updatedChats === 1 ? "Updated chat" : "Updated chats"],
+      [String(summary.newProjects), summary.newProjects === 1 ? "New project" : "New projects"],
+      [String(summary.newMemories + summary.newSkills), "New memories & skills"],
+    ];
+    grid.replaceChildren(...stats.map(([num, label]) =>
+      el("div", { className: "backup-stat" }, el("strong", { text: num }), el("span", { text: label }))));
+  }
+  const applyBox = byId("import-apply-settings");
+  if (applyBox) applyBox.disabled = !summary.hasSettings;
+  if (confirmBtn) confirmBtn.disabled = false;
+}
+
+async function openImportPreview(rawObj, sourceLabel) {
+  const dialog = byId("import-preview-dialog");
+  if (!dialog) {
+    const added = await importAllData(rawObj);
+    toast(`Imported ${added} ${added === 1 ? "chat" : "chats"}`);
+    setTimeout(() => location.reload(), 700);
+    return;
+  }
+  pendingImportEnvelope = null;
+  pendingImportData = null;
+  const srcEl = byId("import-source-label");
+  const unlock = byId("import-unlock-box");
+  const summaryBox = byId("import-summary-box");
+  const passInput = byId("import-passphrase");
+  const errEl = byId("import-error");
+  const confirmBtn = byId("import-confirm");
+  if (srcEl) srcEl.textContent = sourceLabel || "";
+  if (passInput) passInput.value = "";
+  if (errEl) { errEl.textContent = ""; errEl.hidden = true; }
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (rawObj?.format === "pipkin-backup" && rawObj.encrypted === true) {
+    pendingImportEnvelope = rawObj;
+    if (unlock) unlock.hidden = false;
+    if (summaryBox) summaryBox.hidden = true;
+    if (!dialog.open) dialog.showModal();
+    passInput?.focus();
+    return;
+  }
+  try {
+    await renderImportSummary(rawObj);
+    if (!dialog.open) dialog.showModal();
+  } catch (error) {
+    announce(error.message || "This is not a valid Pipkin backup file.", true);
+  }
+}
+
+async function downloadAllData() {
+  openBackupDialog(false);
 }
 
 async function importFromFile(file) {
   try {
-    const added = await importAllData(JSON.parse(await file.text()));
-    toast(`Imported ${added} ${added === 1 ? "chat" : "chats"}`);
-    setTimeout(() => location.reload(), 700);
+    const raw = JSON.parse(await file.text());
+    await openImportPreview(raw, `File: ${file.name}`);
   } catch (error) {
-    announce(error.message || "Could not import that file.", true);
+    announce(error.message || "Could not read that backup file.", true);
   }
 }
+
+byId("backup-passphrase")?.addEventListener("input", (event) => {
+  const wrap = byId("backup-confirm-wrap");
+  if (wrap) wrap.hidden = !event.target.value;
+});
+byId("backup-close")?.addEventListener("click", () => byId("backup-dialog")?.close());
+byId("backup-cancel")?.addEventListener("click", () => byId("backup-dialog")?.close());
+byId("backup-to-handoff")?.addEventListener("click", () => void runBackupExport("handoff"));
+byId("backup-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const mode = byId("backup-dialog")?.dataset.mode || "download";
+  void runBackupExport(mode);
+});
+
+byId("import-preview-close")?.addEventListener("click", () => byId("import-preview-dialog")?.close());
+byId("import-cancel")?.addEventListener("click", () => byId("import-preview-dialog")?.close());
+byId("import-unlock-btn")?.addEventListener("click", async () => {
+  const pass = byId("import-passphrase")?.value || "";
+  const errEl = byId("import-error");
+  if (!pass) {
+    if (errEl) { errEl.textContent = "Enter the backup passphrase."; errEl.hidden = false; }
+    return;
+  }
+  try {
+    const decrypted = await decryptBackupPayload(pendingImportEnvelope, pass);
+    await renderImportSummary(decrypted);
+  } catch (error) {
+    if (errEl) { errEl.textContent = error.message || "Could not decrypt backup."; errEl.hidden = false; }
+  }
+});
+byId("import-passphrase")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    byId("import-unlock-btn")?.click();
+  }
+});
+byId("import-preview-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!pendingImportData) return;
+  const applySettings = Boolean(byId("import-apply-settings")?.checked);
+  const errEl = byId("import-error");
+  try {
+    const added = await importAllData(pendingImportData, { applySettings });
+    byId("import-preview-dialog")?.close();
+    toast(`Merged ${added} ${added === 1 ? "chat" : "chats"} into Pipkin`);
+    setTimeout(() => location.reload(), 700);
+  } catch (error) {
+    if (errEl) { errEl.textContent = error.message || "Could not merge backup."; errEl.hidden = false; }
+  }
+});
+
+byId("handoff-choose")?.addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/handoff/choose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not choose handoff folder.");
+    if (result.cancelled) return;
+    handoffState = result;
+    renderHandoffCard();
+    toast(`Handoff folder set to ${handoffState.folderName}`);
+  } catch (error) {
+    announce(error.message || "Could not choose handoff folder.", true);
+  }
+});
+byId("handoff-save")?.addEventListener("click", () => openBackupDialog(true));
+byId("handoff-load")?.addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/handoff/load");
+    const raw = await response.json();
+    if (!response.ok) throw new Error(raw.error || "Could not load handoff snapshot.");
+    await openImportPreview(raw, `Handoff folder: ${handoffState.folderName}`);
+  } catch (error) {
+    announce(error.message || "Could not load handoff snapshot.", true);
+  }
+});
+byId("handoff-clear")?.addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/handoff/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) return;
+    handoffState = await response.json();
+    renderHandoffCard();
+    toast("Handoff folder removed");
+  } catch {
+    // Ignore transient failure.
+  }
+});
 
 async function backfillChatMetadata() {
   const missing = [...chatTitles.values()].filter((chat) =>

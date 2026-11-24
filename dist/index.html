@@ -375,13 +375,28 @@
               <button id="export-chat" class="button" type="button">Export</button>
             </div>
             <div class="setting">
-              <div><strong>Export all data</strong><p>Every chat, project, memory and setting, as one JSON file.</p></div>
-              <button id="export-all" class="button" type="button">Export</button>
+              <div><strong>Cross-device backup</strong><p>Export chats, projects, memories, skills, and shortcuts — optionally encrypted with a passphrase.</p></div>
+              <button id="export-all" class="button" type="button">Backup…</button>
             </div>
             <div class="setting">
-              <div><strong>Import data</strong><p>Add chats from a Pipkin data file. Existing chats are kept; newer copies win.</p></div>
+              <div><strong>Import backup</strong><p>Preview and merge a <code>.pipkin-backup</code> or <code>.json</code> file. Existing chats are kept; newer copies win.</p></div>
               <button id="import-all" class="button" type="button">Import…</button>
-              <input id="import-file" type="file" accept="application/json,.json" hidden>
+              <input id="import-file" type="file" accept=".pipkin-backup,.json,application/json" hidden>
+            </div>
+            <div class="setting stack" id="handoff-section">
+              <div><strong>Cross-device handoff folder</strong><p>Pick up where you left off on another Mac or Windows PC using any synced folder (iCloud Drive, OneDrive, Dropbox) or USB drive — no cloud account needed.</p></div>
+              <div id="handoff-card" class="handoff-card">
+                <div class="handoff-meta">
+                  <strong id="handoff-folder-name">No handoff folder selected</strong>
+                  <span id="handoff-status-note" class="hint">Choose a folder to save or pick up snapshots between devices.</span>
+                </div>
+                <div class="handoff-actions">
+                  <button id="handoff-choose" class="button" type="button">Choose folder…</button>
+                  <button id="handoff-save" class="button accent" type="button" hidden>Save snapshot</button>
+                  <button id="handoff-load" class="button" type="button" hidden>Pick up latest</button>
+                  <button id="handoff-clear" class="button small" type="button" hidden>Remove</button>
+                </div>
+              </div>
             </div>
             <div class="setting">
               <div><strong>Storage</strong><p id="hint-storage-device">Chats, projects and memories are stored by the app showing this page (the Pipkin app or your browser). Nothing leaves your Mac unless the agent uses the web.</p></div>
@@ -584,6 +599,64 @@
       </section>
     </div>
   </aside>
+
+  <dialog id="backup-dialog" class="dialog backup-dialog" aria-labelledby="backup-dialog-title">
+    <form method="dialog" class="dialog-panel" id="backup-form">
+      <div class="dialog-header">
+        <h2 id="backup-dialog-title">Cross-device backup</h2>
+        <button id="backup-close" class="icon-button" type="button" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="dialog-body backup-body">
+        <p id="backup-scope-note" class="hint">Includes all chats, projects, memories, custom skills, shortcuts, and theme preferences.</p>
+        <label class="backup-field">
+          <strong>Passphrase <span class="hint">(optional — encrypts with AES-256-GCM)</span></strong>
+          <input id="backup-passphrase" type="password" autocomplete="new-password" placeholder="Leave blank for unencrypted JSON">
+        </label>
+        <label class="backup-field" id="backup-confirm-wrap" hidden>
+          <strong>Confirm passphrase</strong>
+          <input id="backup-passphrase-confirm" type="password" autocomplete="new-password" placeholder="Re-enter passphrase">
+        </label>
+        <p id="backup-error" class="backup-error" role="alert" hidden></p>
+      </div>
+      <div class="dialog-footer backup-footer">
+        <button id="backup-cancel" class="button" type="button">Cancel</button>
+        <button id="backup-to-handoff" class="button" type="button" hidden>Save to handoff folder</button>
+        <button id="backup-download" class="button accent" type="submit">Download backup</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="import-preview-dialog" class="dialog backup-dialog" aria-labelledby="import-preview-title">
+    <form method="dialog" class="dialog-panel" id="import-preview-form">
+      <div class="dialog-header">
+        <h2 id="import-preview-title">Import Pipkin backup</h2>
+        <button id="import-preview-close" class="icon-button" type="button" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="dialog-body backup-body">
+        <p id="import-source-label" class="hint"></p>
+        <div id="import-unlock-box" class="backup-unlock" hidden>
+          <p class="hint">This backup is encrypted. Enter its passphrase to decrypt and preview before merging.</p>
+          <div class="inline-form">
+            <input id="import-passphrase" type="password" autocomplete="current-password" placeholder="Enter backup passphrase">
+            <button id="import-unlock-btn" class="button accent" type="button">Decrypt</button>
+          </div>
+        </div>
+        <div id="import-summary-box" hidden>
+          <div id="import-summary-grid" class="backup-summary-grid"></div>
+          <label class="backup-check">
+            <input id="import-apply-settings" type="checkbox" checked>
+            <span>Also apply theme, custom instructions, and keyboard shortcuts</span>
+          </label>
+          <p class="hint">Existing chats are kept safe — only new chats or newer edits are merged.</p>
+        </div>
+        <p id="import-error" class="backup-error" role="alert" hidden></p>
+      </div>
+      <div class="dialog-footer backup-footer">
+        <button id="import-cancel" class="button" type="button">Cancel</button>
+        <button id="import-confirm" class="button accent" type="submit" disabled>Merge into Pipkin</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="toast" class="toast" role="status" hidden></div>
 </body>

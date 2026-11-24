@@ -1,4 +1,4 @@
-name: Build Windows Package
+name: Verify & Build Release
 
 on:
   workflow_dispatch:
@@ -7,6 +7,29 @@ on:
       - 'v*'
 
 jobs:
+  verify-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify Python syntax, JS syntax, unit tests, and benchmarks on macOS
+        run: |
+          python3 -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py
+          for f in dist/*.js; do node --check "$f"; done
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+          PYTHONDONTWRITEBYTECODE=1 python3 benchmarks/run.py
+
   build-windows:
     runs-on: windows-latest
     steps:
@@ -39,7 +62,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Build Pipkin Windows package
+      - name: Build self-contained Pipkin Windows package
         shell: pwsh
         run: ./windows/build-windows.ps1
 

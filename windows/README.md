@@ -6,11 +6,12 @@ Pipkin on Windows uses **Microsoft Edge WebView2** in a C# desktop shell and sha
 1. **Windows 10 22H2 or Windows 11** (x64)
 2. **Ollama for Windows** — install from [ollama.com](https://ollama.com/download/windows) and pull at least one model (e.g. `ollama pull qwen3:8b`).
 3. **Python 3.9+** — install from [python.org](https://www.python.org/downloads/windows/) (check **"Add python.exe to PATH"** during setup).
-4. **[.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)** for x64.
-5. **[WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)** if it is missing.
+4. **[WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)** if it is missing (pre-installed on Windows 11).
+
+*(Starting in v2.0.0, `Pipkin-windows-x64.zip` is **self-contained** — you do **not** need to install the .NET 8 Desktop Runtime separately.)*
 
 ## Running a Built Zip (No Coding Required)
-1. Download [Pipkin-windows-x64.zip](https://github.com/garywu000/pipkin/releases/download/v1.9.0/Pipkin-windows-x64.zip) and extract the full `Pipkin` folder.
+1. Download [Pipkin-windows-x64.zip](https://github.com/garywu000/pipkin/releases/download/v2.0.0/Pipkin-windows-x64.zip) and extract the full `Pipkin` folder.
 2. Double-click **`Pipkin.exe`**.
 3. Pipkin starts its local server, opens the app window, and stops the server it started when you close it. First-launch setup lets you choose an appearance, model, and default mode.
 
