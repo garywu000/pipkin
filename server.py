@@ -30,6 +30,7 @@ import traceback
 from uuid import UUID
 import xml.etree.ElementTree as ET
 from zipfile import BadZipFile, ZipFile
+import agent as agent_module
 import artifacts
 import platform_os
 from agent import (
@@ -928,6 +929,16 @@ def read_document(kind, data, *, academic=False):
             return result.stdout.decode("utf-8", "replace")
         return platform_os.extract_pdf_pages(data)
     raise ValueError("Attach a PDF, Word document, text file, or photo.")
+
+
+def _workspace_document_text(kind, data):
+    try:
+        return read_document(kind, data)
+    except subprocess.TimeoutExpired as error:
+        raise ValueError("Reading this document took too long.") from error
+
+
+agent_module.DOCUMENT_READER = _workspace_document_text
 
 
 def valid_workspace_key(key):

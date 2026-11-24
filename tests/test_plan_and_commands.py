@@ -134,6 +134,7 @@ class RepeatedFailureTest(PlanFirstTest):
         replies = iter([
             {"tool_calls": [tool("run_command", command="check_page index.html")]},
             {"content": "I will call check_page directly."},
+            {"content": "Checked."},
         ])
         seen = []
 

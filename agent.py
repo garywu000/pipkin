@@ -46,6 +46,14 @@ CREDENTIAL_NAMES = {
 }
 CREDENTIAL_SUFFIXES = (".key", ".p12", ".pfx", ".kdbx", ".keychain", ".keychain-db", ".pem")
 MAX_FILE_BYTES = 256 * 1024
+MAX_DOCUMENT_BYTES = 7_000_000
+# Set by server.py to its PDF/Word text extractor: DOCUMENT_READER(kind, data) -> str.
+DOCUMENT_READER = None
+
+
+def document_kind(path):
+    suffix = str(path).rsplit(".", 1)[-1].casefold() if "." in str(path) else ""
+    return suffix if suffix in ("pdf", "docx") else None
 MAX_WRITE_BYTES = 200 * 1024
 COMMAND_TIMEOUT = 120
 WEB_TIMEOUT = 12
@@ -257,6 +265,19 @@ class Workspace:
             finally:
                 os.close(fd)
 
+    def has_root_pages(self):
+        """True when the workspace's top folder already has an HTML page (an update rather than a new site)."""
+        try:
+            if self._windows:
+                with os.scandir(self.path) as listing:
+                    return any(entry.name.casefold().endswith((".html", ".htm")) and entry.is_file(follow_symlinks=False)
+                               for entry in listing)
+            with self._open_root() as fd, os.scandir(fd) as listing:
+                return any(entry.name.casefold().endswith((".html", ".htm")) and entry.is_file(follow_symlinks=False)
+                           for entry in listing)
+        except OSError:
+            return False
+
     def list_files(self, path, check, depth=2):
         lines = []
 
@@ -297,6 +318,7 @@ class Workspace:
         return "\n".join(lines) or "(No visible files or folders.)"
 
     def raw_text(self, path):
+        kind = document_kind(path)
         with self.open_path(path, FILE_FLAGS) as fd:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
@@ -304,11 +326,23 @@ class Workspace:
             if info.st_nlink != 1:
                 raise ValueError("Hard-linked files are excluded from the workspace.")
             with os.fdopen(os.dup(fd), "rb") as stream:
-                raw = stream.read(MAX_FILE_BYTES + 1)
+                raw = stream.read((MAX_DOCUMENT_BYTES if kind else MAX_FILE_BYTES) + 1)
+        if kind:
+            # PDFs and Word files: read their text so read_file, search_text and map_document all work on them.
+            if len(raw) > MAX_DOCUMENT_BYTES:
+                raise ValueError(f"{path} is larger than 7 MB, so its text cannot be read.")
+            if DOCUMENT_READER is None:
+                raise ValueError(f"{path} is a {kind.upper()} file and no document reader is available here.")
+            text = DOCUMENT_READER(kind, raw).replace("\r\n", "\n")
+            if not text.strip():
+                raise ValueError(f"No text was found in {path}. It may be a scanned image.")
+            data = text.encode("utf-8")
+            return data[:MAX_FILE_BYTES].decode("utf-8", "ignore"), len(data) > MAX_FILE_BYTES
         truncated = len(raw) > MAX_FILE_BYTES
         raw = raw[:MAX_FILE_BYTES]
         if b"\x00" in raw:
-            raise ValueError("This file appears to be binary.")
+            raise ValueError("This file appears to be binary, so text tools cannot read it. "
+                             "Use text the user attached to the task, or ask the user for a text version.")
         decoded = raw.decode("utf-8", "replace")
         if PEM_KEY.search(decoded):
             raise ValueError("This file contains private key material.")
@@ -402,7 +436,8 @@ class Workspace:
                 if needle in name.casefold():
                     matches.append(f"{relative}: (file name match)")
                 try:
-                    if size > MAX_FILE_BYTES:
+                    # Folder-wide searches skip PDFs/Word files (slow to extract); search one by its path instead.
+                    if size > MAX_FILE_BYTES or document_kind(name):
                         continue
                     search_file(relative)
                 except (OSError, ValueError):
@@ -724,6 +759,60 @@ def artifact_steps(plan, sources, workflow, mode):
 
 
 EXIT_CODE = re.compile(r"\[exit code (\d+)\]\s*$")
+
+
+NEXT_STEP = re.compile(
+    r"\b(?:I will|I'll|I am going to|I'm going to|Let me(?! know)|Let's|Next,? I(?: will|'ll)?|Now,? I(?: will|'ll)?|I need to|I should)"
+    r"\s+(?:now\s+|next\s+|then\s+|first\s+|proceed (?:to|with)\s+|go ahead and\s+)?"
+    r"(?:proceed|use|read|run|create|write|edit|check|open|search|update|fix|add|call|look|try|start|make|build|generate|"
+    r"verify|test|map|list|extract|save|apply|modify|change|replace|inspect|review|examine|find|attempt)\b",
+    re.IGNORECASE,
+)
+CLAIMED_CHANGE = re.compile(
+    r"\b(?:renamed|created|creating|updated|saved|deleted|removed|wrote|written|modified|edited|fixed|replaced|moved|"
+    r"cleaned|compiled|generated|added)\b",
+    re.IGNORECASE,
+)
+CREATE_REQUEST = re.compile(
+    r"\b(?:make|create|write|build|save|generate|draft|produce|export|called|named|into|turn .{1,80} into)\b",
+    re.IGNORECASE,
+)
+TASK_FILE = re.compile(r"(?<![\w/.-])([\w-]+(?:/[\w-]+)*\.(?:md|txt|html?|css|js|py|json|csv))\b", re.IGNORECASE)
+
+
+def claims_change(text):
+    """True when a reply says files were changed (ignoring negated phrases like "was not created")."""
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", str(text or "")):
+        if CLAIMED_CHANGE.search(sentence) and not re.search(
+                r"\b(?:not|never|no|unable|could not|cannot|declined|failed|skipped|refused|canceled|cancelled|"
+                r"instead of|would have)\b|n't\b", sentence, re.IGNORECASE):
+            return True
+    return False
+
+
+def announces_next_step(text):
+    """True when a reply's last paragraph promises an action ("I will now run the tests") instead of reporting results."""
+    paragraphs = [part for part in re.split(r"\n\s*\n", str(text or "").strip()) if part.strip()]
+    if not paragraphs:
+        return False
+    tail = paragraphs[-1][-500:]
+    if re.search(r"\b(?:if you(?:'d)? (?:like|want|need|prefer)|happy to help|let me know|feel free)\b", tail, re.IGNORECASE):
+        return False
+    return bool(NEXT_STEP.search(tail))
+
+
+def missing_task_files(task, workspace):
+    """Files the task names that do not exist yet (deliverables the model has not created)."""
+    missing = []
+    if not CREATE_REQUEST.search(task or ""):
+        return missing
+    for name in dict.fromkeys(TASK_FILE.findall(task or "")):
+        try:
+            if workspace.existing_text(name) is None and workspace.file_digest(name) is None:
+                missing.append(name)
+        except (ValueError, OSError):
+            continue
+    return missing[:4]
 
 
 def command_failed(output):
@@ -1289,6 +1378,8 @@ def isolated_env(tmp_dir, *, platform_name=None):
         env["PAGER"] = "cat"
         env["GIT_PAGER"] = "cat"
         env["NO_COLOR"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTEST_ADDOPTS"] = "-p no:cacheprovider"
         return env
     env = {key: os.environ[key] for key in SAFE_ENV_KEYS if key in os.environ}
     base_path = os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
@@ -1300,6 +1391,9 @@ def isolated_env(tmp_dir, *, platform_name=None):
     env["PAGER"] = "cat"
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
+    # Keep tool caches out of the user's folder (.pytest_cache, __pycache__).
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTEST_ADDOPTS"] = "-p no:cacheprovider"
     return env
 
 
@@ -1554,13 +1648,14 @@ WRITE_TOOLS = [
     ]),
     {"type": "function", "function": {
         "name": "write_page",
-        "description": "Build a simple responsive single-page HTML site from supplied content. Use this for a straightforward site from a brief or attachment; use write_file for custom layouts or behavior.",
+        "description": "Build a NEW simple responsive single-page HTML site from supplied content. It replaces the whole file, so include every section each time; never use it to change an existing page (use edit_file). Use write_file for custom layouts or behavior.",
         "parameters": {"type": "object", "required": ["path", "title", "intro", "sections"], "properties": {
             "path": {"type": "string", "description": "Relative .html path, usually index.html"},
             "title": {"type": "string"}, "intro": {"type": "string"},
             "sections": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
                 "type": "object", "required": ["heading", "text"], "properties": {
-                    "heading": {"type": "string"}, "text": {"type": "string"},
+                    "heading": {"type": "string"},
+                    "text": {"type": "string", "description": "Plain text. Write links as [label](href), lists as lines starting with '- '."},
                 },
             }},
         }},
@@ -1801,16 +1896,75 @@ def as_int(value, default, low, high):
     return max(low, min(high, value))
 
 
+PAGE_LINK = re.compile(r"\[([^\]\n]{1,200})\]\(([^()\s]{1,500})\)|<a\s+href=[\"']([^\"'\s]{1,500})[\"'][^>]*>(.{1,200}?)</a>",
+                       re.IGNORECASE | re.DOTALL)
+PAGE_TAG = re.compile(r"</?(?:p|span|div|strong|b|em|i|u|small|section|ul|ol|li|h[1-6])\b[^>]*>", re.IGNORECASE)
+
+
+def safe_page_href(href):
+    href = unquote(href).strip() if href.lower().startswith("%") else href.strip()
+    parsed = urlparse(href)
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return href
+    if not parsed.scheme and not parsed.netloc and not href.startswith("//"):
+        return href
+    return None
+
+
+def page_text(text):
+    """Escape model text for write_page, keeping Markdown or simple <a href> links and dropping stray formatting tags."""
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    pieces, last = [], 0
+    for match in PAGE_LINK.finditer(text):
+        label = match.group(1) or match.group(4)
+        href = safe_page_href(match.group(2) or match.group(3))
+        pieces.append(escape(PAGE_TAG.sub("", text[last:match.start()])))
+        clean_label = escape(PAGE_TAG.sub("", label).strip())
+        pieces.append(f'<a href="{escape(href)}">{clean_label}</a>' if href else clean_label)
+        last = match.end()
+    pieces.append(escape(PAGE_TAG.sub("", text[last:])))
+    return "".join(pieces).strip()
+
+
+def reindent_edit(text, old, new):
+    """Retry an edit whose snippet only differs from the file by indentation, a common small-model slip.
+
+    Returns (old, new, count) using the file's own indentation when exactly one block matches."""
+    import textwrap
+    old_lines = textwrap.dedent(old).strip("\n").splitlines()
+    if not old_lines or not any(line.strip() for line in old_lines):
+        return old, new, 0
+    new_body = textwrap.dedent(new).strip("\n").splitlines()
+    lines = text.splitlines(keepends=True)
+    hits = []
+    for index in range(len(lines) - len(old_lines) + 1):
+        first = lines[index].rstrip("\r\n")
+        indent = first[:len(first) - len(first.lstrip())]
+        block = [line.rstrip("\r\n") for line in lines[index:index + len(old_lines)]]
+        if all(got.rstrip() == ((indent + want) if want else "").rstrip() for got, want in zip(block, old_lines)):
+            hits.append((index, indent))
+    if len(hits) != 1:
+        return old, new, 0
+    index, indent = hits[0]
+    ending = "\n" if not lines[index + len(old_lines) - 1].endswith("\n") else ""
+    original = "".join(lines[index:index + len(old_lines)])
+    original = original[:-1] if original.endswith("\n") and not ending else original
+    replacement = "\n".join((indent + line) if line else "" for line in new_body)
+    if original.endswith("\n"):
+        replacement += "\n"
+    return original, replacement, text.count(original)
+
+
 def landing_page(args):
-    title = escape(require_str(args, "title", 120).strip())
-    intro = escape(require_str(args, "intro", 1000).strip())
+    title = escape(PAGE_TAG.sub("", require_str(args, "title", 120)).strip())
+    intro = page_text(require_str(args, "intro", 1000).strip())
     sections = args.get("sections")
     if not isinstance(sections, list) or not 1 <= len(sections) <= 8 or not all(isinstance(item, dict) for item in sections):
         raise ValueError("Provide one to eight {heading, text} sections.")
     cards = []
     for item in sections:
-        heading = escape(require_str(item, "heading", 120).strip())
-        text = escape(require_str(item, "text", 1800).strip())
+        heading = escape(PAGE_TAG.sub("", require_str(item, "heading", 120)).strip())
+        text = page_text(require_str(item, "text", 1800).strip())
         cards.append(f"    <section><h2>{heading}</h2><p>{text}</p></section>")
     cards_html = "\n".join(cards)
     return f"""<!doctype html>
@@ -1889,6 +2043,8 @@ class Agent:
         self.summary = []
         self.working_notes = []
         self.read_ledger = {}
+        self.declined_paths = set()
+        self.rewrites = {}
         self.compactions = 0
         self.steering_texts = []
         self.results = {}
@@ -1944,6 +2100,27 @@ class Agent:
             self.compactions += 1
             self.write_task(messages)
         return list(messages)
+
+    def recovery_view(self, path):
+        """Show a short file's current text inside an error, so the next step can fix the call instead of re-reading."""
+        try:
+            text, truncated = self.workspace.raw_text(path)
+            if truncated or len(text) > 6000:
+                return ""
+            excerpt = self.workspace.read_file(path, 1, 200, limit=6500)
+        except (ValueError, OSError):
+            return ""
+        self.record_read(path, "shown after a failed write", excerpt)
+        return "\n\nCurrent contents:\n" + excerpt
+
+    def known_paths(self):
+        known = set()
+        for item in self.read_ledger:
+            try:
+                known.add(path_identity(item))
+            except ValueError:
+                continue
+        return known
 
     def record_read(self, path, detail, output):
         """Remember what files and ranges were read so the model stops re-reading after compaction."""
@@ -2317,7 +2494,21 @@ class Agent:
         if name == "list_files":
             return workspace.list_files(args.get("path") or ".", self.check)
         if name == "search_text":
-            return workspace.search_text(args.get("path") or ".", require_str(args, "query", 200).strip(), self.check)
+            path = args.get("path") or "."
+            found = workspace.search_text(path, require_str(args, "query", 200).strip(), self.check)
+            if found.startswith("(No matches") and isinstance(path, str) and path not in (".", ""):
+                # Small models search a short file for words from the task ("key terms") instead of reading it.
+                try:
+                    text, truncated = workspace.raw_text(path)
+                    if truncated or len(text) > 6000:
+                        return found
+                    excerpt = workspace.read_file(path, 1, 200, sources=self.sources, limit=6500)
+                except (ValueError, OSError):
+                    return found
+                self.record_read(path, "full text (search had no matches)", excerpt)
+                return (f"(No matches for that phrase in {path}. Here is the file instead; work from its "
+                        f"content rather than searching for words from the task.)\n\n{excerpt}")
+            return found
         if name == "outline_file":
             path = require_str(args, "path", 500)
             out = workspace.outline(path)
@@ -2347,9 +2538,13 @@ class Agent:
             return out
         if name == "read_files":
             files = args.get("files")
-            if not isinstance(files, list) or not 1 <= len(files) <= 4 or not all(isinstance(item, dict) for item in files):
+            if not isinstance(files, list) or not files or not all(isinstance(item, dict) for item in files):
                 raise ValueError("Provide one to four {path, start_line, count} objects.")
             excerpts = []
+            if len(files) > 4:
+                # Read the first four instead of failing the whole step; the model can ask for the rest next.
+                excerpts.append(f"(Read the first 4 of {len(files)} requested ranges. Request the remaining ranges next.)")
+                files = files[:4]
             for item in files:
                 self.check()
                 path = require_str(item, "path", 500)
@@ -2367,6 +2562,17 @@ class Agent:
             path = require_str(args, "path", 500).strip()
             validate_path(path)
             before = workspace.existing_text(path)
+            if before is not None and name in ("write_file", "write_page"):
+                # Small models often rewrite a file they never opened, which silently erases its content.
+                current = path_identity(path)
+                made_here = current in {path_identity(p) for p in self.saved_files}
+                if name == "write_page" and not made_here:
+                    raise ValueError(f"{path} already exists. write_page builds a brand-new page and would erase its "
+                                     f"current content. Read {path}, then use edit_file to change only what the task asks.")
+                if not made_here and current not in self.known_paths():
+                    raise ValueError(f"{path} already exists and you have not read it in this run, so it was not "
+                                     "replaced. To change part of it, use edit_file with a snippet copied from the "
+                                     "current contents." + self.recovery_view(path))
             if name == "write_file":
                 after = require_str(args, "content", MAX_WRITE_BYTES, allow_empty=True)
             elif name == "write_page":
@@ -2378,8 +2584,11 @@ class Agent:
                     raise ValueError("That file does not exist. Use write_file to create it.")
                 old, new = require_str(args, "old_text", 60_000), require_str(args, "new_text", 60_000, allow_empty=True)
                 count = before.count(old)
+                if count == 0:
+                    old, new, count = reindent_edit(before, old, new)
                 if count != 1:
-                    raise ValueError("old_text was not found exactly once in the file. Read the file and copy a unique snippet." if count == 0
+                    raise ValueError("old_text was not found exactly once in the file. Copy a unique snippet from the "
+                                     "current contents." + self.recovery_view(path) if count == 0
                                      else f"old_text appears {count} times. Include more surrounding lines so it is unique.")
                 after = before.replace(old, new, 1)
             if before == after:
@@ -2387,11 +2596,20 @@ class Agent:
             diff = make_diff(path, before, after)
             action = ("Create " if before is None else "Edit ") + path
             if self.mode == "ask" and not self.approve("edit", action, diff):
+                self.declined_paths.add(path_identity(path))
                 return "The user declined this change. Do not retry it."
             self.begin_effect(action)
             workspace.write_text(path, after)
             if path not in self.saved_files:
                 self.saved_files.append(path)
+            rewrite_note = ""
+            if name in ("write_file", "write_page") and before is not None:
+                key_path = path_identity(path)
+                self.rewrites[key_path] = self.rewrites.get(key_path, 0) + 1
+                if self.rewrites[key_path] >= 3:
+                    # Each full rewrite asks the user to approve again; small models polish the same file in a loop.
+                    rewrite_note = (f"\n\n(You have now rewritten {path} {self.rewrites[key_path]} times. It is saved. "
+                                    "Stop rewriting it unless a check failed; give the final answer next.)")
             self.saved_file = path
             self.read_ledger[path] = {"ranges": ["modified in this run"], "snippet": ""}
             self.emit("diff", id=self.current_id, text=diff)
@@ -2399,7 +2617,7 @@ class Agent:
                                undo=self.remember_undo(path, before, after.encode("utf-8")))
             added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
             removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
-            result = f"{'Created' if before is None else 'Updated'} {path} (+{added} −{removed} lines)."
+            result = f"{'Created' if before is None else 'Updated'} {path} (+{added} −{removed} lines).{rewrite_note}"
             if path.casefold().endswith(".html"):
                 try:
                     report = workspace.check_page(path, self.check)
@@ -2448,6 +2666,8 @@ class Agent:
             if 0 < len(label_path) < 120:
                 canceled_path = label_path
         retry_canceled_edit = True
+        unfinished_nudges = 2
+        deliverable_nudges = 1
         if self.workflow == "site" and self.workspace is not None:
             source_map = saved.get("site_source_map") if saved else self.prepare_site_source(task)
             if source_map:
@@ -2492,6 +2712,9 @@ class Agent:
         site_needs_page = self.workflow == "site" and self.mode != "read" and not any(
             path.casefold().endswith(".html") for path in self.saved_files
         )
+        # Updating an existing page means reading it first and editing in place, which takes a few more steps.
+        existing_pages = site_needs_page and self.workspace is not None and self.workspace.has_root_pages()
+        site_limit = 7 if existing_pages else 5
         exploring_phase = bool(self.explore_model and self.workspace is not None and self.mode != "read" and not self.saved_files)
         explore_turns = 0
         steering_texts = self.steering_texts
@@ -2568,6 +2791,30 @@ class Agent:
                     raise WorkPaused(f"Work paused with a canceled edit still to review in {canceled_path!r}.")
                 if not content and not stop_requested():
                     raise ValueError("The agent ended without an answer. Try rephrasing the task.")
+                if (allow_tools and unfinished_nudges and not stop_requested() and self.mode != "read"
+                        and announces_next_step(content)):
+                    # Small models often narrate the next step ("I will now read…") and stop without calling a tool.
+                    unfinished_nudges -= 1
+                    self.emit("notice", text="The model described a next step without doing it. Asked it to continue.")
+                    messages.append({"role": "assistant", "content": clip(content, 1000)})
+                    messages.append({"role": "user", "content": (
+                        "You described what you will do next but did not call a tool, so nothing happened. "
+                        "Do that step now with a tool call. If the task is already complete, give the final answer "
+                        "and name the files you saved.")})
+                    continue
+                missing = [name for name in (missing_task_files(self.task, self.workspace)
+                           if allow_tools and deliverable_nudges and self.workspace is not None
+                           and self.mode != "read" and not stop_requested() else [])
+                           if path_identity(name) not in self.declined_paths]
+                if missing:
+                    deliverable_nudges -= 1
+                    names = ", ".join(missing)
+                    self.emit("notice", text=f"The task names {names}, which does not exist yet. Asked the model to create it.")
+                    messages.append({"role": "assistant", "content": clip(content, 1000)})
+                    messages.append({"role": "user", "content": (
+                        f"{names} does not exist in the workspace yet, but the task asks for it. Create it now with a "
+                        "write tool using what you already gathered. If it truly should not be created, say why.")})
+                    continue
                 result = content
                 break
             if content:
@@ -2680,7 +2927,10 @@ class Agent:
                                "writing anything. Stop exploring: if the task asks you to create or change a file, write it "
                                "now with what you already know, then fix details with edit_file.)")
                     self.exploring = EXPLORE_NUDGE // 2
-                if site_needs_page and site_rounds >= 2 and ok:
+                if site_needs_page and site_rounds >= 2 and ok and existing_pages:
+                    output += ("\n\nFor the next step, change the existing HTML page with edit_file (read it first if you "
+                               "have not), keeping everything the task did not ask you to change.")
+                elif site_needs_page and site_rounds >= 2 and ok:
                     output += ("\n\nFor the next step, save a small working HTML page with the evidence already gathered. "
                                "Use write_page for a simple page, or write_file for the structure and styles first.")
                 if name in WRITE_TOOL_NAMES | {"run_command"} and self.has_plan and self.since_plan >= 4:
@@ -2734,7 +2984,8 @@ class Agent:
                 stalled = 0 if advanced else stalled + 1
                 if advanced:
                     recovery_sent = False
-                if site_needs_page:
+                planning_only = all((c.get("function") or {}).get("name") == "update_plan" for c in accepted_calls)
+                if site_needs_page and not planning_only:
                     site_rounds += 1
                 if stalled == 2 and not recovery_sent:
                     # One deliberate recovery step before giving up: diagnose, then work around the obstacle.
@@ -2749,9 +3000,15 @@ class Agent:
                 if stalled >= 4:
                     raise WorkPaused("Work paused after four steps without a new result, including one recovery attempt. "
                                      "Resume with a different approach or a more specific instruction.")
-                if site_needs_page and site_rounds >= 5:
-                    raise WorkPaused("Work paused after five steps without saving an HTML page. Resume with the smallest useful page as the next step.")
+                if site_needs_page and site_rounds >= site_limit:
+                    raise WorkPaused(f"Work paused after {'seven' if site_limit == 7 else 'five'} steps without saving an HTML page. Resume with the smallest useful page as the next step.")
         if result:
+            if (self.workspace is not None and self.mode != "read" and not self.saved_files
+                    and claims_change(result)):
+                # Small models sometimes report a change that never happened (for example after a failed edit).
+                result += ("\n\n**Pipkin check:** no files were created or changed in this run, so the change "
+                           "described above did not happen.")
+                self.emit("notice", text="The final answer describes a file change, but this run saved no files.")
             if save_checkpoint:
                 save_checkpoint(result=result)
             self.emit("result", text=result)

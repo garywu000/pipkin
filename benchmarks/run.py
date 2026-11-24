@@ -74,6 +74,9 @@ def ollama_json(path):
         connection.close()
 
 
+MIN_FREE_PERCENT = 65
+
+
 def memory_free_percent():
     if platform.system() != "Darwin":
         return None
@@ -120,6 +123,9 @@ def replay_model(case, pause_confirmed):
     steps = []
     for path in order:
         content = case.outputs[path].example if path in case.outputs else "New workshop\n"
+        if path in case.files:
+            # Pipkin refuses to replace an existing file the model has not read in this run.
+            steps.append({"tool_calls": [{"function": {"name": "read_file", "arguments": {"path": path}}}]})
         steps.append({"tool_calls": [{"function": {
             "name": "write_file", "arguments": {"path": path, "content": content},
         }}]})
@@ -173,7 +179,7 @@ def run_case(name, case, model, context, *, staged_site=False, explore_model=Non
             if ollama_json("/api/ps")["models"]:
                 raise RuntimeError("Ollama already has a resident model. Start the benchmark when it is idle.")
             free = memory_free_percent()
-            if free is not None and free < 65:
+            if free is not None and free < MIN_FREE_PERCENT:
                 raise RuntimeError(f"macOS reports {free}% memory free. Run the benchmark with more headroom.")
             def unload_model():
                 if not sessions.unload(timeout=15):
@@ -302,8 +308,12 @@ def main():
     parser.add_argument("--context", type=int, choices=server.CONTEXT_SIZES, default=16384)
     parser.add_argument("--repeat", type=int, choices=range(1, 21), default=1, metavar="1–20")
     parser.add_argument("--staged-site", action="store_true", help="Use the staged /site workflow used by the app.")
+    parser.add_argument("--min-free", type=int, choices=range(10, 96), default=65, metavar="10–95",
+                        help="Minimum macOS free-memory percentage before a live trial (default 65).")
     parser.add_argument("--report", type=Path, help="Write a machine-readable JSON report.")
     args = parser.parse_args()
+    global MIN_FREE_PERCENT
+    MIN_FREE_PERCENT = args.min_free
     model = None
     results = []
     interrupted = False
