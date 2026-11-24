@@ -2142,12 +2142,16 @@ class ChatHandler(BaseHTTPRequestHandler):
             allow_terminal = payload.get("allowTerminal", True)
             allow_shell = payload.get("allowShell", False)
             protect_memory = payload.get("protectMemory", True)
+            explore_model = payload.get("exploreModel")
             if (terminal_id is not None and not isinstance(terminal_id, str)
                     or not isinstance(has_browser, bool)
                     or not isinstance(allow_terminal, bool)
                     or not isinstance(allow_shell, bool)
-                    or not isinstance(protect_memory, bool)):
+                    or not isinstance(protect_memory, bool)
+                    or (explore_model is not None and (not isinstance(explore_model, str) or len(explore_model) > 200))):
                 raise ValueError()
+            if explore_model == current().get("model"):
+                explore_model = None
             if not isinstance(task, str) or not task.strip() or len(task) > 40_000:
                 raise ValueError()
             if key is not None and not valid_workspace_key(key):
@@ -2272,7 +2276,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             check()
             send_event(event, **fields)
 
-        def request_step(messages, tools, think_now, *, schema=None):
+        def request_step(messages, tools, think_now, *, schema=None, model_override=None):
             nonlocal step_started, step_last_packet
             check()
             with run["changed"]:
@@ -2283,7 +2287,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                         if event == "step":
                             emit(event, **data)
                     return self.agent_step(messages, [], False, check, emit_plan_step, output_schema=schema)
-                return self.agent_model(messages, tools, think_now, check, emit, stop_requested=stop_requested, workflow=workflow)
+                return self.agent_model(messages, tools, think_now, check, emit, stop_requested=stop_requested,
+                                        workflow=workflow, model_override=model_override)
             finally:
                 reason = budget_reason()
                 with run["changed"]:
@@ -2401,7 +2406,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 request_step,
                 emit, check, approve, workspace=workspace, mode=mode, web=web, memory=allow_memory,
                 max_steps=max_steps, num_ctx=settings["num_ctx"], think=think, panels=panels, workflow=workflow,
-                undo=undo_store(self.server.server_port), allow_shell=allow_shell,
+                undo=undo_store(self.server.server_port), allow_shell=allow_shell, explore_model=explore_model,
             )
             system = system_prompt(workspace, mode, web, allow_memory, memories, instructions.strip(), context.strip(),
                                    notes_text, notes_name, panels=panels, workflow=workflow, allow_shell=allow_shell)
@@ -2575,14 +2580,15 @@ class ChatHandler(BaseHTTPRequestHandler):
             GENERATION.release()
         self.send_json(200, {"ok": True})
 
-    def agent_model(self, messages, tools, think, check, emit, *, stop_requested=lambda: False, workflow=None):
+    def agent_model(self, messages, tools, think, check, emit, *, stop_requested=lambda: False, workflow=None, model_override=None):
         for attempt in range(2):
             if stop_requested():
                 return None
             try:
+                extra = {"model_override": model_override} if model_override else {}
                 if not tools:
-                    return self.agent_step(messages, tools, think, check, emit)
-                reply = self.agent_step(messages, tools, think, check, emit, output_limit=3400 if think else 2400)
+                    return self.agent_step(messages, tools, think, check, emit, **extra)
+                reply = self.agent_step(messages, tools, think, check, emit, output_limit=3400 if think else 2400, **extra)
                 if reply.get("finish_reason") != "length":
                     return reply
                 if attempt:
@@ -2616,12 +2622,13 @@ class ChatHandler(BaseHTTPRequestHandler):
             except TimeoutError as error:
                 raise WorkPaused("Ollama stopped responding during a model step. Resume Work from the last completed step.") from error
 
-    def agent_step(self, messages, tools, think, check, emit, *, output_schema=None, output_limit=None):
+    def agent_step(self, messages, tools, think, check, emit, *, output_schema=None, output_limit=None, model_override=None):
         settings = current()
+        active_model = model_override or settings["model"]
         body = {
-            "model": settings["model"], "messages": messages, "stream": True, "think": think,
-            # Stay loaded through approval waits and slow commands; the session manager drops this back to 1m after the run.
-            "keep_alive": "30m", "options": {"num_ctx": settings["num_ctx"], "num_predict": min(8192, settings["num_ctx"] // 2), "temperature": 0.3},
+            "model": active_model, "messages": messages, "stream": True, "think": think,
+            # Explorer models use a short 1m keep_alive so they release RAM promptly when handing off to the primary writer.
+            "keep_alive": "1m" if model_override else "30m", "options": {"num_ctx": settings["num_ctx"], "num_predict": min(8192, settings["num_ctx"] // 2), "temperature": 0.3},
         }
         if think:
             # Qwen's guidance for thinking mode: low temperatures make the reasoning loop on itself.

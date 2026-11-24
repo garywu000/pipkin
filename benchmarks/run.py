@@ -151,7 +151,7 @@ def replay_model(case, pause_confirmed):
     return step
 
 
-def run_case(name, case, model, context, *, staged_site=False):
+def run_case(name, case, model, context, *, staged_site=False, explore_model=None):
     started = time.monotonic()
     with TemporaryDirectory(prefix="pipkin-benchmark-") as directory, ExitStack() as stack:
         root = Path(directory)
@@ -197,11 +197,12 @@ def run_case(name, case, model, context, *, staged_site=False):
         key = server.grant_workspace(workspace)
         checkpoint = str(uuid4())
         options = {"task": task, "workspace": key, "mode": "ask", "workflow": "site" if case.site else None,
-                   "web": False, "allowMemory": False, "think": False, "maxSteps": 10}
+                   "web": False, "allowMemory": False, "think": False, "maxSteps": 10,
+                   "exploreModel": explore_model}
         if staged_site and case.site:
             options["artifact"] = {"brief": case.task, "attachments": attachments}
         result = {"case": name, "first_saved_output_seconds": None, "first_verified_output_seconds": None,
-                  "model_steps": 0, "failed_tools": 0,
+                  "model_steps": 0, "explore_steps": 0, "write_steps": 0, "failed_tools": 0,
                   "approvals": 0, "unexpected_approvals": 0, "denied_requested_write": False,
                   "saved_paths": [], "restored_paths": [], "agent_timings_seconds": {}, "end_states": []}
 
@@ -232,6 +233,10 @@ def run_case(name, case, model, context, *, staged_site=False):
                             post("/api/agent/approve", {"run": run_id, "id": event["id"], "approved": approved})
                     elif kind == "model_step":
                         result["model_steps"] += 1
+                        if event.get("phase") == "explore":
+                            result["explore_steps"] += 1
+                        else:
+                            result["write_steps"] += 1
                     elif kind == "tool_result":
                         result["failed_tools"] += event["ok"] is False
                         path = event.get("saved_file")
@@ -293,6 +298,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", action="append", choices=CASES, help="Select one or more tasks. Default is all six.")
     parser.add_argument("--model", help="Use this installed local Ollama model. Omit for scripted replay.")
+    parser.add_argument("--explore-model", help="Optional smaller Ollama model for two-model Explore → Write runs.")
     parser.add_argument("--context", type=int, choices=server.CONTEXT_SIZES, default=16384)
     parser.add_argument("--repeat", type=int, choices=range(1, 21), default=1, metavar="1–20")
     parser.add_argument("--staged-site", action="store_true", help="Use the staged /site workflow used by the app.")
@@ -303,12 +309,18 @@ def main():
     interrupted = False
     try:
         if args.model:
-            model = next((item for item in server.installed_models() if item["name"] == args.model), None)
+            installed = server.installed_models()
+            model = next((item for item in installed if item["name"] == args.model), None)
             if not model or not model.get("size") or args.model.endswith(":cloud"):
                 raise RuntimeError("Choose the exact name of a downloaded local model shown by 'ollama list'.")
+            if args.explore_model:
+                ex = next((item for item in installed if item["name"] == args.explore_model), None)
+                if not ex or not ex.get("size") or args.explore_model.endswith(":cloud"):
+                    raise RuntimeError("Choose an installed local model for --explore-model.")
         for iteration in range(1, args.repeat + 1):
             for name in args.case or CASES:
-                trial = run_case(name, CASES[name], args.model, args.context, staged_site=args.staged_site)
+                trial = run_case(name, CASES[name], args.model, args.context,
+                                 staged_site=args.staged_site, explore_model=args.explore_model)
                 trial["iteration"] = iteration
                 results.append(trial)
                 status = "PASS" if trial["passed"] else "FAIL"
@@ -321,6 +333,7 @@ def main():
         args.report.parent.mkdir(parents=True, exist_ok=True)
         metadata = {key: model.get(key) for key in ("name", "digest", "details")} if model else None
         payload = {"schema": 1, "mode": "ollama" if model else "replay", "model": metadata,
+                   "explore_model": args.explore_model,
                    "platform": platform.system(), "architecture": platform.machine(),
                    "context": args.context, "think": False, "interrupted": interrupted,
                    "staged_site": args.staged_site, "trials": results}

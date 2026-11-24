@@ -825,6 +825,20 @@ body:not([data-sidebar-collapsed]) #history-toggle, body:not([data-sidebar-colla
 .pressure-banner-copy { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pressure-banner-copy .icon { width: 15px; height: 15px; flex: none; }
 .pressure-banner-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.live-run-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 8px; padding: 7px 10px 7px 12px; border-radius: 13px; font-size: .82rem;
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  color: var(--accent-text); box-shadow: var(--shadow-sm); animation: popover-in .2s var(--ease-out);
+}
+.live-run-banner-copy { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.live-run-banner-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-busy-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none; margin-right: 4px;
+  background: var(--accent); box-shadow: 0 0 8px var(--accent-glow);
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+@keyframes pulse-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.78); } }
 .working-notes {
   border-top: 1px solid var(--rule); padding: 6px 14px 8px; font-size: .81rem; color: var(--ink-2);
   background: color-mix(in srgb, var(--surface-2) 38%, transparent);

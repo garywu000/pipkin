@@ -275,6 +275,14 @@
               <p id="model-details" class="hint"></p>
             </div>
             <div class="setting stack">
+              <label for="setting-explore-model"><strong>Explorer model (Two-model runs)</strong></label>
+              <div class="select-wrap">
+                <select id="setting-explore-model"><option value="">Off (single model)</option></select>
+                <svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg>
+              </div>
+              <p class="hint">Optional: use a smaller, faster model to map and read workspace files before your primary model writes. Off by default unless benchmarked faster on your Mac.</p>
+            </div>
+            <div class="setting stack">
               <label for="setting-context"><strong>Context window</strong></label>
               <div class="select-wrap">
                 <select id="setting-context"></select>
@@ -449,6 +457,7 @@
 
     <footer class="composer-area">
       <form id="composer" class="composer">
+        <div id="live-run-banner" class="live-run-banner" role="status" hidden></div>
         <div id="pressure-banner" class="pressure-banner" role="status" hidden></div>
         <div id="feedback" class="feedback" role="status"></div>
         <div class="composer-box">

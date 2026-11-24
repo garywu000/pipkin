@@ -105,7 +105,7 @@ const PALETTE_IDS = PALETTES.map((p) => p.id);
 
 const defaultSettings = {
   theme: "system", palette: "emerald", enterToSend: true, showStats: true, temperature: 0.7, instructions: "",
-  memoryEnabled: true, protectMemory: true, allowShell: false, permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
+  memoryEnabled: true, protectMemory: true, allowShell: false, exploreModel: "", permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
   sidebarCollapsed: false, sidebarWidth: 268,
 };
 const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
@@ -145,6 +145,9 @@ let processingFiles = false;
 let agentWorkspace = null;
 let choosingWorkspace = false;
 let activeReply = null;
+let activeReplyChatId = null;
+let activeReplyHistory = null;
+let stashedLiveRun = null;
 let activeAgentRun = null;
 let activeAgentActivity = null;
 let followLatest = true;
@@ -372,12 +375,13 @@ async function restoreHistory() {
   }
 }
 
-async function saveHistory(conversationMessages, newChatDetails = draftContext) {
-  chatId = chatId || crypto.randomUUID();
-  searchCache.delete(chatId);
-  const previous = chatTitles.get(chatId);
-  const knownSaved = previous && !unsavedChats.has(chatId);
-  const generated = chatSummary(chatId, conversationMessages);
+async function saveHistory(conversationMessages, newChatDetails = draftContext, targetChatId = null) {
+  const targetId = targetChatId || chatId || crypto.randomUUID();
+  if (!targetChatId) chatId = targetId;
+  searchCache.delete(targetId);
+  const previous = chatTitles.get(targetId);
+  const knownSaved = previous && !unsavedChats.has(targetId);
+  const generated = chatSummary(targetId, conversationMessages);
   const usedAgent = conversationMessages.some((message) => message.agentRun);
   const legacyEmptySkill = Boolean(conversationMessages[0]?.skill && !firstTurnTitle(conversationMessages[0]));
   const merge = (existing) => {
@@ -402,9 +406,11 @@ async function saveHistory(conversationMessages, newChatDetails = draftContext) 
       transaction.objectStore("conversations").put(conversationMessages, summary.id);
       titles.put(summary);
       const metadata = transaction.objectStore("chat");
-      metadata.put(summary.id, "active");
-      if (compactedContext) metadata.put(compactedContext, "compaction:" + summary.id);
-      else metadata.delete("compaction:" + summary.id);
+      if (!targetChatId || targetId === chatId) metadata.put(summary.id, "active");
+      if (!targetChatId || targetId === chatId) {
+        if (compactedContext) metadata.put(compactedContext, "compaction:" + summary.id);
+        else metadata.delete("compaction:" + summary.id);
+      }
     };
   });
   if (deleted) {
@@ -651,8 +657,9 @@ function chatListItem({ id, title, pinned, usedAgent }, match) {
   scrollChatTitle(open, clip);
   if (match) open.append(el("span", { className: "match", text: match }));
   const more = el("button", { type: "button", className: "icon-button small chat-more", "aria-label": "Options for " + title, dataset: { chatId: id } }, icon("more"));
+  const busyDot = activeReply && id === activeReplyChatId ? el("span", { className: "chat-busy-dot", title: "Working in this chat" }) : null;
   const agentMark = usedAgent ? el("span", { className: "agent-mark", title: "Used the agent", "aria-label": "Used the agent" }, icon("bot")) : null;
-  const row = el("div", { className: "chat-row", draggable: "true" }, pinned ? icon("pin", "icon pin-mark") : null, open, agentMark, more);
+  const row = el("div", { className: "chat-row", draggable: "true" }, pinned ? icon("pin", "icon pin-mark") : null, busyDot, open, agentMark, more);
   if (id === chatId) row.setAttribute("aria-current", "true");
   row.addEventListener("dragstart", (event) => {
     draggedChatId = id;
@@ -1377,8 +1384,28 @@ function jumpToMessage(message) {
   }
 }
 
+function renderLiveRunBanner() {
+  const banner = byId("live-run-banner");
+  if (!banner) return;
+  if (!activeReply || !activeReplyChatId || chatId === activeReplyChatId) {
+    banner.hidden = true;
+    return;
+  }
+  const title = chatTitles.get(activeReplyChatId)?.title || pendingChatTitle || "active chat";
+  const retBtn = el("button", { type: "button", className: "button small", text: "Return to live run" });
+  retBtn.addEventListener("click", () => void selectChat(activeReplyChatId));
+  banner.replaceChildren(
+    el("div", { className: "live-run-banner-copy" },
+      el("span", { className: "chat-busy-dot" }),
+      el("span", { text: `Working in “${title}” — browsing read-only` })),
+    retBtn,
+  );
+  banner.hidden = false;
+}
+
 async function selectChat(id, projectId = null) {
-  if (!historyReady || switchingChat || changingChats || activeReply || processingFiles) return;
+  if (!historyReady || switchingChat || changingChats || processingFiles) return;
+  if (id === null && activeReply) return;
   if (id === chatId && id !== null) {
     showHistory(false);
     promptBox.focus();
@@ -1387,22 +1414,48 @@ async function selectChat(id, projectId = null) {
   switchingChat = true;
   updateControls();
   try {
+    if (activeReply && activeReplyChatId && chatId === activeReplyChatId && id !== activeReplyChatId) {
+      stashedLiveRun = {
+        chatId: activeReplyChatId,
+        nodes: [...messages.childNodes],
+        history: activeReplyHistory || history,
+      };
+    }
+    if (activeReply && stashedLiveRun && id === stashedLiveRun.chatId) {
+      chatId = stashedLiveRun.chatId;
+      history = stashedLiveRun.history;
+      messages.replaceChildren(...stashedLiveRun.nodes);
+      empty.hidden = messages.childNodes.length > 0;
+      stashedLiveRun = null;
+      for (const row of sidebarContent.querySelectorAll(".chat-row")) {
+        if (row.querySelector(".chat-open")?.dataset.chatId === id) row.setAttribute("aria-current", "true");
+        else row.removeAttribute("aria-current");
+      }
+      renderLiveRunBanner();
+      renderContextInfo();
+      showHistory(false);
+      syncTurns();
+      scrollToLatest();
+      return;
+    }
     const database = await chatDatabase;
-    const messages = id === null ? [] : unsavedChats.get(id) ||
+    const loaded = id === null ? [] : unsavedChats.get(id) ||
       (database && await readStore(database, "conversations", id));
-    if (!Array.isArray(messages)) throw new Error("Could not open this saved chat.");
+    if (!Array.isArray(loaded)) throw new Error("Could not open this saved chat.");
     chatId = id;
     if (id === null) draftContext = { projectId, notes: "" };
-    history = messages;
-    const savedMode = conversationMode(messages);
-    if (savedMode && savedMode !== (agentMode.checked ? "work" : "chat")) {
+    history = loaded;
+    const savedMode = conversationMode(loaded);
+    if (!activeReply && savedMode && savedMode !== (agentMode.checked ? "work" : "chat")) {
       checkMode(savedMode);
       showMode();
     }
-    compactedContext = await loadCompaction(database, id, messages.length);
-    promptBox.value = "";
-    autoGrow();
-    files = [];
+    compactedContext = await loadCompaction(database, id, loaded.length);
+    if (!activeReply) {
+      promptBox.value = "";
+      autoGrow();
+      files = [];
+    }
     renderConversation();
     for (const row of sidebarContent.querySelectorAll(".chat-row")) {
       if (row.querySelector(".chat-open")?.dataset.chatId === id) row.setAttribute("aria-current", "true");
@@ -1410,14 +1463,17 @@ async function selectChat(id, projectId = null) {
     }
     showHistory(false);
     renderContextInfo();
+    renderLiveRunBanner();
     announce();
     updateFiles();
-    await writeStores(["chat"], (transaction) => {
-      const metadata = transaction.objectStore("chat");
-      metadata.put(id, "active");
-      if (id === null) metadata.put(draftContext, "draft-context");
-    });
-    promptBox.focus({ preventScroll: true });
+    if (!activeReply) {
+      await writeStores(["chat"], (transaction) => {
+        const metadata = transaction.objectStore("chat");
+        metadata.put(id, "active");
+        if (id === null) metadata.put(draftContext, "draft-context");
+      });
+      promptBox.focus({ preventScroll: true });
+    }
   } catch {
     announce("Could not open this saved chat.", true);
   } finally {
@@ -1437,10 +1493,11 @@ function modelCanReply() {
 
 function updateControls() {
   const replying = activeReply !== null;
-  const steering = Boolean(activeAgentRun?.runId && activeAgentRun.state === "working" &&
+  const viewingLiveChat = !replying || chatId === activeReplyChatId;
+  const steering = Boolean(viewingLiveChat && activeAgentRun?.runId && activeAgentRun.state === "working" &&
     !activeReply?.signal.aborted && !modelUnloading && !stopAfterStepButton.disabled);
-  const sidebarBusy = replying || processingFiles || changingChats || !historyReady;
-  const composerBusy = sidebarBusy || switchingChat;
+  const sidebarBusy = processingFiles || changingChats || !historyReady;
+  const composerBusy = replying || sidebarBusy || switchingChat;
   const agent = agentMode.checked;
   const started = Boolean(history.length || pendingChatTitle);
   appMode.hidden = started;
@@ -2827,6 +2884,17 @@ function renderModelControls() {
   contextSelect.replaceChildren(...modelInfo.contextSizes.map((size) => new Option(`${size / 1024}K tokens`, String(size))));
   contextSelect.value = String(modelInfo.num_ctx);
   byId("context-size").textContent = `${modelInfo.num_ctx / 1024}K context`;
+  const exploreSelect = byId("setting-explore-model");
+  if (exploreSelect) {
+    exploreSelect.replaceChildren(
+      new Option("Off (single model)", ""),
+      ...modelInfo.models
+        .filter((m) => m.name !== modelInfo.model)
+        .map((m) => new Option(`${shortModelName(m.name)} (${formatSize(m.size)})`, m.name)),
+    );
+    exploreSelect.value = modelInfo.models.some((m) => m.name === settings.exploreModel && m.name !== modelInfo.model)
+      ? settings.exploreModel : "";
+  }
   renderContextRecommendation(current);
   const canThink = !modelInfo.capabilities.length || modelInfo.capabilities.includes("thinking");
   thinkToggle.hidden = !canThink;
@@ -3080,6 +3148,12 @@ async function compactCurrentChat() {
   if (!modelCanReply()) return announce("Wait for the local connection to be available.", true);
   const controller = new AbortController();
   activeReply = controller;
+  const runChatId = chatId || crypto.randomUUID();
+  if (!chatId) chatId = runChatId;
+  activeReplyChatId = runChatId;
+  activeReplyHistory = history;
+  const runContext = { ...draftContext };
+  stashedLiveRun = null;
   notifyShell({ type: "busy", value: true });
   updateControls();
   announce("Compacting older turns…");
@@ -3091,7 +3165,12 @@ async function compactCurrentChat() {
     announce(error.name === "AbortError" ? "Compaction stopped." : error.message, error.name !== "AbortError");
   } finally {
     activeReply = null;
+    activeReplyChatId = null;
+    activeReplyHistory = null;
+    stashedLiveRun = null;
     notifyShell({ type: "busy", value: false });
+    renderLiveRunBanner();
+    renderChatList();
     renderContextInfo();
     updateControls();
     updateTokenMeter();
@@ -3224,6 +3303,12 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
   syncTurns();
   const controller = new AbortController();
   activeReply = controller;
+  const runChatId = chatId || crypto.randomUUID();
+  if (!chatId) chatId = runChatId;
+  activeReplyChatId = runChatId;
+  activeReplyHistory = history;
+  const runContext = { ...draftContext };
+  stashedLiveRun = null;
   pendingChatTitle = firstTurnTitle(userMessage) || "Untitled chat";
   activeAgentRun = agentRun;
   activeAgentActivity = view.activity || null;
@@ -3349,6 +3434,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
           terminal: window.PipkinPanels?.terminalAllowed?.() ? (window.PipkinPanels?.activeTerminalId() || null) : null,
           allowTerminal: window.PipkinPanels?.terminalAllowed?.() ?? true,
           allowShell: Boolean(settings.allowShell),
+          exploreModel: settings.exploreModel && settings.exploreModel !== modelInfo.model ? settings.exploreModel : null,
           browser: Boolean(window.PipkinPanels?.browserAllowed?.()),
           protectMemory: settings.protectMemory !== false,
         }),
@@ -3506,12 +3592,15 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
       view.setRewriteNote?.(rewriteNote);
       view.setStats(stats);
       const web = webSteps.filter((step) => step.phase === "done").map(({ phase, sources, ...step }) => step);
-      history.push(userMessage, { role: "assistant", content: answer, thinking: thought, thinkingDurationMs, agentRun,
+      activeReplyHistory.push(userMessage, { role: "assistant", content: answer, thinking: thought, thinkingDurationMs, agentRun,
         stats, ...replyDetails, ...(rewriteNote && { rewriteNote }), web: web.length ? web : undefined, ...sourceState(sourceNote) });
-      const saved = await saveHistory([...history]);
-      if (saved && history.length === 2 && !humanize) refineChatTitle(chatId, userMessage, answer);
-      if (saved && !unsavedChats.has(chatId) && agentRun?.state === "complete" && agentRun.checkpointId) {
+      const saved = await saveHistory([...activeReplyHistory], runContext, runChatId);
+      if (saved && activeReplyHistory.length === 2 && !humanize) refineChatTitle(runChatId, userMessage, answer);
+      if (saved && !unsavedChats.has(runChatId) && agentRun?.state === "complete" && agentRun.checkpointId) {
         void discardWorkCheckpoints([agentRun.checkpointId]).catch(() => {});
+      }
+      if (chatId !== runChatId) {
+        toast(`Finished reply in “${chatTitles.get(runChatId)?.title || "chat"}”`);
       }
       notifyShell({ type: "finished", title: humanize ? "Draft ready" : agentRun?.state === "stopped" ? "Work paused" : useAgent ? "Agent run finished" : "Reply ready",
         body: humanize ? "Review it in Pipkin." : plainText(answer).slice(0, 140) });
@@ -3524,9 +3613,9 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
       }
       const content = agentRun?.answer || interrupted;
       view.renderReply(content);
-      history.push(userMessage, { role: "assistant", content, agentRun, ...replyDetails, ...sourceState(sourceNote) });
-      await saveHistory([...history]);
-    } else {
+      activeReplyHistory.push(userMessage, { role: "assistant", content, agentRun, ...replyDetails, ...sourceState(sourceNote) });
+      await saveHistory([...activeReplyHistory], runContext, runChatId);
+    } else if (chatId === runChatId) {
       view.article.previousElementSibling?.remove();
       view.article.remove();
       empty.hidden = history.length > 0;
@@ -3536,9 +3625,14 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
       syncTurns();
     }
     activeReply = null;
+    activeReplyChatId = null;
+    activeReplyHistory = null;
+    stashedLiveRun = null;
     pendingChatTitle = "";
     activeAgentRun = null;
     activeAgentActivity = null;
+    renderLiveRunBanner();
+    renderChatList();
     if (queuedSteering.size) {
       const unsaved = [...queuedSteering.values()].filter((note) => !note.saved).map((note) => note.text);
       if (unsaved.length) restoreSteeringDraft(unsaved);
@@ -4389,6 +4483,9 @@ byId("permission-choice").addEventListener("change", (event) => {
 });
 byId("setting-allow-shell")?.addEventListener("change", (event) => {
   saveSettings({ allowShell: event.target.checked });
+});
+byId("setting-explore-model")?.addEventListener("change", (event) => {
+  saveSettings({ exploreModel: event.target.value || "" });
 });
 byId("setting-model").addEventListener("change", (event) => chooseModel(event.target.value, modelInfo.num_ctx));
 byId("setting-context").addEventListener("change", (event) => chooseModel(modelInfo.model, Number(event.target.value)));

@@ -1555,7 +1555,7 @@ def summarize_exchange(dropped):
 class Agent:
     def __init__(self, request_model, emit, check, approve, *, workspace=None, mode="ask", web=True,
                  memory=True, max_steps=24, num_ctx=8192, think=False, panels=None, workflow=None, undo=None,
-                 allow_shell=True):
+                 allow_shell=True, explore_model=None, max_explore_steps=4):
         self.request_model, self.emit, self.check = request_model, emit, check
         self.panels = panels
         self.workflow = workflow
@@ -1563,7 +1563,10 @@ class Agent:
         self.workspace, self.mode, self.web, self.memory = workspace, mode, web, memory
         self.max_steps, self.num_ctx, self.think = max_steps, num_ctx, think
         self.allow_shell = bool(allow_shell)
+        self.explore_model = str(explore_model).strip() if explore_model else None
+        self.max_explore_steps = max(1, int(max_explore_steps))
         self.tools = available_tools(workspace, mode, web, memory, panels, workflow, allow_shell=self.allow_shell)
+        self.explore_tools = [t for t in self.tools if t["function"]["name"] not in WRITE_TOOL_NAMES | {"run_command", "terminal_run"}]
         self.tool_names = {tool["function"]["name"] for tool in self.tools}
         self.seen = set()
         self.counter = 0
@@ -2176,6 +2179,8 @@ class Agent:
         site_needs_page = self.workflow == "site" and self.mode != "read" and not any(
             path.casefold().endswith(".html") for path in self.saved_files
         )
+        exploring_phase = bool(self.explore_model and self.workspace is not None and self.mode != "read" and not self.saved_files)
+        explore_turns = 0
         steering_texts = self.steering_texts
         if self.summary or self.working_notes or self.read_ledger:
             self.write_task(messages)
@@ -2203,8 +2208,20 @@ class Agent:
                 convo[0] = dict(convo[0], content=convo[0]["content"] + "\nThe step limit was reached. Give your final answer now without tools.")
             model_steps += 1
             thinking = self.think and step == 0 and not self.plan
-            self.emit("model_step", number=model_steps, planning=thinking)
-            reply = self.request_model(convo, self.tools if allow_tools else [], thinking)
+            use_explorer = exploring_phase and allow_tools and explore_turns < self.max_explore_steps
+            step_tools = (self.explore_tools if use_explorer else self.tools) if allow_tools else []
+            self.emit("model_step", number=model_steps, planning=thinking, phase="explore" if use_explorer else "write")
+            if use_explorer:
+                explore_turns += 1
+                try:
+                    reply = self.request_model(convo, step_tools, False, model_override=self.explore_model)
+                except TypeError:
+                    reply = self.request_model(convo, step_tools, False)
+            else:
+                if exploring_phase:
+                    exploring_phase = False
+                    self.emit("notice", text="Explorer finished gathering context — switching to primary model to write…")
+                reply = self.request_model(convo, step_tools, thinking)
             if reply is None:
                 break
             tokens += reply.get("eval_count", 0)
@@ -2215,6 +2232,17 @@ class Agent:
                 continue
             calls = reply.get("tool_calls") or []
             content = (reply.get("content") or "").strip()
+            if not calls and use_explorer and allow_tools:
+                exploring_phase = False
+                if content:
+                    self.working_notes = [*self.working_notes[-23:], {"text": clip(content, 240)}]
+                    self.emit("notes", notes=list(self.working_notes))
+                self.write_task(messages)
+                messages.append({"role": "user", "content": (
+                    "Exploration is complete. Now use the primary model with write tools to complete the requested edits and verification."
+                )})
+                self.emit("notice", text="Explorer finished gathering context — switching to primary model to write…")
+                continue
             if not calls or not allow_tools:
                 if canceled_path and not stop_requested():
                     if allow_tools and retry_canceled_edit:

@@ -300,3 +300,29 @@ class RepeatedFailureTest(PlanFirstTest):
             result = agent.run_command(self.workspace, f'touch "{target}"', lambda: None)
             self.assertFalse(os.path.exists(target), "sandbox must block writes outside workspace")
             self.assertNotIn("[exit code 0]", result)
+
+    def test_two_model_explore_then_write_handoff(self):
+        self.workspace.write_text("brief.md", "Title: Launch Plan\n")
+        calls_log = []
+        replies = iter([
+            {"tool_calls": [tool("read_file", path="brief.md")]},
+            {"content": "Found title Launch Plan in brief.md; ready for writer."},
+            {"tool_calls": [tool("write_file", path="summary.md", content="# Launch Plan\n")]},
+            {"content": "Created summary.md."},
+        ])
+
+        def model(messages, tools, _think, model_override=None):
+            calls_log.append((model_override, {t["function"]["name"] for t in tools}))
+            return next(replies)
+
+        events = []
+        work = Agent(model, lambda ev, **d: events.append((ev, d)), lambda: None, lambda *_: True,
+                     workspace=self.workspace, mode="auto", web=False, explore_model="qwen3:4b")
+        work.run("System", [], "Summarize brief.md into summary.md.")
+        self.assertEqual(calls_log[0][0], "qwen3:4b")
+        self.assertNotIn("write_file", calls_log[0][1], "explorer phase must only expose read/plan/note tools")
+        self.assertEqual(calls_log[1][0], "qwen3:4b")
+        self.assertIsNone(calls_log[2][0], "writer phase must switch back to primary model")
+        self.assertIn("write_file", calls_log[2][1])
+        self.assertTrue(any(ev == "notice" and "switching to primary model" in d["text"] for ev, d in events))
+        self.assertEqual(self.workspace.existing_text("summary.md"), "# Launch Plan\n")
