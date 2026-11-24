@@ -1,17 +1,18 @@
 # Pipkin for Windows (Local Chat & Workspace Agent)
 
-Pipkin on Windows uses **Microsoft Edge WebView2** (built into Windows 11 and most Windows 10 PCs) wrapped in a lightweight C# desktop shell, running the same local Python backend (`server.py`, `agent.py`, `artifacts.py`) and web UI (`dist/`) as the macOS app.
+Pipkin on Windows uses **Microsoft Edge WebView2** in a C# desktop shell and shares its local Python backend and app interface with macOS.
 
 ## What You Need on Windows
-1. **Windows 10 or Windows 11** (64-bit)
+1. **Windows 10 22H2 or Windows 11** (x64)
 2. **Ollama for Windows** — install from [ollama.com](https://ollama.com/download/windows) and pull at least one model (e.g. `ollama pull qwen3:8b`).
 3. **Python 3.9+** — install from [python.org](https://www.python.org/downloads/windows/) (check **"Add python.exe to PATH"** during setup).
-4. **.NET 8 Desktop Runtime** — required to launch `Pipkin.exe` (or included if you install the .NET 8 SDK).
+4. **[.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)** for x64.
+5. **[WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)** if it is missing.
 
 ## Running a Built Zip (No Coding Required)
-1. Download `Pipkin-windows-x64.zip` (from GitHub Actions or Releases) and extract the `Pipkin` folder.
+1. Download [Pipkin-windows-x64.zip](https://github.com/garywu000/pipkin/releases/download/v1.9.0/Pipkin-windows-x64.zip) and extract the full `Pipkin` folder.
 2. Double-click **`Pipkin.exe`**.
-3. Pipkin starts its local server silently on `http://127.0.0.1:8765`, opens the app window, and cleanly stops the server when you close it.
+3. Pipkin starts its local server, opens the app window, and stops the server it started when you close it. First-launch setup lets you choose an appearance, model, and default mode.
 
 ## Building on a Windows PC
 Install the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0), then run in PowerShell from the repo root:
@@ -23,11 +24,13 @@ powershell -ExecutionPolicy Bypass -File windows\build-windows.ps1
 This outputs `windows\dist\Pipkin-windows-x64.zip`.
 
 ## Building & Testing Without a Windows PC (GitHub Actions)
-Push to GitHub and run the **Build Windows Package** workflow (`.github/workflows/build-windows.yml`) from the **Actions** tab. GitHub's `windows-latest` runner executes the full Python unit test suite and agent benchmarks directly on real Windows, compiles `Pipkin.exe`, and uploads a ready-to-run `Pipkin-windows-x64.zip` artifact.
+Run **Build Windows Package** from the **Actions** tab. The Windows runner checks the source, runs the unit tests and scripted Agent benchmarks, then uploads `Pipkin-windows-x64.zip`. The [successful v1.9.0 build](https://github.com/garywu000/pipkin/actions/runs/45325460976) includes the Windows checkpoint, SQLite, and PowerShell fixes.
 
-## Included in v1.9.0 (Full Windows Parity)
+## Included in v1.9.0
 - **Local Chat & Workspace Agent:** Read, search, edit, diff, undo, and checkpoint files safely inside a chosen Windows folder (blocks symlinks, NTFS junctions, drive escapes, and reserved device names).
 - **Native Windows Folder Picker:** Opens Windows' native folder chooser right in front of the Pipkin window.
-- **Zero-Dependency PDF Support:** Read PDFs (with page citations) and generate `/pdf`, `/study-guide`, `/checklist`, `/word`, and `/slides` deliverables on Windows with bare Python (and automatically uses `pypdf`/`PyMuPDF` if installed).
-- **Shell & Terminal Parity:** Opt-in isolated PowerShell command runner with approval cards and sanitized environment, plus built-in PowerShell terminal panel.
+- **Documents and PDFs.** Extract text from supported PDFs with page citations and generate PDFs, HTML study guides and checklists, Word documents, and PowerPoint decks. Pipkin can use optional PDF libraries if they are installed.
+- **PowerShell.** The app has a built-in PowerShell terminal. Agent commands are opt-in and require approval. Workspace commands start in the workspace with a reduced environment and use your Windows account’s file and network permissions.
 - **Native Windows UI:** Replaces macOS wording and `⌘`/`⌥`/`⇧` symbols with Windows `Ctrl`/`Alt`/`Shift` shortcuts, Windows copy, Dark/Light titlebar sync, and taskbar attention flashing.
+
+Pipkin opens web links in your default Windows browser. The integrated tabbed Browser pane and Sprig are Mac features.

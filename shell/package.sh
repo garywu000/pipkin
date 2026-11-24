@@ -26,7 +26,8 @@ mkdir -p "$resources/shell" "$picker/Contents/MacOS"
 cp "$here/Info.plist" "$app/Contents/Info.plist"
 cp "$here/LocalModel.icns" "$resources/"
 cp -R "$repo/dist" "$resources/"
-cp "$repo/server.py" "$repo/agent.py" "$repo/artifacts.py" "$repo/choose-folder.m" "$repo/read-pdf.m" "$resources/"
+cp "$repo/server.py" "$repo/agent.py" "$repo/artifacts.py" "$repo/platform_os.py" \
+  "$repo/choose-folder.m" "$repo/read-pdf.m" "$resources/"
 cp "$here"/Pipkin*.m "$here"/Pipkin*.h "$here/Sprig.png" "$here/build.sh" "$resources/shell/"
 cp "$repo/Folder Picker.app/Contents/Info.plist" "$picker/Contents/Info.plist"
 

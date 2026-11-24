@@ -4,7 +4,7 @@ Run the same six tasks against Pipkin’s Work API and grade the files in each t
 
 ## Run the suite
 
-Run these commands from the repository root on an Apple silicon Mac. The PDF case uses Pipkin’s bundled PDFKit helper.
+Run these commands from the repository root. The scripted suite runs on macOS and Windows. The PDF case can use the native PDFKit helper on macOS or Pipkin’s Python PDF reader on Windows.
 
 ~~~sh
 python3 benchmarks/run.py --report build/benchmarks/replay.json
@@ -18,6 +18,8 @@ python3 benchmarks/run.py --model 'your-installed-model' --context 16384 \
 ~~~
 
 Omit `--case` for all six tasks. Add `--repeat 3` to take three measurements per task. Start with an idle Ollama server. Live mode checks available memory before loading, unloads the model between trials, and keeps it warm across the two phases of the resume case.
+
+To compare an Explorer run with a single-model run, repeat the same live command with `--explore-model 'your-smaller-installed-model'` and a different report path. The Explorer is used for eligible workspace steps. Keep the primary model, context, task, and hardware fixed.
 
 | Case | What passes |
 | --- | --- |

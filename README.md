@@ -2,30 +2,38 @@
   <img src="dist/favicon.png" alt="Pipkin app icon" width="88" height="88">
 </p>
 <h1 align="center">Pipkin</h1>
-<p align="center"><strong>A local AI chat and workspace agent for the Mac you already have.</strong><br>
+<p align="center"><strong>Local AI chat and a workspace agent for macOS and Windows.</strong><br>
 Turn your own files into finished work with a model that runs on your machine.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v1.2.0"><strong>Download v1.2</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v1.9.0"><strong>Download v1.9.0</strong></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#chat-and-projects">Features</a> ·
   <a href="#try-site">Try /site</a> ·
-  <a href="#roadmap">Roadmap</a> ·
+  <a href="#version-history">Version history</a> ·
   <a href="#build-from-source">Build from source</a>
 </p>
 
-Pipkin is a native macOS app for [Ollama](https://ollama.com). Use **Chat** for questions, writing, and research. Use **Agent** to plan a task, work inside a folder you choose, and review the files it saves. Model inference runs on your Mac.
+Pipkin is a desktop app for [Ollama](https://ollama.com) on macOS and Windows. Use **Chat** for questions, writing, and research. Use **Agent** to plan a task, work inside a folder you choose, and review the files it saves. Local models run on your computer.
 
-![Pipkin v1.2 in the Emerald light theme, showing the Chat and Agent switch and suggested prompts](docs/screenshots/welcome.png)
+![Pipkin on macOS in the Emerald light theme, showing the Chat and Agent switch and suggested prompts](docs/screenshots/welcome.png)
 
 ## Get started
 
-1. Download [Pipkin v1.2](https://github.com/garywu000/pipkin/releases/tag/v1.2.0), unzip it, and open **Pipkin.app**. The download is an ad-hoc-signed preview for Apple silicon. If macOS blocks it, follow the [build instructions](#build-from-source).
-2. The first time you open Pipkin, a skippable setup screen lets you preview a look, pick your default mode, select an installed model, and set your preferences. The model step includes a guide for installing [Ollama for macOS](https://ollama.com/download/mac) and downloading your first model.
-3. Choose **Chat** or **Agent**. For Agent, choose a project folder and use **Ask first** to review edits and commands as the run progresses.
+### macOS
 
-For a first model on a 16 GB Mac, try `ollama pull qwen3:8b`. Agent works best with a model that supports tool calls.
+1. Download [Pipkin for Apple silicon](https://github.com/garywu000/pipkin/releases/download/v1.9.0/Pipkin-macos-arm64.zip), unzip it, and open **Pipkin.app**. This preview is ad-hoc signed. If macOS blocks the download, use the [source build](#build-from-source).
+2. Install [Ollama for macOS](https://ollama.com/download/mac) and download a local model. First-run setup has an Ollama guide if no model is installed.
 
-Pipkin loads the model when you send a request. To free model memory during a session, click the model status and choose **Unload model**. Quitting Pipkin also unloads its model.
+### Windows
+
+1. On an x64 PC running Windows 11 or Windows 10 22H2, install [Ollama for Windows](https://ollama.com/download/windows), [Python 3.9 or later](https://www.python.org/downloads/windows/) with **Add Python to PATH**, and the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0). Install the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if it is missing.
+2. Download [Pipkin for Windows x64](https://github.com/garywu000/pipkin/releases/download/v1.9.0/Pipkin-windows-x64.zip), extract the full **Pipkin** folder, and double-click **Pipkin.exe**. Pipkin manages its own local server, so opening a terminal is only needed for tasks such as downloading a model.
+
+See the [Windows guide](windows/README.md) for details. The [Windows build and test run](https://github.com/garywu000/pipkin/actions/runs/45325460976) produced the ZIP attached to v1.9.0.
+
+### Choose a model and start
+
+For a first model, try `ollama pull qwen3:8b` if it fits your computer. Agent needs a model that supports tool calls. Choose **Chat** or **Agent** in Pipkin. For Agent, select a folder and use **Ask first** to review proposed changes. Pipkin loads the model on demand. Click the model status and choose **Unload model** to free model memory during a session.
 
 ### Customize your first launch
 
@@ -33,13 +41,13 @@ Choose **Light**, **Dark**, or **System** appearance, then preview **Emerald**, 
 
 ![Pipkin’s first-launch Choose your look screen with three appearance options and five color palettes](docs/screenshots/customize.png)
 
-The v1.2 redesign includes the animated setup intro, centered conversation and composer, smoother Chat and Agent transitions, updated controls, a cleaner Agent timeline, and a redesigned native browser tab strip and address bar. The main interface respects **Reduce Motion**.
+The setup walkthrough also lets you pick an installed model, choose your default Chat or Agent mode, and set personal preferences. On Windows, the app uses Windows shortcut labels and a matching Light or Dark title bar. Rebind shortcuts under **Settings → General → Keyboard shortcuts**.
 
 ## Chat and projects
 
 ![Pipkin Chat in the Ocean dark theme with a collapsible thinking summary, Markdown, and a rendered LaTeX equation](docs/screenshots/chat.png)
 
-- **Saved history.** Reopen chats after quitting. Search, pin, rename, or delete them from the sidebar. Edit an earlier prompt to branch the conversation. Drag the sidebar edge to resize it, and hover over a clipped title to see it scroll.
+- **Saved history.** Reopen chats after quitting. Search, pin, rename, or delete them from the sidebar. Edit an earlier prompt to branch the conversation. Drag the sidebar edge to resize it, and hover over a clipped title to see it scroll. Browse other chats during a live reply or Agent run and use **Return to live run** to jump back.
 - **Projects and context.** Group chats by dragging them into projects. Add shared project notes and give individual chats their own goals and instructions. Context compaction summarizes older turns when the window fills.
 - **Attachments and long pastes.** Attach files or photos from one picker, or drag them into the composer. Pastes over 10,000 characters become previewable text attachments. Pipkin keeps the full paste with the chat and labels any excerpt sent to the model. Photos require a model with vision support.
 - **Readable replies and citations.** Markdown renders during streaming, and LaTeX renders equations. Expand the collapsed thinking panel to see its duration and contents. When using web research or attached sources, open citations to see the linked page or source excerpt.
@@ -52,9 +60,11 @@ The v1.2 redesign includes the animated setup intro, centered conversation and c
 - **Plan, approve, and steer.** Follow the pinned checklist and progress updates while routine actions stay grouped in expandable batches. With **Ask first**, review each proposed edit or command. Send a steering note between steps, stop after the current step, or resume from a checkpoint.
 - **Build and open outputs.** Ask in plain language for a website, Word document, PowerPoint deck, or PDF. The Work result card links to saved files and displays completed checks and sources. HTML saves check local links, assets, and anchors during regular Agent work too.
 - **Undo per file or per run.** Undo restores edits or removes files created by the run. Pipkin checks for later changes first. If **Undo All** stops partway through, the result card shows the completed, failed, and skipped actions.
-- **Keep long runs moving.** Pipkin reuses recent tool results when possible, avoids repeating successful commands in an unchanged workspace, and detects repetitive generation. Model steps pause after three minutes without output or five minutes of active work. A run can work for up to ten minutes, excluding approval waits, and Pipkin prevents idle sleep while it runs.
+- **Working notes.** The Agent can save short findings and automatically track files and line ranges it has read. These notes survive context trimming and saved checkpoints. Open **Working notes** beneath the plan to see what the run kept.
+- **Optional two-model runs.** In **Settings → Model → Explorer model**, pick a smaller installed local model to map and read files on eligible workspace runs. Your primary model takes over for writing. This is off by default and can be compared with a single-model run using the [benchmark harness](benchmarks/README.md).
+- **Keep long runs moving.** Pipkin reuses tool results when possible, avoids repeating successful commands in an unchanged workspace, and detects repetitive generation. Model steps pause after three minutes without output or five minutes of active work. A run can work for up to ten minutes, excluding approval waits. Pipkin requests that the system stay awake while Agent works.
 
-Open the **Harness panel** with **⌘⇧P**. **Review** and **Open File** surface outputs from your workspace. **Terminal** docks a shell in the launcher. **Browser** opens a separate native pane, and **Chat Context** lets you edit the current chat’s goal and notes. The search box filters tools or accepts a URL or search query.
+Open the **Harness panel** with **⌘⇧P** on macOS or **Ctrl+Shift+P** on Windows. **Review** and **Open File** surface your workspace outputs. **Terminal** docks a shell and **Chat Context** opens the current chat’s goal and notes. The Mac app includes a native, tabbed **Browser** pane. Windows opens web links in your default browser.
 
 ![The light-theme Harness launcher next to a completed Agent run, with controls for reviewed files, terminal, browser, chat context, and settings](docs/screenshots/harness.png)
 
@@ -62,13 +72,15 @@ The Mac app can notify you when a run needs approval. **Sprig**, the optional de
 
 ## Model memory and token usage
 
-Click the model status in the top bar to see which models are loaded, their reported memory use, and current macOS memory pressure. Open model settings or unload the model from the same popover.
+Click the model status in the top bar to see memory pressure, loaded Ollama models, and their reported memory use. On macOS the graph also shows app, wired, compressed, and cached memory alongside swap use. Windows reports RAM and pagefile use. The popover provides **Unload model** and a shortcut to model settings.
 
-![Pipkin’s model status popover in dark mode showing loaded model memory, normal Mac memory pressure, and an Unload model button](docs/screenshots/model-memory.png)
+**Memory protection** is on by default. Pipkin can block a new model load when memory is already critical, pause Agent and save a checkpoint if pressure remains critical, and unload an idle model. The warning banner offers a memory graph and a suggested smaller context window when available.
+
+![Pipkin’s model status popover showing a RAM usage graph, system memory breakdown, and loaded Ollama model](docs/screenshots/model-memory.png)
 
 **Settings → Usage** shows the lifetime total of input and generated tokens reported by Ollama since tracking began. Deleting a chat leaves those totals intact.
 
-The screenshots show the v1.2 interface with sample chats, files, and model details.
+The screenshots show the macOS interface with sample chats, files, and model details.
 
 ## Try /site
 
@@ -86,60 +98,55 @@ Pipkin plans the work, shows the proposed `index.html` as a diff for your approv
 > [!NOTE]
 > Pipkin detects straightforward site requests and renders a first page from a checked content plan. Work’s editor handles interactive sites, larger projects, and updates to existing pages. You can also select `/site` from the slash menu.
 
-## Create a document or presentation
+## Create a document, study guide, or presentation
 
-Select an Agent workspace, then ask for the output directly.
+Select an Agent workspace and attach or place your source material in the folder. Then ask for the output directly.
 
 - “Create a Word report named `meeting-notes.docx` from the attached notes.”
 - “Make a five-slide PowerPoint from `brief.md`.”
 - “Create a printable PDF handout from `brief.md`.”
+- “Turn the attached syllabus into a study guide with review questions.”
+- “Use this PDF packet to make an interactive checklist of requirements and deadlines.”
 
 Pipkin previews the content for approval in **Ask first**, saves the file, and shows a clickable output. `/word`, `/powerpoint`, and `/pdf` are optional shortcuts. Office exports use editable text and templates. The PowerPoint template supports one to nine slides. Check the names, numbers, and wording in the preview before approving.
 
+Use `/study-guide` or `/checklist` for navigable HTML with a contents list and a source index. Each section cites its evidence. For PDF sources, links open the relevant page, and checklist items are interactive. Windows can extract text from supported PDFs and render new PDFs with built-in Python support. Scanned pages need a text or OCR layer for document extraction.
+
 ## Privacy and permissions
 
-- Model inference runs locally through Ollama. Chat history, settings, and token totals are stored on your Mac.
-- Web search, page fetches, and the built-in browser contact the sites involved. Use the web control to turn automatic search off.
-- Agent file operations stay inside the workspace folder you select. Approved shell commands run with your macOS account’s permissions. Use **Ask first** to review those commands.
+- Local model inference, chat history, settings, and token totals stay on your computer. Web search, page fetches, and the browser contact the sites involved.
+- Agent file tools are scoped to your selected workspace. On Windows, these tools reject paths through symbolic links and junctions, drive escapes, and reserved device names.
+- **Shell commands are off by default.** Enable them in **Settings → Agent → Allow shell commands**. Agent commands require approval and show a scope preview. The macOS workspace command runner restricts writes to the workspace and a temporary directory and blocks network access. On Windows, approved PowerShell workspace commands start in the workspace with a reduced environment and use your Windows account’s file and network permissions.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
+## Version history
+
+| Version | What changed |
+| --- | --- |
+| [v1.9.0](https://github.com/garywu000/pipkin/releases/tag/v1.9.0) | Windows gained workspace Agent support, native folder selection, file verification and undo, PDF reading and writing, PowerShell, Windows shortcut labels, and taskbar attention indicators. The published Windows ZIP includes follow-up fixes for checkpoint saving, SQLite locking, and PowerShell output handling. |
+| [v1.8.0](https://github.com/garywu000/pipkin/releases/tag/v1.8.0) | First Windows Chat preview using WebView2. A shared platform layer handles app data, model discovery, memory, and native file opening. Added Windows packaging and CI. |
+| [v1.7.1](https://github.com/garywu000/pipkin/releases/tag/v1.7.1) | Custom keyboard shortcuts with conflict detection and reset, Settings layout fixes, local-only Explorer selection, and protection against deleting a chat while its run is active. |
+| [v1.7.0](https://github.com/garywu000/pipkin/releases/tag/v1.7.0) | Browse other chats during a live run, return to an active run from the banner, and optionally use an Explorer model. Benchmarks gained `--explore-model`. |
+| [v1.6.1](https://github.com/garywu000/pipkin/releases/tag/v1.6.1) | Added the live Mac RAM graph, an Activity Monitor-style memory breakdown, and a **Memory graph** shortcut in the warning banner. |
+| [v1.6.0](https://github.com/garywu000/pipkin/releases/tag/v1.6.0) | Added document-first study guides and interactive checklists with per-section citations, PDF page links, and local link verification. |
+| [v1.5.0](https://github.com/garywu000/pipkin/releases/tag/v1.5.0) | Separated shell access into its own opt-in. Added macOS workspace command isolation, a reduced shell environment, and approval cards that preview the command’s scope. |
+| [v1.4.0](https://github.com/garywu000/pipkin/releases/tag/v1.4.0) | Added working notes and a file-read ledger that survive context trimming and resuming. |
+| [v1.3.0](https://github.com/garywu000/pipkin/releases/tag/v1.3.0) | Added a guard against starting new model loads under critical memory pressure, the memory warning banner, and stricter native browser link handling. Included the v1.2.1 development changes for pausing runs, unloading idle models, and recommending context sizes. |
+| [v1.2.0](https://github.com/garywu000/pipkin/releases/tag/v1.2.0) | Redesigned the Mac interface with five palettes and first-launch customization. Added the Harness launcher, live model memory display, and Undo All. |
+
 ## Roadmap
 
-Pipkin's bet: the most useful local agent is the one that **finishes**. Each release is judged on how often a mid-size model completes a real task on an everyday Mac, how long that takes, and whether the Mac stays responsive.
-
-### v1.1: reliable deliverables (released)
-
-- **Staged file creation** for sites, Word, PowerPoint, and PDF, with rendering and file checks handled by Pipkin.
-- **A Work benchmark.** [Six fixture tasks](benchmarks/README.md) graded on the files they leave on disk, with time to first verified output, total time, and memory use.
-- **Result cards you can trust and undo**, plus plan-first runs and recovery from stuck actions.
-
-### After v1.2
-
-- **Signed and notarized builds**, a clean-Mac install guide, and a chosen license.
-- **Live benchmark comparisons** with matched model, context, and Mac settings, published with the results.
-
-### v2: Windows, long documents, and long runs
-
-- **Windows app.** Start with local Chat, then add folder-based Agent work with approvals and undo.
-- **Document-first workflows.** Drop in a PDF packet, syllabus, or brief and get a navigable site, a study guide, or a checklist, with every claim linked to its page.
-- **Working memory that survives trimming.** The agent keeps short notes of what it has learned, so it stops re-reading files it already read.
-- **Memory-pressure awareness.** Pipkin shows when the Mac is under pressure and pauses or unloads the model before the system starts swapping.
-- **Two-model runs.** A small model explores and a larger one writes, but only if the benchmark shows it finishes more tasks.
-- **Safer shell access.** Commands become a separate opt-in, run in an isolated environment, and come with a clear list of what they may touch.
-
-### v3: connected and extensible
-
-- **Read-first connectors** for GitHub, Google Drive, and Calendar: summarize, plan, and draft locally. Writing back always needs approval.
-- **Shareable skills.** A small file format for workflows like `/site`, with their own checks, so people can publish and install them.
-- **Scheduled and background tasks**, such as "every Friday, turn this week's notes into a review sheet", with a summary waiting for you.
-- **Pick up where you left off** on another Mac, without a cloud account.
+- **Distribution.** Signed and notarized Mac builds, Windows installer improvements, and a project license.
+- **Benchmark comparisons.** Publish repeated trials with the same hardware, model, context, and task when comparing single-model and Explorer runs.
+- **Connected accounts.** Read-first access to GitHub and Google Workspace, with reviewed writes.
+- **Extensibility.** Shareable skills, scheduled work, and moving conversations between devices.
 
 Have an idea or a task Pipkin should finish? [Open an issue](https://github.com/garywu000/pipkin/issues).
 
 ## Build from source
 
-The app targets macOS 12 or later. The v1.2 download was built and tested on Apple silicon. You need the Xcode Command Line Tools and Ollama.
+On macOS, install the Xcode Command Line Tools and Ollama. On Windows, follow the [Windows build guide](windows/README.md).
 
 ~~~sh
 git clone https://github.com/garywu000/pipkin.git
@@ -161,6 +168,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 | [`shell/`](shell/) | Native window, browser pane, Sprig, and macOS packaging |
 | [`dist/`](dist/) | Chat UI, skill menu, terminal panel, and Agent timeline |
 | [`server.py`](server.py) | Loopback server, Ollama session, terminal, and approvals |
+| [`platform_os.py`](platform_os.py) | Platform-specific data paths, file opening, memory, and PDF support |
+| [`windows/`](windows/) | Windows WebView2 host and ZIP packaging |
 | [`agent.py`](agent.py) | Agent loop, workspace tools, context management, recovery, undo, and site checks |
 | [`artifacts.py`](artifacts.py) | Content plans and rendering for sites, Word, PowerPoint, and PDF |
 | [`benchmarks/`](benchmarks/) | Work benchmark tasks, graders, and recorded baselines |
