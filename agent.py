@@ -1288,15 +1288,18 @@ def describe_command_scope(command, workspace, *, platform_name=None):
 
 
 def _run_command_windows(workspace, command, check, env):
-    shell_exe = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-    if shell_exe:
-        argv = [shell_exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]
+    pwsh = shutil.which("pwsh.exe")
+    ps = shutil.which("powershell.exe")
+    if pwsh:
+        argv = [pwsh, "-NoProfile", "-NonInteractive", "-InputFormat", "None", "-Command", command]
+    elif ps:
+        argv = [ps, "-NoProfile", "-NonInteractive", "-InputFormat", "None", "-ExecutionPolicy", "Bypass", "-Command", command]
     else:
         argv = [os.environ.get("COMSPEC", "cmd.exe"), "/c", command]
     creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(
         argv, cwd=str(workspace.path), stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, creationflags=creation,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, creationflags=creation, bufsize=0,
     )
     started = time.monotonic()
     deadline = started + COMMAND_TIMEOUT
@@ -1307,7 +1310,7 @@ def _run_command_windows(workspace, command, check, env):
     def reader():
         try:
             while True:
-                chunk = process.stdout.read(65536)
+                chunk = process.stdout.read(4096)
                 if not chunk:
                     break
                 with lock:

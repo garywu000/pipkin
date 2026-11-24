@@ -420,12 +420,15 @@ def ollama_request(method, path, body=None, timeout=3, *, cancelable=False):
         raise
 
 
+USAGE_LOCK = Lock()
+
+
 def token_usage(input_tokens=0, output_tokens=0):
     """Share one durable counter between Pipkin's main and development servers."""
     if not (input_tokens or output_tokens) and not USAGE_FILE.exists():
         return {"input": 0, "output": 0}
     USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(USAGE_FILE, timeout=1)) as database, database:
+    with USAGE_LOCK, closing(sqlite3.connect(USAGE_FILE, timeout=10)) as database, database:
         database.execute("""
             CREATE TABLE IF NOT EXISTS usage (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -948,12 +951,12 @@ class Terminal:
         env = {**os.environ, "TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "Pipkin"}
         env.pop("PIPKIN_DEV", None)
         if self._windows:
-            shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or os.environ.get("COMSPEC", "cmd.exe")
+            shell = shutil.which("pwsh.exe") or shutil.which("powershell.exe") or os.environ.get("COMSPEC", "cmd.exe")
             argv = [shell, "-NoLogo", "-NoExit"] if "powershell" in shell.lower() or "pwsh" in shell.lower() else [shell]
             creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             self.process = subprocess.Popen(
                 argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                cwd=cwd, env=env, creationflags=creation,
+                cwd=cwd, env=env, creationflags=creation, bufsize=0,
             )
         else:
             import pty
