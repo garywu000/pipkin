@@ -241,7 +241,7 @@
               <div class="palette-swatches" id="palette-choice" role="group" aria-label="Color palette"></div>
             </div>
             <div class="setting">
-              <div><strong>Send with Enter</strong><p>Off: use ⌘ Enter to send, Enter for a new line.</p></div>
+              <div><strong>Send with Enter</strong><p id="hint-send-enter">Off: use ⌘ Enter to send, Enter for a new line.</p></div>
               <label class="switch"><input id="setting-enter" type="checkbox"><span></span><span class="sr-only">Send with Enter</span></label>
             </div>
             <div class="setting">
@@ -276,7 +276,7 @@
                 <select id="setting-explore-model"><option value="">Off (single model)</option></select>
                 <svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg>
               </div>
-              <p class="hint">Optional: use a smaller, faster model to map and read workspace files before your primary model writes. Off by default unless benchmarked faster on your Mac.</p>
+              <p id="hint-explore-model" class="hint">Optional: use a smaller, faster model to map and read workspace files before your primary model writes. Off by default unless benchmarked faster on your Mac.</p>
             </div>
             <div class="setting stack">
               <label for="setting-context"><strong>Context window</strong></label>
@@ -293,13 +293,13 @@
               <div class="range-labels"><span>Precise</span><span>Balanced</span><span>Creative</span></div>
             </div>
             <div class="setting">
-              <div><strong>Memory protection</strong><p>Auto-pause Work and unload idle models before macOS starts swapping.</p></div>
+              <div><strong>Memory protection</strong><p id="hint-memory-protect">Auto-pause Work and unload idle models before macOS starts swapping.</p></div>
               <label class="switch"><input id="setting-protect-memory" type="checkbox"><span></span><span class="sr-only">Memory protection</span></label>
             </div>
           </section>
           <section id="panel-usage" class="usage-panel" role="tabpanel" aria-labelledby="tab-usage" hidden>
             <h3>Token usage</h3>
-            <p class="hint">Across all models used in Pipkin on this Mac.</p>
+            <p id="hint-usage-device" class="hint">Across all models used in Pipkin on this Mac.</p>
             <div id="usage-values" class="usage-card" hidden>
               <dl class="usage-total">
                 <dt>Lifetime tokens</dt>
@@ -344,7 +344,7 @@
               </div>
             </div>
             <div class="setting">
-              <div><strong>Allow shell commands</strong><p>Opt-in. Commands run isolated to the selected folder with no network, sanitized env, and approval required.</p></div>
+              <div><strong>Allow shell commands</strong><p id="hint-allow-shell">Opt-in. Commands run isolated to the selected folder with no network, sanitized env, and approval required.</p></div>
               <label class="switch"><input id="setting-allow-shell" type="checkbox"><span></span><span class="sr-only">Allow shell commands</span></label>
             </div>
             <div class="setting">
@@ -384,7 +384,7 @@
               <input id="import-file" type="file" accept="application/json,.json" hidden>
             </div>
             <div class="setting">
-              <div><strong>Storage</strong><p>Chats, projects and memories are stored by the app showing this page (the Pipkin app or your browser). Nothing leaves your Mac unless the agent uses the web.</p></div>
+              <div><strong>Storage</strong><p id="hint-storage-device">Chats, projects and memories are stored by the app showing this page (the Pipkin app or your browser). Nothing leaves your Mac unless the agent uses the web.</p></div>
             </div>
           </section>
         </div>

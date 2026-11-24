@@ -155,9 +155,11 @@
     const element = document.createElement("div");
     element.className = "terminal-view";
     host.append(element);
+    const isMac = window.PipkinPlatform ? window.PipkinPlatform.isMac : true;
     const instance = new window.Terminal({
-      fontFamily: '"SF Mono", ui-monospace, Menlo, monospace', fontSize: 12.5, lineHeight: 1.15,
-      cursorBlink: true, scrollback: 5000, allowProposedApi: false, macOptionIsMeta: true,
+      fontFamily: isMac ? '"SF Mono", ui-monospace, Menlo, monospace' : '"Cascadia Mono", Consolas, ui-monospace, monospace',
+      fontSize: 12.5, lineHeight: 1.15,
+      cursorBlink: true, scrollback: 5000, allowProposedApi: false, macOptionIsMeta: isMac,
       theme: theme(), allowTransparency: false,
     });
     instance.open(element);
@@ -186,9 +188,14 @@
       remember();
     });
     instance.attachCustomKeyEventHandler((event) => {
-      // Let the app's own shortcuts (⌘K, ⌘N, ⌘W …) through; the shell gets everything else.
-      if (event.metaKey && event.key !== "c" && event.key !== "v") return false;
-      if (event.metaKey && event.key === "c" && !instance.hasSelection()) return false;
+      // Let the app's own shortcuts through; the shell gets everything else.
+      if (isMac) {
+        if (event.metaKey && event.key !== "c" && event.key !== "v") return false;
+        if (event.metaKey && event.key === "c" && !instance.hasSelection()) return false;
+        return true;
+      }
+      if (event.ctrlKey && event.shiftKey && ["o", "s", "a", "p", "b"].includes(event.key.toLowerCase())) return false;
+      if (event.ctrlKey && !event.shiftKey && !event.altKey && [",", "k", "`"].includes(event.key.toLowerCase())) return false;
       return true;
     });
     terminals.push(term);

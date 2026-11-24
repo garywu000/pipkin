@@ -28,11 +28,28 @@ internal sealed class MainWindow : Form
     private readonly Label _statusLabel;
     private Process? _serverProcess;
     private bool _closing;
+    private bool _isBusy;
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FLASHWINFO
+    {
+        public uint cbSize;
+        public IntPtr hwnd;
+        public uint dwFlags;
+        public uint uCount;
+        public uint dwTimeout;
+    }
+
     private const int DwmwaUseImmersiveDarkMode = 20;
+    private const uint FlashwAll = 3;
+    private const uint FlashwTimerNoFg = 12;
 
     public MainWindow()
     {
@@ -68,7 +85,27 @@ internal sealed class MainWindow : Form
 
         HandleCreated += (_, _) => ApplyTitleBarTheme(IsWindowsDarkMode());
         Load += async (_, _) => await InitializeAsync();
-        FormClosing += (_, _) => ShutdownServer();
+        FormClosing += OnFormClosing;
+    }
+
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (_isBusy && e.CloseReason == CloseReason.UserClosing)
+        {
+            var choice = MessageBox.Show(
+                this,
+                "Pipkin is still working on a reply or Agent run.\n\nClose anyway and stop the current run?",
+                "Pipkin",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2);
+            if (choice != DialogResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+        }
+        ShutdownServer();
     }
 
     private async Task InitializeAsync()
@@ -157,18 +194,42 @@ internal sealed class MainWindow : Form
         {
             using var doc = JsonDocument.Parse(e.WebMessageAsJson);
             var root = doc.RootElement;
-            if (root.TryGetProperty("type", out var typeEl) && typeEl.GetString() == "theme")
+            string? type = root.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : null;
+            if (type == "theme")
             {
                 string? scheme = root.TryGetProperty("scheme", out var schemeEl) ? schemeEl.GetString() : null;
                 if (scheme == "dark") ApplyTitleBarTheme(true);
                 else if (scheme == "light") ApplyTitleBarTheme(false);
                 else if (scheme == "system" || scheme == "auto") ApplyTitleBarTheme(IsWindowsDarkMode());
             }
+            else if (type == "busy")
+            {
+                _isBusy = root.TryGetProperty("value", out var valEl) && valEl.ValueKind == JsonValueKind.True;
+                Text = _isBusy ? "Pipkin — Working…" : "Pipkin";
+            }
+            else if (type == "attention" || type == "finished")
+            {
+                FlashTaskbarIfInactive(type == "attention" ? 5u : 2u);
+            }
         }
         catch
         {
             // Ignore unrecognized messages from the page.
         }
+    }
+
+    private void FlashTaskbarIfInactive(uint count)
+    {
+        if (!IsHandleCreated || Form.ActiveForm == this) return;
+        var info = new FLASHWINFO
+        {
+            cbSize = (uint)Marshal.SizeOf<FLASHWINFO>(),
+            hwnd = Handle,
+            dwFlags = FlashwAll | FlashwTimerNoFg,
+            uCount = count,
+            dwTimeout = 0,
+        };
+        _ = FlashWindowEx(ref info);
     }
 
     private static bool IsLocalAppUri(Uri uri)

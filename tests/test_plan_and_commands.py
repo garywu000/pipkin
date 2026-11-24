@@ -283,9 +283,10 @@ class RepeatedFailureTest(PlanFirstTest):
             else:
                 os.environ["GITHUB_TOKEN"] = old
 
+        import sys
         scope = agent.describe_command_scope("rm -f notes.md && echo ok", self.workspace)
         self.assertIn("May modify files", scope)
-        self.assertIn("Isolated to", scope)
+        self.assertIn("Isolated to" if sys.platform == "darwin" else "Working dir:", scope)
         self.assertIn("notes.md", scope)
         ro_scope = agent.describe_command_scope("ls -la index.html", self.workspace)
         self.assertIn("Read-only inspection", ro_scope)

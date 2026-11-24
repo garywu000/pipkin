@@ -251,9 +251,9 @@ button:disabled { cursor: default; }
   stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
 }
 kbd {
-  font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+  font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted);
   padding: 3px 5px; border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 5px;
-  background: var(--surface); box-shadow: inset 0 1px 0 var(--specular);
+  background: var(--surface); box-shadow: inset 0 1px 0 var(--specular); white-space: nowrap; flex: none;
 }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 

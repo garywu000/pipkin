@@ -77,14 +77,22 @@
     return card;
   }
 
+  function plat() {
+    return window.PipkinPlatform || {
+      isMac: true, osName: "macOS", osBadge: "MACOS", yourDevice: "your Mac",
+      ollamaUrl: "https://ollama.com/download/mac", ollamaLabel: "Ollama for macOS",
+    };
+  }
+
   function buildWelcomeStep() {
+    const P = plat();
     const emblem = el("div", { className: "ob-emblem", "aria-hidden": "true" },
       el("div", { className: "ob-ring ob-ring-1" }),
       el("div", { className: "ob-ring ob-ring-2" }),
       el("div", { className: "ob-emblem-core" },
         el("img", { src: "/favicon.png", alt: "", width: 62, height: 62 })));
     const features = el("div", { className: "ob-pills" },
-      el("span", { className: "ob-pill" }, icon("shield"), "Private on your Mac"),
+      el("span", { className: "ob-pill" }, icon("shield"), `Private on ${P.yourDevice}`),
       el("span", { className: "ob-pill" }, icon("bot"), "Chat & Workspace Agent"),
       el("span", { className: "ob-pill" }, icon("check"), "Approve every edit"));
     const start = el("button", { type: "button", className: "button accent ob-cta" },
@@ -94,7 +102,7 @@
     skip.addEventListener("click", () => finish(false));
     return el("div", { className: "ob-step ob-step-hero" },
       emblem,
-      el("span", { className: "ob-eyebrow", text: "LOCAL · PRIVATE · MACOS" }),
+      el("span", { className: "ob-eyebrow", text: `LOCAL · PRIVATE · ${P.osBadge}` }),
       el("h1", { className: "ob-title", text: "Welcome to Pipkin" }),
       el("p", { className: "ob-lead", text: "Your private local-model harness: plan, build, verify with full control." }),
       features,
@@ -124,8 +132,9 @@
   }
 
   function buildThemeStep() {
+    const P = plat();
     const modeGrid = el("div", { className: "ob-theme-grid" },
-      themePreviewCard("system", "System", "Matches macOS"),
+      themePreviewCard("system", "System", `Matches ${P.osName}`),
       themePreviewCard("light", "Light", "Luminous porcelain"),
       themePreviewCard("dark", "Dark", "Obsidian glass"));
     const palettes = host.getPalettes?.() || [];
@@ -158,8 +167,8 @@
       guideSummary,
       el("div", { className: "ob-guide-body" },
         el("ol", { className: "ob-guide-steps" },
-          el("li", {}, "Install & open ", el("a", { href: "https://ollama.com/download/mac", target: "_blank", rel: "noopener noreferrer", text: "Ollama for macOS" }), "."),
-          el("li", {}, "Pull a model in Terminal (great starter on 16 GB Macs):")),
+          el("li", {}, "Install & open ", el("a", { href: plat().ollamaUrl, target: "_blank", rel: "noopener noreferrer", text: plat().ollamaLabel }), "."),
+          el("li", {}, plat().isMac ? "Pull a model in Terminal (great starter on 16 GB Macs):" : "Pull a model in PowerShell (great starter on 16 GB PCs):")),
         el("div", { className: "ob-cmd" }, el("code", { text: "ollama pull qwen3:8b" }), copyCmd),
         el("p", { className: "ob-guide-note", text: "Installed models appear in the menu above automatically once Ollama is running." })));
     const populateModels = () => {
@@ -293,7 +302,7 @@
       emblem,
       el("span", { className: "ob-eyebrow", text: "ALL SET" }),
       el("h1", { className: "ob-title", text: "You're ready to go" }),
-      el("p", { className: "ob-lead", text: "Everything runs privately on your Mac. You can change any of these later in Settings." }),
+      el("p", { className: "ob-lead", text: `Everything runs privately on ${plat().yourDevice}. You can change any of these later in Settings.` }),
       el("div", { className: "ob-pills" }, ...chips.map((text) => el("span", { className: "ob-pill", text }))),
       el("div", { className: "ob-hero-actions" }, launch, back));
   }

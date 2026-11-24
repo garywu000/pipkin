@@ -687,20 +687,21 @@ class MemoryGuard:
         self.last_check = now
         level = self.sampler()
         self.level = level
+        mem_label = "Mac memory" if sys.platform == "darwin" else "System memory"
         if level == "critical":
             self.critical_streak += 1
             if self.critical_streak >= self.critical_hits:
                 self.paused = True
-                return None, ("Mac memory pressure became critical, so Work paused safely before swapping. "
+                return None, (f"{mem_label} pressure became critical, so Work paused safely before swapping. "
                               "Close heavy apps or lower the context window, then Resume Work.")
             if not self.warned:
                 self.warned = True
-                return "Mac memory pressure is critical — Work will pause if pressure stays high.", None
+                return f"{mem_label} pressure is critical — Work will pause if pressure stays high.", None
             return None, None
         self.critical_streak = 0
         if level == "warning" and not self.warned:
             self.warned = True
-            return "Mac memory pressure is elevated. Consider closing heavy apps or lowering the context window.", None
+            return f"{mem_label} pressure is elevated. Consider closing heavy apps or lowering the context window.", None
         return None, None
 
 
@@ -794,6 +795,7 @@ def system_telemetry():
             del _MEMORY_HISTORY[:-30]
         history = list(_MEMORY_HISTORY)
     return {
+        "platform": sys.platform,
         "pressure": pressure,
         "total_ram": total_ram,
         "memory": memory,
@@ -887,16 +889,19 @@ def read_document(kind, data, *, academic=False):
         except (BadZipFile, KeyError, ET.ParseError, RuntimeError) as error:
             raise ValueError("Could not read this Word document.") from error
     if kind == "pdf":
-        with tempfile.TemporaryDirectory() as directory:
-            document = Path(directory) / "attachment.pdf"
-            document.write_bytes(data)
-            result = subprocess.run(
-                [str(ASSETS.parent / "read-pdf"), "--pages", str(document)],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=12,
-            )
-        if result.returncode:
-            raise ValueError("Could not read this PDF. It may be password-protected or damaged.")
-        return result.stdout.decode("utf-8", "replace")
+        helper = ASSETS.parent / "read-pdf"
+        if sys.platform == "darwin" and helper.is_file():
+            with tempfile.TemporaryDirectory() as directory:
+                document = Path(directory) / "attachment.pdf"
+                document.write_bytes(data)
+                result = subprocess.run(
+                    [str(helper), "--pages", str(document)],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=12,
+                )
+            if result.returncode:
+                raise ValueError("Could not read this PDF. It may be password-protected or damaged.")
+            return result.stdout.decode("utf-8", "replace")
+        return platform_os.extract_pdf_pages(data)
     raise ValueError("Attach a PDF, Word document, text file, or photo.")
 
 
@@ -938,19 +943,30 @@ class Terminal:
     BUFFER = 512 * 1024
 
     def __init__(self, cwd, cols, rows):
-        import pty
-        shell = os.environ.get("SHELL") or "/bin/zsh"
-        if not Path(shell).is_file():
-            shell = "/bin/zsh"
-        self.master, slave = pty.openpty()
-        self.resize(cols, rows, fd=slave)
+        self._windows = sys.platform == "win32"
+        self.master = None
         env = {**os.environ, "TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "Pipkin"}
         env.pop("PIPKIN_DEV", None)
-        self.process = subprocess.Popen(
-            [shell, "-l"], stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
-            start_new_session=True, close_fds=True,
-        )
-        os.close(slave)
+        if self._windows:
+            shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or os.environ.get("COMSPEC", "cmd.exe")
+            argv = [shell, "-NoLogo", "-NoExit"] if "powershell" in shell.lower() or "pwsh" in shell.lower() else [shell]
+            creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            self.process = subprocess.Popen(
+                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cwd=cwd, env=env, creationflags=creation,
+            )
+        else:
+            import pty
+            shell = os.environ.get("SHELL") or "/bin/zsh"
+            if not Path(shell).is_file():
+                shell = "/bin/zsh"
+            self.master, slave = pty.openpty()
+            self.resize(cols, rows, fd=slave)
+            self.process = subprocess.Popen(
+                [shell, "-l"], stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
+                start_new_session=True, close_fds=True,
+            )
+            os.close(slave)
         self.output = bytearray()
         self.start = 0  # absolute offset of output[0]
         self.exit_code = None
@@ -962,29 +978,41 @@ class Terminal:
     def end(self):
         return self.start + len(self.output)
 
+    def _append_output(self, data):
+        with self.changed:
+            self.output += data
+            if len(self.output) > self.BUFFER:
+                drop = len(self.output) - self.BUFFER
+                del self.output[:drop]
+                self.start += drop
+            self.changed.notify_all()
+
     def _pump(self):
         while True:
             try:
-                data = os.read(self.master, 65536)
+                if self._windows:
+                    data = self.process.stdout.read(4096) if self.process.stdout else b""
+                else:
+                    data = os.read(self.master, 65536)
             except OSError:
                 data = b""
             if not data:
                 break
-            with self.changed:
-                self.output += data
-                if len(self.output) > self.BUFFER:
-                    drop = len(self.output) - self.BUFFER
-                    del self.output[:drop]
-                    self.start += drop
-                self.changed.notify_all()
+            self._append_output(data)
         code = self.process.wait()
         with self.changed:
             self.exit_code = code
             self.changed.notify_all()
-        try:
-            os.close(self.master)
-        except OSError:
-            pass
+        if self.master is not None:
+            try:
+                os.close(self.master)
+            except OSError:
+                pass
+        elif self.process.stdout is not None:
+            try:
+                self.process.stdout.close()
+            except OSError:
+                pass
 
     def read(self, offset, timeout):
         """Returns (data, next_offset, exit_code) once there is output past offset, the shell
@@ -1003,12 +1031,25 @@ class Terminal:
         return terminal_text(raw, lines)
 
     def write(self, data):
+        if self._windows:
+            if not self.process.stdin or self.process.poll() is not None:
+                return
+            normalized = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            try:
+                self.process.stdin.write(normalized)
+                self.process.stdin.flush()
+                self._append_output(normalized.replace(b"\n", b"\r\n"))
+            except OSError:
+                pass
+            return
         view = memoryview(data)
         while view:
             written = os.write(self.master, view)
             view = view[written:]
 
     def resize(self, cols, rows, fd=None):
+        if self._windows:
+            return
         import fcntl
         import struct
         import termios
@@ -1016,10 +1057,7 @@ class Terminal:
 
     def close(self):
         if self.process.poll() is None:
-            try:
-                os.killpg(self.process.pid, 15)
-            except OSError:
-                pass
+            platform_os.kill_process_tree(self.process.pid, force=self._windows)
 
 
 ANSI_ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[()][A-Za-z0-9]|\x1b[=>78]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -1208,7 +1246,8 @@ class BrowserSessions:
         if self.loaded_key == key and self.state == "ready":
             return
         if load_settings().get("protect_memory", True) and memory_pressure() == "critical":
-            raise ValueError("Mac memory pressure is critical, so Pipkin paused loading the model before swapping. "
+            mem_label = "Mac memory" if sys.platform == "darwin" else "System memory"
+            raise ValueError(f"{mem_label} pressure is critical, so Pipkin paused loading the model before swapping. "
                              "Close heavy apps, lower the context window, or turn off Memory protection in Settings › Model.")
         if self.loaded_key and self.loaded_key != key and not self.unload():
             raise ValueError("Could not unload the previous model.")
@@ -1365,14 +1404,14 @@ class ChatHandler(BaseHTTPRequestHandler):
     def check_host(self):
         if self.headers.get_all("Host") == [f"{HOST}:{self.server.server_port}"]:
             return True
-        self.send_json(403, {"error": "Open Pipkin by using its macOS launcher."})
+        self.send_json(403, {"error": "Open Pipkin using the Pipkin desktop app."})
         return False
 
     def do_GET(self):
         if not self.check_host():
             return
         if self.path == "/health":
-            self.send_json(503 if SESSIONS.stopping else 200, {"app": "local.browser-model"})
+            self.send_json(503 if SESSIONS.stopping else 200, {"app": "local.browser-model", "platform": sys.platform})
         elif self.path == "/api/models":
             self.list_models()
         elif self.path == "/api/telemetry":
@@ -1546,17 +1585,26 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(409, {"error": "A folder picker is already open."})
             return
         try:
-            selection = subprocess.run(
-                [str(ASSETS.parent / "Folder Picker.app" / "Contents" / "MacOS" / "choose-folder")],
-                capture_output=True, text=True, timeout=120,
-            )
-            if selection.returncode:
-                if selection.returncode == 3:
-                    self.send_json(200, {"cancelled": True})
-                else:
-                    self.send_json(400, {"error": "Could not open the macOS folder picker."})
-                return
-            folder = selection.stdout.removesuffix("\n")
+            if sys.platform == "win32":
+                code, folder = platform_os.pick_folder_windows(timeout=120)
+                if code:
+                    if code == 3:
+                        self.send_json(200, {"cancelled": True})
+                    else:
+                        self.send_json(400, {"error": "Could not open the Windows folder picker."})
+                    return
+            else:
+                selection = subprocess.run(
+                    [str(ASSETS.parent / "Folder Picker.app" / "Contents" / "MacOS" / "choose-folder")],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if selection.returncode:
+                    if selection.returncode == 3:
+                        self.send_json(200, {"cancelled": True})
+                    else:
+                        self.send_json(400, {"error": "Could not open the macOS folder picker."})
+                    return
+                folder = selection.stdout.removesuffix("\n")
             if not Path(folder).is_absolute():
                 raise ValueError("The folder picker returned an invalid folder.")
             workspace = Workspace(folder)
@@ -1652,19 +1700,25 @@ class ChatHandler(BaseHTTPRequestHandler):
                 requested = requested.relative_to(workspace.path)
             parts = validate_path(str(requested))
             target = workspace.path.joinpath(*parts)
-            with workspace.open_path(str(requested), FILE_FLAGS) as fd:
-                info = os.fstat(fd)
+            if sys.platform == "win32":
+                parent_dir = workspace._win_resolve_dir(parts[:-1]) if parts else workspace.path
+                target = parent_dir / parts[-1] if parts else workspace.path
+                info = workspace._win_check_entry(target)
                 regular = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-                if info.st_dev != workspace.identity[0] or not (regular or stat.S_ISDIR(info.st_mode)):
+                if not (regular or stat.S_ISDIR(info.st_mode)):
                     raise ValueError()
-                current = target.lstat()
-                if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
-                    raise ValueError()
-                if sys.platform == "win32":
-                    safe_win_exts = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".md", ".txt", ".docx", ".pptx"}
-                    can_open = regular and target.suffix.casefold() in safe_win_exts
-                    platform_os.open_file_in_os(target, reveal=not can_open)
-                else:
+                safe_win_exts = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".md", ".txt", ".docx", ".pptx"}
+                can_open = regular and target.suffix.casefold() in safe_win_exts
+                platform_os.open_file_in_os(target, reveal=not can_open)
+            else:
+                with workspace.open_path(str(requested), FILE_FLAGS) as fd:
+                    info = os.fstat(fd)
+                    regular = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                    if info.st_dev != workspace.identity[0] or not (regular or stat.S_ISDIR(info.st_mode)):
+                        raise ValueError()
+                    current = target.lstat()
+                    if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                        raise ValueError()
                     app = {
                         ".html": "com.apple.Safari", ".htm": "com.apple.Safari",
                         ".pdf": "com.apple.Preview", ".png": "com.apple.Preview",
@@ -1686,7 +1740,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "Could not open this path in the selected folder."})
             return
         except subprocess.SubprocessError:
-            self.send_json(503, {"error": "macOS could not open this output."})
+            os_label = "macOS" if sys.platform == "darwin" else "Windows" if sys.platform == "win32" else "The system"
+            self.send_json(503, {"error": f"{os_label} could not open this output."})
             return
         self.send_json(200, {"path": str(target)})
 
@@ -1948,6 +2003,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "family": details.get("family", ""),
             })
         self.send_json(200, {
+            "platform": sys.platform,
             "models": items, "model": settings["model"], "num_ctx": settings["num_ctx"],
             "contextSizes": CONTEXT_SIZES, "capabilities": model_capabilities(settings["model"]),
         })

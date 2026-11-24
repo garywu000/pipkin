@@ -81,6 +81,46 @@ function notifyShell(message) {
 if (nativeShell) document.documentElement.dataset.shell = "mac";
 else if (windowsShell) document.documentElement.dataset.shell = "windows";
 
+/* Cross-platform OS identity & labels so Windows never shows macOS wording or ⌘ symbols. */
+const PipkinPlatform = (() => {
+  const detectOs = () => {
+    if (nativeShell) return "mac";
+    if (windowsShell) return "windows";
+    const hint = (navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "");
+    if (/Win/i.test(hint)) return "windows";
+    if (/Mac|iPhone|iPad|iPod/i.test(hint)) return "mac";
+    return "other";
+  };
+  const info = { os: detectOs() };
+  const refresh = () => {
+    const isMac = info.os === "mac";
+    const isWindows = info.os === "windows";
+    info.isMac = isMac;
+    info.isWindows = isWindows;
+    info.osName = isMac ? "macOS" : isWindows ? "Windows" : "your system";
+    info.osBadge = isMac ? "MACOS" : isWindows ? "WINDOWS" : "LOCAL";
+    info.device = isMac ? "Mac" : isWindows ? "PC" : "computer";
+    info.thisDevice = isMac ? "this Mac" : isWindows ? "this PC" : "this computer";
+    info.yourDevice = isMac ? "your Mac" : isWindows ? "your PC" : "your computer";
+    info.memoryTitle = isMac ? "Mac memory" : "System memory";
+    info.ollamaUrl = isMac ? "https://ollama.com/download/mac" : isWindows ? "https://ollama.com/download/windows" : "https://ollama.com/download";
+    info.ollamaLabel = isMac ? "Ollama for macOS" : isWindows ? "Ollama for Windows" : "Ollama";
+    document.documentElement.dataset.os = info.os;
+  };
+  info.setFromBackend = (pyPlatform) => {
+    if (!pyPlatform) return;
+    const next = pyPlatform === "darwin" ? "mac" : pyPlatform === "win32" ? "windows" : "other";
+    if (next !== info.os) {
+      info.os = next;
+      refresh();
+      if (typeof applyPlatformUI === "function") applyPlatformUI();
+    }
+  };
+  refresh();
+  return info;
+})();
+window.PipkinPlatform = PipkinPlatform;
+
 const storageKey = "local-model-chat";
 const settingsKey = "pipkin-settings";
 const memoryKey = "pipkin-memories";
@@ -1316,7 +1356,7 @@ function showSkillError(message) {
 
 function saveSkillList(skills) {
   if (!writeLocal(skillKey, skills)) {
-    showSkillError("Pipkin could not save the skill on this Mac.");
+    showSkillError(`Pipkin could not save the skill on ${PipkinPlatform.thisDevice}.`);
     return false;
   }
   customSkills = skills;
@@ -1588,21 +1628,24 @@ function showState(nextState, loaded = modelLoaded) {
   };
   byId("model-status").dataset.state = state;
   byId("status-label").textContent = labels[state] || "Connecting";
-  byId("model-status").title = (labels[state] || "") + " · Click for model & Mac memory details";
+  byId("model-status").title = (labels[state] || "") + ` · Click for model & ${PipkinPlatform.memoryTitle.toLowerCase()} details`;
   if (!activeReply && !storageUpdateBlocked) announce(messages[state] || "", ["offline", "missing", "error"].includes(state));
   updateControls();
   if (["ready", "idle", "offline"].includes(state)) void refreshTelemetry();
 }
 
-/* Live Mac memory pressure & loaded Ollama model residency HUD. */
+/* Live system memory pressure & loaded Ollama model residency HUD. */
 let telemetry = { pressure: "unknown", total_ram: 0, loaded: [] };
 let telemetryPanel = null;
-const PRESSURE_LABELS = {
-  normal: { label: "Normal", note: "Plenty of headroom for local models." },
-  warning: { label: "Elevated", note: "Memory is getting tight. Consider a smaller context or unloading when idle." },
-  critical: { label: "Critical", note: "macOS is under heavy memory pressure. Unload the model to avoid swapping." },
-  unknown: { label: "Unavailable", note: "Memory pressure telemetry is available on macOS." },
-};
+function pressureMeta(level) {
+  const table = {
+    normal: { label: "Normal", note: "Plenty of headroom for local models." },
+    warning: { label: "Elevated", note: "Memory is getting tight. Consider a smaller context or unloading when idle." },
+    critical: { label: "Critical", note: `${PipkinPlatform.osName} is under heavy memory pressure. Unload the model to avoid swapping.` },
+    unknown: { label: "Unavailable", note: "Memory pressure telemetry is unavailable right now." },
+  };
+  return table[level] || table.unknown;
+}
 
 function renderTelemetryBadge() {
   const pill = byId("model-status");
@@ -1688,7 +1731,7 @@ function buildMemoryGraph(samples, pressure) {
 
 function renderTelemetryPopover() {
   if (!telemetryPanel) return;
-  const p = PRESSURE_LABELS[telemetry.pressure] || PRESSURE_LABELS.unknown;
+  const p = pressureMeta(telemetry.pressure);
   const totalRam = telemetry.total_ram ? formatSize(telemetry.total_ram) : "";
   const mem = telemetry.memory || null;
   const loaded = telemetry.loaded || [];
@@ -1761,7 +1804,7 @@ function renderTelemetryPopover() {
   telemetryPanel.replaceChildren(
     el("div", { className: "tel-section" },
       el("div", { className: "tel-head" },
-        el("span", { className: "tel-kicker", text: "Mac memory" }),
+        el("span", { className: "tel-kicker", text: PipkinPlatform.memoryTitle }),
         el("span", { className: "tel-pill", dataset: { pressure: telemetry.pressure }, text: p.label })),
       metricLine,
       breakdown || el("div", { className: "tel-bar", dataset: { pressure: telemetry.pressure }, "aria-hidden": "true" },
@@ -1803,8 +1846,8 @@ function renderPressureBanner() {
   const rec = telemetry.recommended_ctx;
   const canLower = rec && modelInfo.num_ctx > rec && modelInfo.contextSizes.includes(rec);
   const msg = level === "critical"
-    ? `Mac memory is critical${ramReadout} — Work will pause before swapping.`
-    : `Mac memory is getting tight${ramReadout}. Lowering context or unloading idle models helps.`;
+    ? `${PipkinPlatform.memoryTitle} is critical${ramReadout} — Work will pause before swapping.`
+    : `${PipkinPlatform.memoryTitle} is getting tight${ramReadout}. Lowering context or unloading idle models helps.`;
   const actions = [];
   const graphBtn = el("button", { type: "button", className: "button small", text: "Memory graph" });
   graphBtn.addEventListener("click", () => {
@@ -1872,7 +1915,7 @@ function toggleTelemetryPopover() {
   }
   closePopover();
   const anchor = byId("model-status");
-  telemetryPanel = el("div", { className: "telemetry-popover", role: "dialog", "aria-label": "Model and Mac memory telemetry" });
+  telemetryPanel = el("div", { className: "telemetry-popover", role: "dialog", "aria-label": `Model and ${PipkinPlatform.memoryTitle.toLowerCase()} telemetry` });
   document.body.append(telemetryPanel);
   anchor.setAttribute("aria-expanded", "true");
   renderTelemetryPopover();
@@ -1884,6 +1927,7 @@ async function refreshTelemetry() {
     const response = await fetch("/api/telemetry");
     if (!response.ok) return;
     telemetry = await response.json();
+    if (telemetry.platform) PipkinPlatform.setFromBackend(telemetry.platform);
     renderTelemetryBadge();
     renderTelemetryPopover();
   } catch {
@@ -2686,7 +2730,7 @@ function estimatedMessageTokens(message) {
 function systemPrompt() {
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   const lines = [
-    `You are Pipkin, a helpful, knowledgeable assistant running privately on the user's Mac through Ollama (model: ${shortModelName(modelInfo.model) || "local model"}).`,
+    `You are Pipkin, a helpful, knowledgeable assistant running privately on ${PipkinPlatform.yourDevice} through Ollama (model: ${shortModelName(modelInfo.model) || "local model"}).`,
     `Today is ${today}.`,
     "Use Markdown when it helps: short headings, bullet lists, tables, and fenced code blocks with a language tag. Write math with $...$ or $$...$$.",
     "Be direct and accurate. If you are unsure, say so.",
@@ -2881,6 +2925,7 @@ async function loadModels() {
   try {
     const response = await fetch("/api/models");
     const data = await response.json();
+    if (data.platform) PipkinPlatform.setFromBackend(data.platform);
     modelInfo = { ...modelInfo, ...data };
   } catch {
     // Ollama may still be starting; retry shortly.
@@ -2989,7 +3034,7 @@ function setAgentWorkspace(folder) {
 async function chooseAgentWorkspace() {
   choosingWorkspace = true;
   updateControls();
-  announce("Choose a folder in the macOS dialog.");
+  announce(`Choose a folder in the ${PipkinPlatform.osName} dialog.`);
   try {
     const response = await fetch("/api/agent/workspace", {
       method: "POST",
@@ -4059,7 +4104,7 @@ function showMode(animate = false) {
   byId("welcome-heading").textContent = agent ? "What should we work on?" : "How can I help?";
   byId("welcome-sub").textContent = agent
     ? (agentWorkspace ? `Working in “${agentWorkspace.name}”. I can plan, read, edit, run commands and search the web.` : "Pick a folder to let me read and edit files, or just ask me to research the web.")
-    : "Private chat with your local model. Nothing leaves your Mac.";
+    : `Private chat with your local model. Nothing leaves ${PipkinPlatform.yourDevice}.`;
   if (animate && !empty.hidden && !reducedMotion.matches) {
     const welcome = empty.querySelector(".welcome");
     if (welcome) {
@@ -4705,7 +4750,7 @@ window.PipkinShell = {
 };
 if (nativeShell) {
   const note = document.querySelector(".composer-note span:last-child");
-  if (note) note.textContent = "Runs locally · saved on this Mac";
+  if (note) note.textContent = `Runs locally · saved on ${PipkinPlatform.thisDevice}`;
 }
 
 window.PipkinOnboardingHost = {
@@ -5002,7 +5047,7 @@ if (harnessPanel) {
   setHarnessOpen(Boolean(readLocal("pipkin-harness-open", false)), false);
 }
 
-/* ---------- Customizable Keyboard Shortcuts ---------- */
+/* ---------- Customizable Keyboard Shortcuts & Platform UI ---------- */
 let recordingShortcut = null;
 
 function shortcutMap() {
@@ -5012,17 +5057,32 @@ function shortcutMap() {
 
 function formatShortcutParts(combo) {
   if (!combo) return [];
-  return combo.split("+").map((part) => (
-    part === "Mod" ? "⌘" : part === "Shift" ? "⇧" : part === "Alt" ? "⌥" : part === "Ctrl" ? "⌃" : part
-  ));
+  const isMac = PipkinPlatform.isMac;
+  const mapped = combo.split("+").map((part) => {
+    if (isMac) {
+      return part === "Mod" ? "⌘" : part === "Shift" ? "⇧" : part === "Alt" ? "⌥" : part === "Ctrl" ? "⌃" : part;
+    }
+    return part === "Mod" || part === "Ctrl" ? "Ctrl" : part;
+  });
+  return isMac ? mapped : mapped.filter((part, idx) => idx === 0 || part !== mapped[idx - 1]);
+}
+
+function formatShortcutLabel(combo) {
+  const parts = formatShortcutParts(combo);
+  return PipkinPlatform.isMac ? parts.join("") : parts.join("+");
 }
 
 function eventToShortcut(event) {
   const raw = event.key;
   if (!raw || ["Meta", "Control", "Shift", "Alt"].includes(raw)) return null;
   const parts = [];
-  if (event.metaKey) parts.push("Mod");
-  else if (event.ctrlKey) parts.push("Ctrl");
+  if (PipkinPlatform.isMac) {
+    if (event.metaKey) parts.push("Mod");
+    else if (event.ctrlKey) parts.push("Ctrl");
+  } else {
+    if (event.metaKey && !event.ctrlKey) return null;
+    if (event.ctrlKey) parts.push("Mod");
+  }
   if (event.altKey) parts.push("Alt");
   if (event.shiftKey && raw.length === 1 && /[a-z]/i.test(raw)) parts.push("Shift");
   else if (event.shiftKey && raw.length > 1) parts.push("Shift");
@@ -5033,15 +5093,45 @@ function eventToShortcut(event) {
 
 function syncShortcutHints() {
   const map = shortcutMap();
-  const fmt = (id) => formatShortcutParts(map[id]).join("");
+  const fmt = (id) => formatShortcutLabel(map[id]);
+  const termKey = PipkinPlatform.isMac ? "⌃`" : "Ctrl+`";
+  const browserKey = formatShortcutLabel("Mod+Shift+B");
   const newKbd = byId("new-chat")?.querySelector("kbd");
   if (newKbd) newKbd.textContent = fmt("newChat");
   const searchKbd = byId("chat-search")?.parentElement?.querySelector("kbd");
   if (searchKbd) searchKbd.textContent = fmt("search");
   const settingsKbd = byId("open-settings")?.querySelector("kbd");
   if (settingsKbd) settingsKbd.textContent = fmt("settings");
+  if (byId("collapse-sidebar")) byId("collapse-sidebar").title = `Hide sidebar (${fmt("sidebar")})`;
+  if (byId("history-toggle")) byId("history-toggle").title = `Show sidebar (${fmt("sidebar")})`;
   if (byId("topbar-new")) byId("topbar-new").title = `New chat (${fmt("newChat")})`;
+  if (byId("toggle-terminal")) byId("toggle-terminal").title = `Terminal (${termKey})`;
+  if (byId("terminal-hide")) byId("terminal-hide").title = `Hide terminal (${termKey})`;
+  if (byId("toggle-browser")) byId("toggle-browser").title = `Browser (${browserKey})`;
   if (byId("toggle-harness")) byId("toggle-harness").title = `Harness panel (${fmt("harness")})`;
+  if (byId("harness-close")) byId("harness-close").title = `Close panel (${fmt("harness")})`;
+  if (byId("harness-close-sub")) byId("harness-close-sub").title = `Close panel (${fmt("harness")})`;
+}
+
+function applyPlatformUI() {
+  const P = PipkinPlatform;
+  const set = (id, text) => { const node = byId(id); if (node) node.textContent = text; };
+  set("hint-send-enter", P.isMac
+    ? "Off: use ⌘ Enter to send, Enter for a new line."
+    : "Off: use Ctrl+Enter to send, Enter for a new line.");
+  set("hint-explore-model",
+    `Optional: use a smaller, faster model to map and read workspace files before your primary model writes. Off by default unless benchmarked faster on ${P.yourDevice}.`);
+  set("hint-memory-protect",
+    `Auto-pause Work and unload idle models before ${P.osName} starts swapping.`);
+  set("hint-usage-device", `Across all models used in Pipkin on ${P.thisDevice}.`);
+  set("hint-allow-shell", P.isMac
+    ? "Opt-in. Commands run isolated to the selected folder with no network, sanitized env, and approval required."
+    : "Opt-in. Commands run in the selected folder with a sanitized env and approval required for every command.");
+  set("hint-storage-device",
+    `Chats, projects and memories are stored by the app showing this page (the Pipkin app or your browser). Nothing leaves ${P.yourDevice} unless the agent uses the web.`);
+  syncShortcutHints();
+  renderShortcutsEditor();
+  renderTelemetryBadge();
 }
 
 function renderShortcutsEditor() {
@@ -5053,7 +5143,7 @@ function renderShortcutsEditor() {
     const btn = el("button", {
       type: "button", className: "shortcut-btn",
       dataset: { recording: String(isRec) },
-      "aria-label": `${label}: ${formatShortcutParts(map[id]).join(" ")}. Click to customize.`,
+      "aria-label": `${label}: ${formatShortcutLabel(map[id])}. Click to customize.`,
     }, ...(isRec ? [el("span", { text: "Press keys…" })] : formatShortcutParts(map[id]).map((k) => el("kbd", { text: k }))));
     btn.addEventListener("click", () => {
       recordingShortcut = recordingShortcut === id ? null : id;
@@ -5075,7 +5165,7 @@ byId("reset-shortcuts")?.addEventListener("click", () => {
   toast("Shortcuts reset to defaults");
 });
 settingsDialog.addEventListener("close", () => { recordingShortcut = null; });
-syncShortcutHints();
+applyPlatformUI();
 
 // Keyboard shortcuts
 document.addEventListener("keydown", (event) => {
@@ -5089,14 +5179,14 @@ document.addEventListener("keydown", (event) => {
     }
     const combo = eventToShortcut(event);
     if (!combo) return;
-    if (RESERVED_SHORTCUTS.has(combo)) {
-      toast(`${formatShortcutParts(combo).join("")} is reserved by macOS`);
+    if (RESERVED_SHORTCUTS.has(combo) || (!PipkinPlatform.isMac && combo === "Alt+F4")) {
+      toast(`${formatShortcutLabel(combo)} is reserved by ${PipkinPlatform.osName}`);
       return;
     }
     const current = shortcutMap();
     const conflict = SHORTCUT_ITEMS.find(([id]) => id !== recordingShortcut && current[id] === combo);
     if (conflict) {
-      toast(`${formatShortcutParts(combo).join("")} is already used by ${conflict[1]}`);
+      toast(`${formatShortcutLabel(combo)} is already used by ${conflict[1]}`);
       return;
     }
     const next = { ...(settings.shortcuts || {}), [recordingShortcut]: combo };

@@ -14,7 +14,8 @@ import posixpath
 import re
 from pathlib import Path
 from secrets import token_hex
-from threading import Lock
+from threading import Lock, Thread
+import shutil
 import signal
 import socket
 import stat
@@ -27,10 +28,16 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 import urllib.request
 
 import artifacts
+import platform_os
 
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+WINDOWS_RESERVED_NAMES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
 IGNORED = {"node_modules", "__pycache__", ".git"}
 CREDENTIAL_NAMES = {
     "credentials", "credentials.json", "secrets.json", "tokens.json",
@@ -78,15 +85,33 @@ def shareable_name(name):
         and not lower.endswith(CREDENTIAL_SUFFIXES)
 
 
+def _is_reparse_point(info):
+    """Detect Windows NTFS symlinks and directory junctions via file attributes."""
+    attrs = getattr(info, "st_file_attributes", 0)
+    return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
 def validate_path(path):
     if not isinstance(path, str) or len(path) > 500:
         raise ValueError("Use a relative path within the selected folder.")
-    path = path.strip().removeprefix("./")
-    if path in (".", ""):
+    raw = path.strip()
+    if ":" in raw or raw.startswith("\\\\") or "\x00" in raw:
+        raise ValueError("Use a relative path within the selected folder.")
+    normalized = raw.replace("\\", "/").removeprefix("./")
+    if normalized in (".", ""):
         return ()
-    parts = path.strip("/").split("/")
-    if not all(part and part not in (".", "..") and shareable_name(part) and "\x00" not in part for part in parts):
-        raise ValueError("Use a relative path to a supported file in the selected folder (no hidden, secret or parent paths).")
+    parts = normalized.strip("/").split("/")
+    for part in parts:
+        stem = part.split(".", 1)[0].casefold()
+        if (
+            not part
+            or part in (".", "..")
+            or not shareable_name(part)
+            or "\x00" in part
+            or stem in WINDOWS_RESERVED_NAMES
+            or part.endswith((" ", "."))
+        ):
+            raise ValueError("Use a relative path to a supported file in the selected folder (no hidden, secret or parent paths).")
     return parts
 
 
@@ -122,9 +147,50 @@ class Workspace:
         self.path = Path(folder).resolve(strict=True)
         if self.path == self.path.parent or self.path == Path.home().resolve() or not shareable_name(self.path.name):
             raise ValueError("Choose a visible project subfolder, not your home folder or a drive root.")
-        with self._open_root() as root:
-            info = os.fstat(root)
+        self._windows = sys.platform == "win32"
+        if self._windows:
+            info = os.lstat(self.path)
+            if not stat.S_ISDIR(info.st_mode) or _is_reparse_point(info):
+                raise ValueError("Choose a real project folder, not a link or file.")
             self.identity = (info.st_dev, info.st_ino)
+        else:
+            with self._open_root() as root:
+                info = os.fstat(root)
+                self.identity = (info.st_dev, info.st_ino)
+
+    def _win_resolve_dir(self, parts, create=False):
+        """Safely walk parts on Windows without following symlinks or NTFS junctions."""
+        root_info = os.lstat(self.path)
+        if (root_info.st_dev, root_info.st_ino) != self.identity or _is_reparse_point(root_info):
+            raise ValueError("This folder has changed. Choose the workspace again.")
+        cur = self.path
+        for part in parts:
+            cur = cur / part
+            try:
+                info = os.lstat(cur)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(cur, 0o755)
+                info = os.lstat(cur)
+            if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info):
+                raise ValueError("Symbolic links and junctions are excluded from the workspace.")
+            if not stat.S_ISDIR(info.st_mode):
+                raise NotADirectoryError(f"{part} is not a directory.")
+            if info.st_dev != self.identity[0]:
+                raise ValueError("This path crosses into a different mounted volume.")
+        resolved = cur.resolve()
+        if resolved != self.path and self.path not in resolved.parents:
+            raise ValueError("This path leaves the selected workspace.")
+        return cur
+
+    def _win_check_entry(self, target):
+        info = os.lstat(target)
+        if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info):
+            raise ValueError("Symbolic links and junctions are excluded from the workspace.")
+        if info.st_dev != self.identity[0]:
+            raise ValueError("This path crosses into a different mounted volume.")
+        return info
 
     @contextmanager
     def _open_root(self):
@@ -137,6 +203,9 @@ class Workspace:
     @contextmanager
     def _directory(self, parts, create=False):
         """Yield a descriptor for the folder at parts, walking without following links."""
+        if self._windows:
+            yield self._win_resolve_dir(parts, create=create)
+            return
         with self._open_root() as root:
             info = os.fstat(root)
             if (info.st_dev, info.st_ino) != self.identity:
@@ -168,6 +237,18 @@ class Workspace:
             return
         if not parts:
             raise ValueError("Choose a file inside the selected folder.")
+        if self._windows:
+            parent = self._win_resolve_dir(parts[:-1])
+            target = parent / parts[-1]
+            info = self._win_check_entry(target)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("Only regular files are supported.")
+            fd = os.open(str(target), flags)
+            try:
+                yield fd
+            finally:
+                os.close(fd)
+            return
         with self._directory(parts[:-1]) as parent:
             fd = os.open(parts[-1], flags, dir_fd=parent)
             try:
@@ -184,11 +265,14 @@ class Workspace:
                 for entry in entries:
                     if not shareable_name(entry.name) or entry.is_symlink():
                         continue
-                    is_dir = entry.is_dir(follow_symlinks=False)
                     try:
-                        size = 0 if is_dir else entry.stat(follow_symlinks=False).st_size
+                        st = entry.stat(follow_symlinks=False)
                     except OSError:
-                        size = 0
+                        continue
+                    if _is_reparse_point(st):
+                        continue
+                    is_dir = stat.S_ISDIR(st.st_mode)
+                    size = 0 if is_dir else st.st_size
                     items.append((entry.name, is_dir, size))
             items.sort(key=lambda item: (not item[1], item[0].casefold()))
             for name, is_dir, size in items[:80]:
@@ -289,11 +373,14 @@ class Workspace:
                     for entry in listing:
                         if not shareable_name(entry.name) or entry.is_symlink():
                             continue
-                        is_dir = entry.is_dir(follow_symlinks=False)
                         try:
-                            size = 0 if is_dir else entry.stat(follow_symlinks=False).st_size
+                            st = entry.stat(follow_symlinks=False)
                         except OSError:
                             continue
+                        if _is_reparse_point(st):
+                            continue
+                        is_dir = stat.S_ISDIR(st.st_mode)
+                        size = 0 if is_dir else st.st_size
                         entries.append((entry.name, is_dir, size))
             except NotADirectoryError:
                 if folder == path:
@@ -406,6 +493,19 @@ class Workspace:
         data = content.encode("utf-8")
         if len(data) > MAX_WRITE_BYTES:
             raise ValueError("That file is too large to write.")
+        if self._windows:
+            parent = self._win_resolve_dir(parts[:-1], create=True)
+            target = parent / parts[-1]
+            try:
+                info = self._win_check_entry(target)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ValueError("Only regular, unlinked files can be replaced.")
+            except FileNotFoundError:
+                pass
+            fd = os.open(str(target), WRITE_FLAGS, 0o644)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+            return
         with self._directory(parts[:-1], create=True) as parent:
             try:
                 info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
@@ -436,6 +536,14 @@ class Workspace:
         parts = validate_path(path)
         if not parts:
             raise ValueError("Give a file path inside the workspace.")
+        if self._windows:
+            parent = self._win_resolve_dir(parts[:-1])
+            target = parent / parts[-1]
+            info = self._win_check_entry(target)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("Only regular files can be removed.")
+            os.unlink(target)
+            return
         with self._directory(parts[:-1]) as parent:
             info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
             if not stat.S_ISREG(info.st_mode):
@@ -449,6 +557,28 @@ class Workspace:
         data = content.encode("utf-8")
         if len(data) > MAX_FILE_BYTES:
             raise ValueError("That file is too large to restore.")
+        if self._windows:
+            parent = self._win_resolve_dir(parts[:-1])
+            target = parent / parts[-1]
+            info = self._win_check_entry(target)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("Only regular, unlinked files can be restored.")
+            staging = parent / (".pipkin-" + token_hex(12))
+            fd = os.open(str(staging), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if self.file_digest(path) != expected_digest:
+                    raise UndoConflict(f"{path} changed before it could be restored.")
+                os.replace(str(staging), str(target))
+            finally:
+                try:
+                    os.unlink(staging)
+                except FileNotFoundError:
+                    pass
+            return
         with self._directory(parts[:-1]) as parent:
             name = parts[-1]
             info = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -475,6 +605,18 @@ class Workspace:
         parts = validate_path(path)
         if not parts or len(data) > 2_000_000:
             raise ValueError("Choose a filename for an output under 2 MB.")
+        if self._windows:
+            parent = self._win_resolve_dir(parts[:-1], create=True)
+            target = parent / parts[-1]
+            try:
+                fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644)
+            except FileExistsError as error:
+                raise ValueError(f"{path} already exists. Choose a new output filename.") from error
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return
         with self._directory(parts[:-1], create=True) as parent:
             staging = ".pipkin-" + token_hex(12)
             fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=parent)
@@ -1055,16 +1197,38 @@ def long_running(command):
 
 
 SAFE_ENV_KEYS = ("LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME")
+WIN_SAFE_ENV_KEYS = ("SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "PROCESSOR_ARCHITECTURE", "SystemDrive", "NUMBER_OF_PROCESSORS", "PATH")
 WRITE_CMD_RE = re.compile(
-    r"(?:^|[;&|(]\s*)(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|tee|install|dd|truncate|patch)\b|"
+    r"(?:^|[;&|(]\s*)(?:rm|rmdir|rd|del|erase|mv|move|ren|rename|cp|copy|xcopy|robocopy|mkdir|md|touch|chmod|chown|ln|tee|install|dd|truncate|patch|"
+    r"Remove-Item|Set-Content|Add-Content|Out-File|Move-Item|Copy-Item|Rename-Item|New-Item)\b|"
     r"(?:^|[^0-9])>>?(?!=)|sed\s+-[a-zA-Z]*i|git\s+(?:add|commit|reset|checkout|clean|rm|mv|apply|stash)\b|"
-    r"(?:pip3?|npm|pnpm|yarn|brew|cargo)\s+(?:install|uninstall|add|remove|update)\b"
+    r"(?:pip3?|npm|pnpm|yarn|brew|cargo|winget|choco)\s+(?:install|uninstall|add|remove|update)\b",
+    re.IGNORECASE,
 )
-SCRIPT_CMD_RE = re.compile(r"(?:^|[;&|(]\s*)(?:python3?|node|ruby|perl|swift|sh|bash|zsh)\b")
+SCRIPT_CMD_RE = re.compile(
+    r"(?:^|[;&|(]\s*)(?:python3?|py|node|ruby|perl|swift|sh|bash|zsh|powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?)\b",
+    re.IGNORECASE,
+)
 
 
-def isolated_env(tmp_dir):
+def isolated_env(tmp_dir, *, platform_name=None):
     """Build a sanitized environment without ambient tokens, SSH sockets, or cloud credentials."""
+    plat = platform_name or sys.platform
+    if plat == "win32":
+        env = {key: os.environ[key] for key in WIN_SAFE_ENV_KEYS if key in os.environ}
+        env.setdefault("PATH", os.environ.get("PATH", r"C:\Windows\System32;C:\Windows"))
+        env["HOME"] = str(tmp_dir)
+        env["USERPROFILE"] = str(tmp_dir)
+        env["TEMP"] = str(tmp_dir)
+        env["TMP"] = str(tmp_dir)
+        env["TMPDIR"] = str(tmp_dir)
+        env["APPDATA"] = str(tmp_dir)
+        env["LOCALAPPDATA"] = str(tmp_dir)
+        env["TERM"] = "dumb"
+        env["PAGER"] = "cat"
+        env["GIT_PAGER"] = "cat"
+        env["NO_COLOR"] = "1"
+        return env
     env = {key: os.environ[key] for key in SAFE_ENV_KEYS if key in os.environ}
     base_path = os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + base_path
@@ -1096,8 +1260,9 @@ def seatbelt_profile(workspace_path, tmp_dir):
     )
 
 
-def describe_command_scope(command, workspace):
+def describe_command_scope(command, workspace, *, platform_name=None):
     """Return a plain-English scope summary shown above the command on the approval card."""
+    plat = platform_name or sys.platform
     writes = bool(WRITE_CMD_RE.search(command))
     runs_script = bool(SCRIPT_CMD_RE.search(command))
     kind = "May modify files" if writes else ("Runs script (may modify files)" if runs_script else "Read-only inspection")
@@ -1107,21 +1272,99 @@ def describe_command_scope(command, workspace):
         tok = (raw[0] or raw[1] or raw[2]).strip()
         if not tok or tok.startswith("-") or tok in {"&&", "||", "|", ";"}:
             continue
-        if "/" in tok or "." in tok:
+        if "/" in tok or "\\" in tok or "." in tok:
             if tok not in tokens:
                 tokens.append(tok)
         if len(tokens) >= 6:
             break
-    sandbox_note = f"Isolated to {workspace.path.name} · No network · Sanitized env"
+    if plat == "darwin":
+        sandbox_note = f"Isolated to {workspace.path.name} · No network · Sanitized env"
+    else:
+        sandbox_note = f"Working dir: {workspace.path.name} · Sanitized env · Approval required"
     lines = [f"Scope: {kind} ({sandbox_note})"]
     if tokens:
         lines.append("May touch: " + ", ".join(tokens))
     return "\n".join(lines)
 
 
+def _run_command_windows(workspace, command, check, env):
+    shell_exe = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    if shell_exe:
+        argv = [shell_exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]
+    else:
+        argv = [os.environ.get("COMSPEC", "cmd.exe"), "/c", command]
+    creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    process = subprocess.Popen(
+        argv, cwd=str(workspace.path), stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, creationflags=creation,
+    )
+    started = time.monotonic()
+    deadline = started + COMMAND_TIMEOUT
+    lock = Lock()
+    state = {"last_output": started, "eof": False}
+    output = bytearray()
+
+    def reader():
+        try:
+            while True:
+                chunk = process.stdout.read(65536)
+                if not chunk:
+                    break
+                with lock:
+                    state["last_output"] = time.monotonic()
+                    if len(output) < 400_000:
+                        output.extend(chunk[: max(0, 400_000 - len(output))])
+        except OSError:
+            pass
+        finally:
+            with lock:
+                state["eof"] = True
+
+    pump = Thread(target=reader, daemon=True)
+    pump.start()
+    try:
+        while True:
+            check()
+            now = time.monotonic()
+            with lock:
+                eof = state["eof"]
+                last_out = state["last_output"]
+            if eof and process.poll() is not None:
+                break
+            if now > deadline:
+                raise TimeoutError(f"ran for {COMMAND_TIMEOUT}s without finishing")
+            if now - last_out > COMMAND_IDLE:
+                raise TimeoutError(f"printed nothing for {COMMAND_IDLE}s")
+            time.sleep(0.05)
+    except TimeoutError as why:
+        platform_os.kill_process_tree(process.pid, force=True)
+        process.wait(timeout=5)
+        return (clip(output.decode("utf-8", "replace"), 6000) + f"\n[Stopped: the command {why}. It is probably "
+                "waiting for input, serving, or watching. Do not run it again. Use a command that exits on its own "
+                "(add flags such as -n 1, --no-pager or a timeout), split it into smaller checks, or verify with "
+                "read_file, search_text or check_page instead.]")
+    except BaseException:
+        platform_os.kill_process_tree(process.pid, force=True)
+        try:
+            process.wait(timeout=5)
+        except subprocess.SubprocessError:
+            pass
+        raise
+    finally:
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+        pump.join(timeout=1.0)
+    text = output.decode("utf-8", "replace").rstrip()
+    return clip(text, 6000) + f"\n[exit code {process.returncode}]"
+
+
 def run_command(workspace, command, check):
     with tempfile.TemporaryDirectory(prefix="pipkin-cmd-") as tmp_dir:
         env = isolated_env(tmp_dir)
+        if sys.platform == "win32":
+            return _run_command_windows(workspace, command, check, env)
         argv = ["/bin/zsh", "-c", command]
         if sys.platform == "darwin" and os.path.isfile("/usr/bin/sandbox-exec"):
             argv = ["/usr/bin/sandbox-exec", "-p", seatbelt_profile(workspace.path, tmp_dir), *argv]
@@ -1338,8 +1581,9 @@ def available_tools(workspace, mode, web, memory, panels=None, workflow=None, *,
 def system_prompt(workspace, mode, web, memory, memories, instructions, context, notes="", notes_name=None, panels=None,
                   workflow=None, *, allow_shell=True):
     today = datetime.date.today().strftime("%A, %B %d, %Y")
+    device_label = "Mac" if sys.platform == "darwin" else "Windows PC" if sys.platform == "win32" else "computer"
     lines = [
-        "You are Pipkin, an autonomous assistant running locally on the user's Mac. You work in a loop: plan, call tools, "
+        f"You are Pipkin, an autonomous assistant running locally on the user's {device_label}. You work in a loop: plan, call tools, "
         "read the results, and continue until the task is complete. Then give a final answer in Markdown.",
         f"Today is {today}.",
     ]

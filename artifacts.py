@@ -6,8 +6,11 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
+
+import platform_os
 
 FORMATS = {"site": ".html", "study-guide": ".html", "checklist": ".html", "word": ".docx", "slides": ".pptx", "pdf": ".pdf"}
 HTML_WORKFLOWS = {"site", "study-guide", "checklist"}
@@ -530,14 +533,18 @@ def render(workflow, plan, sources):
         return presentation(plan, sources)
     if workflow != "pdf":
         raise ValueError("Choose a supported output format.")
-    try:
-        blocks = [{"kind": kind, "text": text} for kind, text in document_blocks(plan, sources)]
-        result = subprocess.run(
-            [str(PDF_HELPER), "--render"], input=json.dumps(blocks, ensure_ascii=False).encode(),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=True,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise ValueError("The native PDF renderer could not finish.") from error
-    if not result.stdout.startswith(b"%PDF-"):
+    blocks = [{"kind": kind, "text": text} for kind, text in document_blocks(plan, sources)]
+    if sys.platform == "darwin" and PDF_HELPER.is_file():
+        try:
+            result = subprocess.run(
+                [str(PDF_HELPER), "--render"], input=json.dumps(blocks, ensure_ascii=False).encode(),
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError("The native PDF renderer could not finish.") from error
+        pdf_bytes = result.stdout
+    else:
+        pdf_bytes = platform_os.render_pdf_blocks_pure(blocks)
+    if not pdf_bytes.startswith(b"%PDF-"):
         raise ValueError("The renderer did not return a valid PDF.")
-    return result.stdout
+    return pdf_bytes

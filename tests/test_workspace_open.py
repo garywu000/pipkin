@@ -1,10 +1,12 @@
 import os
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import platform_os
 import server
 
 
@@ -24,6 +26,10 @@ class WorkspaceOpenTest(unittest.TestCase):
     def open(self, path, *, root=None, key=None):
         payload = {"workspace": key or self.key, "root": root or str(self.workspace.path), "path": path}
         handler = SimpleNamespace(read_json=lambda _: payload, send_json=Mock())
+        if sys.platform == "win32":
+            with patch.object(platform_os, "open_file_in_os") as launch:
+                server.ChatHandler.open_workspace_file(handler)
+            return handler.send_json.call_args.args[0], launch
         with patch.object(server.subprocess, "run") as launch:
             server.ChatHandler.open_workspace_file(handler)
         return handler.send_json.call_args.args[0], launch
@@ -31,23 +37,39 @@ class WorkspaceOpenTest(unittest.TestCase):
     def test_html_uses_browser_and_executable_is_revealed(self):
         page = self.workspace.path / "index with spaces.html"
         page.write_text("<h1>Study guide</h1>")
-        code = self.workspace.path / "test.command"
-        code.write_text("#!/bin/sh\n")
-        code.chmod(0o755)
+        code = self.workspace.path / ("test.bat" if sys.platform == "win32" else "test.command")
+        code.write_text("@echo off\n" if sys.platform == "win32" else "#!/bin/sh\n")
+        if sys.platform != "win32":
+            code.chmod(0o755)
         status, launch = self.open(str(page))
         self.assertEqual(status, 200)
-        self.assertEqual(launch.call_args.args[0], ["/usr/bin/open", "-b", "com.apple.Safari", str(page)])
-        status, launch = self.open("./test.command")
+        if sys.platform == "win32":
+            launch.assert_called_once_with(page, reveal=False)
+        else:
+            self.assertEqual(launch.call_args.args[0], ["/usr/bin/open", "-b", "com.apple.Safari", str(page)])
+        status, launch = self.open("./" + code.name)
         self.assertEqual(status, 200)
-        self.assertEqual(launch.call_args.args[0], ["/usr/bin/open", "-R", str(code)])
+        if sys.platform == "win32":
+            launch.assert_called_once_with(code, reveal=True)
+        else:
+            self.assertEqual(launch.call_args.args[0], ["/usr/bin/open", "-R", str(code)])
 
     def test_path_and_grant_are_checked_before_launch(self):
         outside = self.parent / "outside.html"
         outside.write_text("Outside")
         (self.root / ".env").write_text("Private")
-        (self.root / "alias.html").symlink_to(outside)
-        os.link(outside, self.root / "hard-link.html")
-        for path in ("../outside.html", ".env", "alias.html", "hard-link.html", str(outside), "missing.html"):
+        bad_paths = ["../outside.html", ".env", str(outside), "missing.html"]
+        try:
+            (self.root / "alias.html").symlink_to(outside)
+            bad_paths.append("alias.html")
+        except OSError:
+            pass
+        try:
+            os.link(outside, self.root / "hard-link.html")
+            bad_paths.append("hard-link.html")
+        except OSError:
+            pass
+        for path in bad_paths:
             with self.subTest(path=path):
                 status, launch = self.open(path)
                 self.assertEqual(status, 404)

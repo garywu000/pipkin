@@ -116,11 +116,17 @@ class ArtifactTests(unittest.TestCase):
         self.workspace.write_new_artifact(path.name, b"original")
         with self.assertRaisesRegex(ValueError, "exists"):
             self.workspace.write_new_artifact(path.name, b"new")
-        (self.root / "alias.pdf").symlink_to(path)
-        with self.assertRaisesRegex(ValueError, "exists"):
-            self.workspace.write_new_artifact("alias.pdf", b"new")
+        expected = ["report.pdf"]
+        try:
+            (self.root / "alias.pdf").symlink_to(path)
+        except OSError:
+            pass
+        else:
+            expected.insert(0, "alias.pdf")
+            with self.assertRaisesRegex(ValueError, "exists"):
+                self.workspace.write_new_artifact("alias.pdf", b"new")
         self.assertEqual(path.read_bytes(), b"original")
-        self.assertEqual(sorted(file.name for file in self.root.iterdir()), ["alias.pdf", "report.pdf"])
+        self.assertEqual(sorted(file.name for file in self.root.iterdir()), expected)
 
 
 class StagedChecklistTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-name: Build Windows Preview
+name: Build Windows Package
 
 on:
   workflow_dispatch:
@@ -18,10 +18,21 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Verify Python syntax and OS adapter tests on Windows
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify Python syntax, JS syntax, unit tests, and benchmarks on Windows
+        shell: pwsh
         run: |
           python -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py
-          python -m unittest tests/test_platform_os.py
+          Get-ChildItem dist\*.js | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          python -m unittest discover -s tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python benchmarks/run.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Set up .NET 8
         uses: actions/setup-dotnet@v4
