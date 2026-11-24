@@ -30,6 +30,53 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(parsed[1]["size_vram"], 0)
         self.assertEqual(server.parse_running_models(None), [])
 
+    def test_recommend_num_ctx_scales_with_headroom(self):
+        gib = 1024 ** 3
+        self.assertEqual(server.recommend_num_ctx(16 * gib, 12 * gib), 4096)
+        self.assertEqual(server.recommend_num_ctx(16 * gib, 8 * gib), 8192)
+        self.assertEqual(server.recommend_num_ctx(24 * gib, 10 * gib), 16384)
+        self.assertEqual(server.recommend_num_ctx(48 * gib, 20 * gib), 32768)
+        self.assertEqual(server.recommend_num_ctx(64 * gib, 20 * gib), 65536)
+        self.assertIsNone(server.recommend_num_ctx(0, 10 * gib))
+
+    def test_memory_guard_warns_once_and_pauses_on_sustained_critical(self):
+        now = [0.0]
+        levels = iter(["normal", "warning", "warning", "critical", "normal", "critical", "critical"])
+        guard = server.MemoryGuard(enabled=True, interval=3.0, critical_hits=2,
+                                   sampler=lambda: next(levels), clock=lambda: now[0])
+        self.assertEqual(guard.check(), (None, None))
+        now[0] = 3.0
+        notice, pause = guard.check()
+        self.assertIn("elevated", notice)
+        self.assertIsNone(pause)
+        now[0] = 6.0
+        self.assertEqual(guard.check(), (None, None), "warning notice should only fire once")
+        now[0] = 9.0
+        self.assertEqual(guard.check(), (None, None), "single critical sample should not pause yet")
+        now[0] = 12.0
+        self.assertEqual(guard.check(), (None, None), "normal resets critical streak")
+        now[0] = 15.0
+        self.assertEqual(guard.check(), (None, None), "first critical of new streak")
+        now[0] = 18.0
+        _, pause = guard.check()
+        self.assertIn("paused safely before swapping", pause)
+        self.assertTrue(guard.paused)
+
+    def test_memory_guard_disabled_never_samples(self):
+        called = []
+        guard = server.MemoryGuard(enabled=False, sampler=lambda: called.append(1) or "critical")
+        self.assertEqual(guard.check(), (None, None))
+        self.assertEqual(called, [])
+
+    def test_ensure_loaded_refuses_cold_load_under_critical_pressure(self):
+        from unittest.mock import patch
+        sessions = server.BrowserSessions()
+        with patch.object(server, "current", return_value={"model": "qwen3:27b", "num_ctx": 16384}), \
+             patch.object(server, "load_settings", return_value={"protect_memory": True}), \
+             patch.object(server, "memory_pressure", return_value="critical"):
+            with self.assertRaisesRegex(ValueError, "memory pressure is critical"):
+                sessions.ensure_loaded()
+
 
 if __name__ == "__main__":
     unittest.main()

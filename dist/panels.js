@@ -90,7 +90,7 @@
       close.type = "button";
       close.className = "terminal-tab-close";
       close.setAttribute("aria-label", "Close terminal");
-      close.innerHTML = '<svg class="icon"><use href="#i-x"/></svg>';
+      close.append(window.PipkinUI.icon("x"));
       close.addEventListener("click", () => closeTerminal(term));
       tab.append(label, close);
       return tab;

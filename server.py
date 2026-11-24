@@ -638,11 +638,74 @@ def running_models():
         connection.close()
 
 
+def recommend_num_ctx(total_ram, model_size):
+    """Suggest a safe Ollama context window from unified RAM and model size in bytes."""
+    if not total_ram or not model_size or total_ram <= 0 or model_size <= 0:
+        return None
+    headroom_gb = (total_ram - model_size) / (1024 ** 3)
+    if headroom_gb < 5:
+        return 4096
+    if headroom_gb < 10:
+        return 8192
+    if headroom_gb < 18:
+        return 16384
+    if headroom_gb < 32:
+        return 32768
+    return 65536
+
+
+class MemoryGuard:
+    """Monitors macOS memory pressure during Work runs and pauses cleanly before swapping."""
+
+    def __init__(self, *, enabled=True, interval=3.0, critical_hits=2, sampler=None, clock=None):
+        self.enabled = bool(enabled)
+        self.interval = float(interval)
+        self.critical_hits = int(critical_hits)
+        self.sampler = sampler or memory_pressure
+        self.clock = clock or time.monotonic
+        self.last_check = -self.interval
+        self.level = "normal"
+        self.warned = False
+        self.critical_streak = 0
+        self.paused = False
+
+    def check(self):
+        """Sample pressure if interval elapsed. Returns (notice_or_none, pause_reason_or_none)."""
+        if not self.enabled:
+            return None, None
+        now = self.clock()
+        if now - self.last_check < self.interval:
+            return None, None
+        self.last_check = now
+        level = self.sampler()
+        self.level = level
+        if level == "critical":
+            self.critical_streak += 1
+            if self.critical_streak >= self.critical_hits:
+                self.paused = True
+                return None, ("Mac memory pressure became critical, so Work paused safely before swapping. "
+                              "Close heavy apps or lower the context window, then Resume Work.")
+            if not self.warned:
+                self.warned = True
+                return "Mac memory pressure is critical — Work will pause if pressure stays high.", None
+            return None, None
+        self.critical_streak = 0
+        if level == "warning" and not self.warned:
+            self.warned = True
+            return "Mac memory pressure is elevated. Consider closing heavy apps or lowering the context window.", None
+        return None, None
+
+
 def system_telemetry():
+    loaded = running_models()
+    total_ram = total_memory_bytes()
+    active_size = sum(item.get("size", 0) for item in loaded)
     return {
         "pressure": memory_pressure(),
-        "total_ram": total_memory_bytes(),
-        "loaded": running_models(),
+        "total_ram": total_ram,
+        "loaded": loaded,
+        "recommended_ctx": recommend_num_ctx(total_ram, active_size) if active_size else None,
+        "auto_protect": bool(load_settings().get("protect_memory", True)),
     }
 
 
@@ -1049,6 +1112,9 @@ class BrowserSessions:
         key = (settings["model"], settings["num_ctx"])
         if self.loaded_key == key and self.state == "ready":
             return
+        if load_settings().get("protect_memory", True) and memory_pressure() == "critical":
+            raise ValueError("Mac memory pressure is critical, so Pipkin paused loading the model before swapping. "
+                             "Close heavy apps, lower the context window, or turn off Memory protection in Settings › Model.")
         if self.loaded_key and self.loaded_key != key and not self.unload():
             raise ValueError("Could not unload the previous model.")
         self.loading_since = time.monotonic()
@@ -1150,9 +1216,13 @@ class BrowserSessions:
                 if deadline != self.refresh_at:
                     continue
                 if self.loaded_key and self.state == "ready":
-                    if not set_residency("1m", *self.loaded_key, cancelable=True):
-                        self.state = "error"
-                    self.refresh_at = time.monotonic() + 25
+                    if load_settings().get("protect_memory", True) and memory_pressure() == "critical":
+                        self.unload()
+                        self.refresh_at = time.monotonic() + 15
+                    else:
+                        if not set_residency("1m", *self.loaded_key, cancelable=True):
+                            self.state = "error"
+                        self.refresh_at = time.monotonic() + 25
                 else:
                     status = model_status()
                     self.state = "idle" if status == "ready" else status
@@ -1306,6 +1376,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/model":
             self.select_model()
+            return
+        if self.path == "/api/telemetry/protect":
+            self.set_memory_protection()
             return
         if self.path == "/api/model/unload":
             self.unload_model()
@@ -1783,6 +1856,21 @@ class ChatHandler(BaseHTTPRequestHandler):
             "contextSizes": CONTEXT_SIZES, "capabilities": model_capabilities(settings["model"]),
         })
 
+    def set_memory_protection(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096:
+                raise ValueError()
+            payload = json.loads(self.rfile.read(length))
+            enabled = payload.get("enabled")
+            if not isinstance(enabled, bool):
+                raise ValueError()
+        except (AttributeError, TypeError, ValueError):
+            self.send_json(400, {"error": "Invalid memory protection request."})
+            return
+        update_settings_file(protect_memory=enabled)
+        self.send_json(200, {"ok": True, "auto_protect": enabled})
+
     def select_model(self):
         try:
             payload = self.read_json(2000)
@@ -1971,7 +2059,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             terminal_id = payload.get("terminal")
             has_browser = payload.get("browser", False)
             allow_terminal = payload.get("allowTerminal", True)
-            if terminal_id is not None and not isinstance(terminal_id, str) or not isinstance(has_browser, bool) or not isinstance(allow_terminal, bool):
+            protect_memory = payload.get("protectMemory", True)
+            if (terminal_id is not None and not isinstance(terminal_id, str)
+                    or not isinstance(has_browser, bool)
+                    or not isinstance(allow_terminal, bool)
+                    or not isinstance(protect_memory, bool)):
                 raise ValueError()
             if not isinstance(task, str) or not task.strip() or len(task) > 40_000:
                 raise ValueError()
@@ -2015,6 +2107,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         # The limit counts the agent's own working time; time spent waiting on the user's approval is excluded.
         started_at, waited = time.monotonic(), 0.0
         approval_started = step_started = step_last_packet = None
+        memory_guard = MemoryGuard(enabled=protect_memory)
         run_id = token_urlsafe(12)
         run = {"changed": Condition(), "pending": set(), "decisions": {}, "stop_after_step": Event(),
                "steering": [], "steering_seen": 0, "browser": {}}
@@ -2070,6 +2163,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                         raise ValueError("Workspace access has been cleared.")
             if reason := budget_reason():
                 raise WorkPaused(reason)
+            notice, pause_reason = memory_guard.check()
+            if notice and streaming:
+                try:
+                    send_event("notice", text=notice)
+                except OSError:
+                    pass
+            if pause_reason:
+                raise WorkPaused(pause_reason)
 
         def send_event(event, **fields):
             with write_lock:
@@ -2245,6 +2346,8 @@ class ChatHandler(BaseHTTPRequestHandler):
         except (AgentStopped, BrokenPipeError, ConnectionResetError):
             pass
         except WorkPaused as pause:
+            if memory_guard.paused:
+                SESSIONS.unload()
             files = agent.saved_files if agent is not None else []
             outputs = agent.outputs if agent is not None else []
             if checkpoint and files:

@@ -105,7 +105,7 @@ const PALETTE_IDS = PALETTES.map((p) => p.id);
 
 const defaultSettings = {
   theme: "system", palette: "emerald", enterToSend: true, showStats: true, temperature: 0.7, instructions: "",
-  memoryEnabled: true, permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
+  memoryEnabled: true, protectMemory: true, permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
   sidebarCollapsed: false, sidebarWidth: 268,
 };
 const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
@@ -1531,6 +1531,7 @@ function renderTelemetryBadge() {
     ram.hidden = true;
   }
   pill.dataset.pressure = telemetry.pressure || "unknown";
+  if (typeof renderPressureBanner === "function") renderPressureBanner();
 }
 
 function closeTelemetryPopover(restoreFocus = false) {
@@ -1613,9 +1614,88 @@ function renderTelemetryPopover() {
       el("div", { className: "tel-head" },
         el("span", { className: "tel-kicker", text: "Loaded in Ollama" }),
         el("span", { className: "tel-count", text: loaded.length ? `${loaded.length} active` : "Idle" })),
-      el("div", { className: "tel-models" }, ...modelRows)),
+      el("div", { className: "tel-models" }, ...modelRows),
+      el("div", { className: "tel-guard" },
+        icon("shield"),
+        el("span", { text: settings.protectMemory !== false ? "Auto-protect on · pauses before swap" : "Auto-protect off" }))),
     el("div", { className: "tel-actions" }, unloadBtn, settingsBtn));
   positionTelemetryPopover();
+}
+
+let dismissedPressure = null;
+
+function renderPressureBanner() {
+  const banner = byId("pressure-banner");
+  if (!banner) return;
+  const level = telemetry.pressure;
+  if (level !== "warning" && level !== "critical") {
+    dismissedPressure = null;
+    banner.hidden = true;
+    return;
+  }
+  if (dismissedPressure === level) {
+    banner.hidden = true;
+    return;
+  }
+  banner.dataset.level = level;
+  const loaded = telemetry.loaded || [];
+  const rec = telemetry.recommended_ctx;
+  const canLower = rec && modelInfo.num_ctx > rec && modelInfo.contextSizes.includes(rec);
+  const msg = level === "critical"
+    ? "Mac memory pressure is critical — Work will pause before swapping."
+    : "Mac memory is getting tight. Lowering context or unloading idle models helps.";
+  const actions = [];
+  if (canLower) {
+    const lowerBtn = el("button", { type: "button", className: "button small", text: `Use ${rec / 1024}K` });
+    lowerBtn.addEventListener("click", () => { if (modelInfo.model) void chooseModel(modelInfo.model, rec); });
+    actions.push(lowerBtn);
+  }
+  if (loaded.length || modelLoaded) {
+    const unloadBtn = el("button", { type: "button", className: "button small", text: modelUnloading ? "Unloading…" : "Unload", disabled: modelUnloading });
+    unloadBtn.addEventListener("click", () => void unloadLocalModel());
+    actions.push(unloadBtn);
+  }
+  const dismiss = el("button", { type: "button", className: "icon-button small", title: "Dismiss", "aria-label": "Dismiss memory warning" }, icon("x"));
+  dismiss.addEventListener("click", () => {
+    dismissedPressure = level;
+    banner.hidden = true;
+  });
+  actions.push(dismiss);
+  banner.replaceChildren(
+    el("div", { className: "pressure-banner-copy" }, icon("alert"), el("span", { text: msg })),
+    el("div", { className: "pressure-banner-actions" }, ...actions),
+  );
+  banner.hidden = false;
+}
+
+function renderContextRecommendation(model) {
+  const box = byId("context-recommend");
+  if (!box) return;
+  const totalRam = telemetry.total_ram || 0;
+  const modelSize = model?.size || 0;
+  if (!totalRam || !modelSize) {
+    box.hidden = true;
+    return;
+  }
+  const headroomGb = (totalRam - modelSize) / (1024 ** 3);
+  const rec = headroomGb < 5 ? 4096 : headroomGb < 10 ? 8192 : headroomGb < 18 ? 16384 : headroomGb < 32 ? 32768 : 65536;
+  const over = modelInfo.num_ctx > rec;
+  box.dataset.tone = over ? "warn" : "info";
+  const label = el("span", {
+    text: over
+      ? `${modelInfo.num_ctx / 1024}K may swap on ${formatSize(totalRam)} RAM with this ${formatSize(modelSize)} model — ${rec / 1024}K recommended.`
+      : `Recommended for ${formatSize(totalRam)} RAM + ${formatSize(modelSize)} model: up to ${rec / 1024}K.`,
+  });
+  if (over && modelInfo.contextSizes.includes(rec)) {
+    const applyBtn = el("button", { type: "button", className: "button small", text: `Use ${rec / 1024}K` });
+    applyBtn.addEventListener("click", () => {
+      if (modelInfo.model) void chooseModel(modelInfo.model, rec);
+    });
+    box.replaceChildren(label, applyBtn);
+  } else {
+    box.replaceChildren(label);
+  }
+  box.hidden = false;
 }
 
 function toggleTelemetryPopover() {
@@ -2666,6 +2746,7 @@ function renderModelControls() {
   contextSelect.replaceChildren(...modelInfo.contextSizes.map((size) => new Option(`${size / 1024}K tokens`, String(size))));
   contextSelect.value = String(modelInfo.num_ctx);
   byId("context-size").textContent = `${modelInfo.num_ctx / 1024}K context`;
+  renderContextRecommendation(current);
   const canThink = !modelInfo.capabilities.length || modelInfo.capabilities.includes("thinking");
   thinkToggle.hidden = !canThink;
   if (refreshPasteExcerpts()) updateFiles();
@@ -3187,6 +3268,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
           terminal: window.PipkinPanels?.terminalAllowed?.() ? (window.PipkinPanels?.activeTerminalId() || null) : null,
           allowTerminal: window.PipkinPanels?.terminalAllowed?.() ?? true,
           browser: Boolean(window.PipkinPanels?.browserAllowed?.()),
+          protectMemory: settings.protectMemory !== false,
         }),
         signal: controller.signal,
       });
@@ -3488,6 +3570,9 @@ function openSettings(tabId = "tab-general") {
   settingsDialog.querySelector(`input[name="permission"][value="${settings.permission}"]`).checked = true;
   byId("setting-enter").checked = settings.enterToSend;
   byId("setting-stats").checked = settings.showStats;
+  const protectBox = byId("setting-protect-memory");
+  if (protectBox) protectBox.checked = settings.protectMemory !== false;
+  renderContextRecommendation(modelInfo.models.find((m) => m.name === modelInfo.model));
   byId("setting-temperature").value = settings.temperature;
   byId("temperature-value").textContent = Number(settings.temperature).toFixed(2);
   byId("setting-instructions").value = settings.instructions;
@@ -4186,6 +4271,15 @@ byId("theme-choice").addEventListener("change", (event) => {
   applyTheme(true);
 });
 byId("setting-enter").addEventListener("change", (event) => saveSettings({ enterToSend: event.target.checked }));
+byId("setting-protect-memory")?.addEventListener("change", (event) => {
+  const enabled = event.target.checked;
+  saveSettings({ protectMemory: enabled });
+  fetch("/api/telemetry/protect", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }).catch(() => {});
+  renderTelemetryPopover();
+});
 byId("setting-stats").addEventListener("change", (event) => {
   saveSettings({ showStats: event.target.checked });
   renderConversation();

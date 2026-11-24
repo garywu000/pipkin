@@ -528,15 +528,20 @@ static NSButton *ToolButton(NSString *symbol, NSString *tip, id target, SEL acti
     else [self.webView reload];
 }
 - (void)openExternally:(id)sender {
-    if (self.webView.URL) [[NSWorkspace sharedWorkspace] openURL:self.webView.URL];
+    NSURL *url = self.webView.URL;
+    NSString *scheme = url.scheme.lowercaseString ?: @"";
+    if (url && [@[@"http", @"https"] containsObject:scheme]) {
+        [[NSWorkspace sharedWorkspace] openURL:url];
+    }
 }
 - (void)closePane:(id)sender { if (self.onClose) self.onClose(); }
 
 /// Turns what was typed into a URL: an address if it looks like one, otherwise a Google search.
 - (NSURL *)urlForInput:(NSString *)text {
     NSURLComponents *parts = [NSURLComponents componentsWithString:text];
-    BOOL hasScheme = [@[@"http", @"https"] containsObject:parts.scheme.lowercaseString ?: @""];
-    BOOL looksLikeHost = ![text containsString:@" "] && ([text containsString:@"."] || [text hasPrefix:@"localhost"]);
+    NSString *scheme = parts.scheme.lowercaseString ?: @"";
+    BOOL hasScheme = [@[@"http", @"https"] containsObject:scheme];
+    BOOL looksLikeHost = !scheme.length && ![text containsString:@" "] && ([text containsString:@"."] || [text hasPrefix:@"localhost"]);
     if (hasScheme) return parts.URL;
     if (looksLikeHost) {
         BOOL local = [text hasPrefix:@"localhost"] || [text hasPrefix:@"127.0.0.1"];
@@ -663,8 +668,9 @@ static NSButton *ToolButton(NSString *symbol, NSString *tip, id target, SEL acti
         decisionHandler(WKNavigationActionPolicyAllow);
         return;
     }
-    // mailto:, app links and the like go to macOS.
-    if (action.navigationType == WKNavigationTypeLinkActivated && action.request.URL) {
+    // Only forward safe external link schemes (mailto/tel) to macOS; never file:// or smb://.
+    if (action.navigationType == WKNavigationTypeLinkActivated && action.request.URL &&
+        [@[@"mailto", @"tel"] containsObject:scheme]) {
         [[NSWorkspace sharedWorkspace] openURL:action.request.URL];
     }
     decisionHandler(WKNavigationActionPolicyCancel);

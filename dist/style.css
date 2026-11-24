@@ -769,6 +769,32 @@ body:not([data-sidebar-collapsed]) #history-toggle, body:not([data-sidebar-colla
 .tel-empty { margin: 0; font-size: .8rem; color: var(--muted); line-height: 1.42; }
 .tel-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding-top: 12px; border-top: 1px solid var(--rule); }
 .tel-actions .button { width: 100%; }
+.tel-guard {
+  display: flex; align-items: center; gap: 6px; font-size: .74rem; color: var(--muted);
+  padding-top: 2px;
+}
+.tel-guard .icon { width: 13px; height: 13px; color: var(--accent-text); flex: none; }
+.ctx-rec {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 11px; border-radius: 11px; font-size: .8rem; color: var(--ink-2);
+  background: var(--surface-2); border: 1px solid var(--rule);
+}
+.ctx-rec[data-tone="warn"] {
+  background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 35%, transparent); color: var(--warn);
+}
+.pressure-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 8px; padding: 8px 10px 8px 12px; border-radius: 13px;
+  font-size: .82rem; line-height: 1.35;
+  background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 36%, transparent); color: var(--warn);
+  box-shadow: var(--shadow-sm); animation: popover-in .2s var(--ease-out);
+}
+.pressure-banner[data-level="critical"] {
+  background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 42%, transparent); color: var(--danger);
+}
+.pressure-banner-copy { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pressure-banner-copy .icon { width: 15px; height: 15px; flex: none; }
+.pressure-banner-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; transition: background-color .22s, box-shadow .22s; }
 .model-status[data-state="ready"] {
   border-color: color-mix(in srgb, var(--accent) 30%, var(--rule));
