@@ -7,6 +7,7 @@ import difflib
 from html.parser import HTMLParser
 from html import escape
 from hashlib import sha256
+import http.client
 import ipaddress
 import json
 import os
@@ -513,8 +514,14 @@ class Workspace:
                     raise ValueError("Only regular, unlinked files can be replaced.")
             except FileNotFoundError:
                 pass
-            fd = os.open(parts[-1], WRITE_FLAGS, 0o644, dir_fd=parent)
+            # Open without truncating, then check the opened file itself, so a hard link swapped in
+            # after the check above cannot make Pipkin overwrite a file outside the workspace.
+            fd = os.open(parts[-1], WRITE_FLAGS & ~os.O_TRUNC, 0o644, dir_fd=parent)
             with os.fdopen(fd, "wb") as stream:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_dev != self.identity[0]:
+                    raise ValueError("Only regular, unlinked files can be replaced.")
+                os.ftruncate(fd, 0)
                 stream.write(data)
 
     def file_digest(self, path):
@@ -989,26 +996,80 @@ def source_url(url):
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        check_public_url(newurl)
+        source_url(newurl)  # The pinned connection re-checks the resolved address.
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def check_public_url(url):
-    parsed = source_url(url)
+def public_addresses(host, port):
+    """Resolve host once and return its socket addresses, refusing any non-public answer."""
     try:
-        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as error:
         raise ValueError("That host name could not be resolved.") from error
+    if not infos:
+        raise ValueError("That host name could not be resolved.")
     for info in infos:
         address = ipaddress.ip_address(info[4][0].split("%")[0])
         if not address.is_global or address.is_multicast:
             raise ValueError("Local and private network addresses are blocked.")
+    return infos
+
+
+def check_public_url(url):
+    parsed = source_url(url)
+    public_addresses(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
     return url
 
 
+def _pinned_connect(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, *_args, **_kwargs):
+    """Connect only to addresses validated in the same lookup, so DNS rebinding cannot swap in a private IP."""
+    host, port = address
+    error = None
+    for family, kind, proto, _, sockaddr in public_addresses(host, port):
+        sock = socket.socket(family, kind, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as why:
+            error = why
+            sock.close()
+    raise error or OSError("Could not connect.")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_connect
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_connect
+
+
+def _proxied(req):
+    return req.has_proxy() or bool(getattr(req, "_tunnel_host", None))
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def do_open(self, http_class, req, **kwargs):
+        # A configured proxy resolves the destination itself; only direct connections are pinned.
+        return super().do_open(http_class if _proxied(req) else _PinnedHTTPConnection, req, **kwargs)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def do_open(self, http_class, req, **kwargs):
+        return super().do_open(http_class if _proxied(req) else _PinnedHTTPSConnection, req, **kwargs)
+
+
 def http_get(url, data=None):
-    check_public_url(url)
-    opener = urllib.request.build_opener(_SafeRedirect)
+    source_url(url)
+    opener = urllib.request.build_opener(_PinnedHTTPHandler, _PinnedHTTPSHandler, _SafeRedirect)
     request = urllib.request.Request(url, data=data, headers={
         "User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5",
         "Accept-Language": "en-US,en;q=0.8",
@@ -1247,7 +1308,7 @@ def _sb_escape(path):
 
 
 def seatbelt_profile(workspace_path, tmp_dir):
-    """macOS Seatbelt profile: allow reads, block network, allow writes only in workspace + scoped temp dir."""
+    """macOS Seatbelt profile: allow reads, block network and app launching, allow writes only in workspace + temp dir."""
     ws = os.path.realpath(str(workspace_path))
     td = os.path.realpath(str(tmp_dir))
     return (
@@ -1257,6 +1318,11 @@ def seatbelt_profile(workspace_path, tmp_dir):
         "(deny network-inbound)"
         "(deny file-write*)"
         f'(allow file-write* (subpath "{_sb_escape(ws)}") (subpath "{_sb_escape(td)}") (literal "/dev/null"))'
+        # Launching apps or scripting them would run code outside this sandbox (for example `open -a Terminal x.command`).
+        "(deny appleevent-send)"
+        '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd")'
+        ' (global-name "com.apple.coreservices.quarantine-resolver"))'
+        '(deny process-exec (literal "/usr/bin/open") (literal "/usr/bin/osascript") (literal "/bin/launchctl"))'
     )
 
 

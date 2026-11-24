@@ -2234,7 +2234,8 @@ function addMessage(message, { animate = true } = {}) {
     }
     if (!message.humanized) {
       const now = performance.now();
-      if (now - lastDraftRender < 90 && body.childNodes.length) return;
+      // Each render re-parses the whole reply, so long replies repaint less often to stay O(n) overall.
+      if (now - lastDraftRender < Math.max(90, content.length / 40) && body.childNodes.length) return;
       lastDraftRender = now;
       renderMarkdown(body, content);
       return;
@@ -4581,6 +4582,8 @@ byId("memory-form").addEventListener("submit", (event) => {
 /* ====================================================================== */
 
 const dataStores = ["titles", "projects", "conversations", "chat"];
+const IMPORT_LOCKED_SETTINGS = ["allowShell", "permission", "webMode", "protectMemory", "sidebarCollapsed", "sidebarWidth"];
+const BACKUP_ITERATIONS = 600000;
 
 function storeEntries(database, store) {
   return new Promise((resolve, reject) => {
@@ -4625,7 +4628,7 @@ function base64ToBytes(b64) {
   return out;
 }
 
-async function deriveBackupKey(passphrase, salt, iterations = 310000) {
+async function deriveBackupKey(passphrase, salt, iterations = BACKUP_ITERATIONS) {
   if (!window.crypto?.subtle) throw new Error("Web Crypto encryption is unavailable in this browser context.");
   const raw = new TextEncoder().encode(passphrase);
   const baseKey = await crypto.subtle.importKey("raw", raw, "PBKDF2", false, ["deriveKey"]);
@@ -4641,7 +4644,7 @@ async function deriveBackupKey(passphrase, salt, iterations = 310000) {
 async function encryptBackupPayload(data, passphrase) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const iterations = 310000;
+  const iterations = BACKUP_ITERATIONS;
   const key = await deriveBackupKey(passphrase, salt, iterations);
   const plaintext = new TextEncoder().encode(JSON.stringify(data));
   const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
@@ -4666,7 +4669,8 @@ async function decryptBackupPayload(envelope, passphrase) {
     const salt = base64ToBytes(envelope.salt);
     const iv = base64ToBytes(envelope.iv);
     const ciphertext = base64ToBytes(envelope.ciphertext);
-    const iterations = Math.min(1_000_000, Math.max(100_000, Number(envelope.iterations) || 310000));
+    const iterations = Math.min(2_000_000, Math.max(100_000, Number(envelope.iterations) || 310000));
+    if (salt.length < 16 || iv.length !== 12) throw new Error("Invalid backup envelope.");
     const key = await deriveBackupKey(passphrase, salt, iterations);
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain));
@@ -4711,11 +4715,15 @@ async function importAllData(data, { applySettings = true } = {}) {
   const database = await chatDatabase;
   if (!database) throw new Error("Storage is unavailable.");
   const existing = new Map((await storeEntries(database, "titles")).map(([key, value]) => [key, value]));
+  const existingProjects = new Set((await storeEntries(database, "projects")).map(([key]) => key));
   const incomingTitles = new Map((data.stores.titles || []).map(([key, value]) => [key, value]));
   const newer = (id) => !existing.has(id) || (incomingTitles.get(id)?.updatedAt || 0) > (existing.get(id)?.updatedAt || 0);
   let added = 0;
   const ok = await writeStores(dataStores, (transaction) => {
-    for (const [key, value] of data.stores.projects || []) transaction.objectStore("projects").put(value);
+    // Add projects this device does not have yet; never overwrite a local project with an older copy.
+    for (const [key, value] of data.stores.projects || []) {
+      if (!existingProjects.has(key) && value && typeof value === "object") transaction.objectStore("projects").put(value);
+    }
     for (const [key, value] of data.stores.titles || []) {
       if (!newer(key)) continue;
       transaction.objectStore("titles").put(value);
@@ -4729,9 +4737,15 @@ async function importAllData(data, { applySettings = true } = {}) {
     }
   });
   if (!ok) throw new Error("Could not write the imported chats.");
-  if (applySettings && data.settings && typeof data.settings === "object") saveSettings({
-    ...data.settings, sidebarCollapsed: settings.sidebarCollapsed, sidebarWidth: settings.sidebarWidth,
-  });
+  if (applySettings && data.settings && typeof data.settings === "object" && !Array.isArray(data.settings)) {
+    // Safety settings always stay as this device has them, so a backup file cannot turn on shell access,
+    // automatic edits, web access or skip memory protection.
+    const imported = {};
+    for (const [key, value] of Object.entries(data.settings)) {
+      if (Object.prototype.hasOwnProperty.call(defaultSettings, key) && !IMPORT_LOCKED_SETTINGS.includes(key)) imported[key] = value;
+    }
+    saveSettings(imported);
+  }
   for (const memory of data.memories || []) if (typeof memory === "string" && !memories.includes(memory)) memories.push(memory);
   const existingNames = new Set(customSkills.map(({ name }) => name));
   const importedSkills = Skills.normalize(data.skills).filter(({ name }) => !existingNames.has(name));
@@ -4833,8 +4847,8 @@ async function runBackupExport(targetMode) {
   const errEl = byId("backup-error");
   const showErr = (msg) => { if (errEl) { errEl.textContent = msg; errEl.hidden = !msg; } };
   showErr("");
-  if (pass && pass.length < 4) {
-    showErr("Use a passphrase of at least 4 characters, or leave blank for unencrypted JSON.");
+  if (pass && pass.length < 8) {
+    showErr("Use a passphrase of at least 8 characters, or leave blank for unencrypted JSON.");
     return;
   }
   if (pass && pass !== confirm) {

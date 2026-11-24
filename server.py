@@ -507,10 +507,28 @@ def update_settings_file(**fields):
         saved.update(fields)
         saved = {key: value for key, value in saved.items() if value is not None}
         try:
-            SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            SETTINGS_FILE.write_text(json.dumps(saved, indent=2))
+            write_private_file(SETTINGS_FILE, json.dumps(saved, indent=2).encode())
         except OSError:
             pass
+
+
+def write_private_file(path, data):
+    """Atomically replace path with data, readable only by this user (no half-written settings after a crash)."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix="." + path.name + ".", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if sys.platform != "win32":
+            os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def saved_workspace():
@@ -1669,9 +1687,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": "Send a Pipkin data export."})
             return
         try:
-            TRANSFER_FILE.parent.mkdir(parents=True, exist_ok=True)
-            TRANSFER_FILE.write_bytes(raw)
-            TRANSFER_FILE.chmod(0o600)
+            write_private_file(TRANSFER_FILE, raw)
         except OSError:
             self.send_json(500, {"error": "Could not save the export."})
             return
@@ -1845,7 +1861,16 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ValueError("Handoff file is not a regular file.")
             if not 0 < info.st_size <= HANDOFF_LIMIT:
                 raise ValueError("Handoff snapshot is empty or exceeds the 25 MB limit.")
-            raw = target.read_bytes()
+            with target.open("rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise ValueError("Handoff file changed while it was being read.")
+                raw = stream.read(HANDOFF_LIMIT + 1)
+            if len(raw) > HANDOFF_LIMIT:
+                raise ValueError("Handoff snapshot is empty or exceeds the 25 MB limit.")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("The handoff file is not a Pipkin backup.")
         except FileNotFoundError:
             self.send_json(404, {"error": "No handoff snapshot found in that folder yet."})
             return
@@ -3200,6 +3225,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.launch:
         sys.exit(launch())
+    if sys.platform != "win32":
+        # Undo copies, Work checkpoints and transfers hold file and chat contents: keep them private to this user.
+        try:
+            SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(SETTINGS_FILE.parent, 0o700)
+        except OSError:
+            pass
     with ThreadingHTTPServer((HOST, args.port), ChatHandler) as server:
         Thread(target=SESSIONS.manage_model, args=(server.shutdown,), daemon=True).start()
         try:
