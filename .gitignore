@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .DS_Store
 /build/
+windows/bin/
+windows/obj/
+windows/dist/

@@ -31,6 +31,7 @@ from uuid import UUID
 import xml.etree.ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 import artifacts
+import platform_os
 from agent import (
     FILE_FLAGS, PERMISSION_MODES, SOURCE_GUIDANCE, WEB_TOOLS, Agent, AgentStopped, ApprovalCancelled, Sources,
     UndoConflict, UndoStore, WorkPaused, Workspace, clip, project_notes, system_prompt, validate_path, web_fetch, web_search,
@@ -42,7 +43,7 @@ ORIGIN = f"http://{HOST}:{PORT}"
 # Used until the user picks a model; the README recommends it for 16 GB Macs. A saved choice always wins.
 DEFAULT_MODEL = "qwen3:8b"
 CONTEXT_SIZES = (4096, 8192, 16384, 32768, 65536)
-SETTINGS_FILE = Path.home() / "Library" / "Application Support" / "Pipkin" / "settings.json"
+SETTINGS_FILE = platform_os.app_data_dir() / "settings.json"
 USAGE_FILE = SETTINGS_FILE.with_name("usage.sqlite3")
 SETTINGS_LOCK = Lock()
 TRANSFER_FILE = SETTINGS_FILE.parent / "transfer.json"
@@ -580,6 +581,9 @@ def parse_pressure_level(raw):
 
 
 def memory_pressure():
+    if sys.platform == "win32":
+        win = platform_os.windows_memory_telemetry()
+        return win["pressure"] if win else "unknown"
     try:
         result = subprocess.run(
             ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
@@ -593,6 +597,10 @@ def memory_pressure():
 def total_memory_bytes():
     global _TOTAL_RAM
     if _TOTAL_RAM is not None:
+        return _TOTAL_RAM
+    if sys.platform == "win32":
+        win = platform_os.windows_memory_telemetry()
+        _TOTAL_RAM = win["total_ram"] if win else 0
         return _TOTAL_RAM
     try:
         result = subprocess.run(
@@ -770,9 +778,15 @@ def mac_memory_breakdown(total_ram):
 
 def system_telemetry():
     loaded = running_models()
-    total_ram = total_memory_bytes()
-    pressure = memory_pressure()
-    memory = mac_memory_breakdown(total_ram)
+    if sys.platform == "win32":
+        win = platform_os.windows_memory_telemetry() or {}
+        total_ram = win.get("total_ram", 0)
+        pressure = win.get("pressure", "unknown")
+        memory = win.get("memory")
+    else:
+        total_ram = total_memory_bytes()
+        pressure = memory_pressure()
+        memory = mac_memory_breakdown(total_ram)
     active_size = sum(item.get("size", 0) for item in loaded)
     with _MEMORY_HISTORY_LOCK:
         if memory is not None:
@@ -1246,18 +1260,14 @@ class BrowserSessions:
     def start_ollama(self):
         if self.ollama is not None and self.ollama.poll() is None:
             return
-        candidates = [
-            shutil.which("ollama"),
-            "/opt/homebrew/bin/ollama",
-            "/usr/local/bin/ollama",
-            "/Applications/Ollama.app/Contents/Resources/ollama",
-        ]
-        executable = next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), None)
+        executable = platform_os.find_ollama_executable()
         if executable is not None:
+            extra = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
             self.ollama = subprocess.Popen(
                 [executable, "serve"], stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=dict(os.environ, OLLAMA_FLASH_ATTENTION="1", OLLAMA_KV_CACHE_TYPE="q8_0"),
+                **extra,
             )
 
     def stop_owned_ollama(self):
@@ -1650,23 +1660,28 @@ class ChatHandler(BaseHTTPRequestHandler):
                 current = target.lstat()
                 if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
                     raise ValueError()
-                app = {
-                    ".html": "com.apple.Safari", ".htm": "com.apple.Safari",
-                    ".pdf": "com.apple.Preview", ".png": "com.apple.Preview",
-                    ".jpg": "com.apple.Preview", ".jpeg": "com.apple.Preview",
-                    ".md": "com.apple.TextEdit", ".txt": "com.apple.TextEdit",
-                    ".docx": "com.microsoft.Word", ".pptx": "com.microsoft.Powerpoint",
-                }.get(target.suffix.casefold()) if regular else None
-                # Open known formats in fixed viewers. Reveal every other file or folder in Finder.
-                options = ["-b", app] if app else ["-R"]
-                try:
-                    subprocess.run(["/usr/bin/open", *options, str(target)], check=True, timeout=5,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except subprocess.CalledProcessError:
-                    if target.suffix.casefold() not in {".docx", ".pptx"}:
-                        raise
-                    subprocess.run(["/usr/bin/open", "-R", str(target)], check=True, timeout=5,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if sys.platform == "win32":
+                    safe_win_exts = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".md", ".txt", ".docx", ".pptx"}
+                    can_open = regular and target.suffix.casefold() in safe_win_exts
+                    platform_os.open_file_in_os(target, reveal=not can_open)
+                else:
+                    app = {
+                        ".html": "com.apple.Safari", ".htm": "com.apple.Safari",
+                        ".pdf": "com.apple.Preview", ".png": "com.apple.Preview",
+                        ".jpg": "com.apple.Preview", ".jpeg": "com.apple.Preview",
+                        ".md": "com.apple.TextEdit", ".txt": "com.apple.TextEdit",
+                        ".docx": "com.microsoft.Word", ".pptx": "com.microsoft.Powerpoint",
+                    }.get(target.suffix.casefold()) if regular else None
+                    # Open known formats in fixed viewers. Reveal every other file or folder in Finder.
+                    options = ["-b", app] if app else ["-R"]
+                    try:
+                        subprocess.run(["/usr/bin/open", *options, str(target)], check=True, timeout=5,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except subprocess.CalledProcessError:
+                        if target.suffix.casefold() not in {".docx", ".pptx"}:
+                            raise
+                        subprocess.run(["/usr/bin/open", "-R", str(target)], check=True, timeout=5,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (ValueError, OSError):
             self.send_json(404, {"error": "Could not open this path in the selected folder."})
             return
@@ -2392,16 +2407,15 @@ class ChatHandler(BaseHTTPRequestHandler):
                     return
             watcher = Thread(target=watch_client, daemon=True)
             watcher.start()
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 try:
-                    # Keep the system awake during the run, even if the window is hidden. The PID
-                    # additionally releases the assertion if the owning server exits unexpectedly.
-                    awake = subprocess.Popen(
-                        ["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())],
-                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                except OSError:
-                    emit("notice", text="Pipkin couldn't keep the Mac awake for this run.")
+                    # Keep the system awake during the run, even if the window is hidden.
+                    awake = platform_os.KeepAwake()
+                    awake.start()
+                except (AttributeError, OSError):
+                    awake = None
+                    os_name = "Mac" if sys.platform == "darwin" else "PC"
+                    emit("notice", text=f"Pipkin couldn't keep the {os_name} awake for this run.")
             SESSIONS.ensure_loaded()
             settings = current()
             panels = AgentPanels(run, emit, terminal_id, has_browser, str(workspace.path if workspace else Path.home()),
@@ -2483,12 +2497,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if watcher is not None:
                     watcher.join()
                 if awake is not None:
-                    awake.terminate()
-                    try:
-                        awake.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        awake.kill()
-                        awake.wait()
+                    awake.stop()
             finally:
                 with RUNS_LOCK:
                     RUNS.pop(run_id, None)
@@ -2931,7 +2940,7 @@ def launch():
                 'display alert "Pipkin could not start" message "Port 8765 may already be in use."',
             ], check=False)
             return 1
-    return subprocess.run(["/usr/bin/open", ORIGIN], check=False).returncode
+    return platform_os.open_url_in_os(ORIGIN)
 
 
 if __name__ == "__main__":

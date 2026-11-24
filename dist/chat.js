@@ -67,16 +67,19 @@ const searchInput = byId("chat-search");
 const scrollBottomButton = byId("scroll-bottom");
 const tokenMeter = byId("token-meter");
 
-/* Native macOS shell bridge (present only inside Pipkin.app's own window). */
+/* Native desktop shell bridge (present inside Pipkin.app on macOS or Pipkin.exe WebView2 on Windows). */
 const nativeShell = window.webkit?.messageHandlers?.pipkin || null;
+const windowsShell = window.chrome?.webview || null;
 function notifyShell(message) {
   try {
-    nativeShell?.postMessage(message);
+    if (nativeShell) nativeShell.postMessage(message);
+    else if (windowsShell) windowsShell.postMessage(message);
   } catch {
     // The page also runs in a normal browser, where there is no shell.
   }
 }
 if (nativeShell) document.documentElement.dataset.shell = "mac";
+else if (windowsShell) document.documentElement.dataset.shell = "windows";
 
 const storageKey = "local-model-chat";
 const settingsKey = "pipkin-settings";

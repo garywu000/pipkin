@@ -1,0 +1,39 @@
+name: Build Windows Preview
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify Python syntax and OS adapter tests on Windows
+        run: |
+          python -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py
+          python -m unittest tests/test_platform_os.py
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build Pipkin Windows package
+        shell: pwsh
+        run: ./windows/build-windows.ps1
+
+      - name: Upload Pipkin-windows-x64.zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pipkin-windows-x64
+          path: windows/dist/Pipkin-windows-x64.zip
