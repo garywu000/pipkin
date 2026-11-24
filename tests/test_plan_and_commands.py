@@ -262,3 +262,41 @@ class RepeatedFailureTest(PlanFirstTest):
         self.assertIn("Read brief.md", task_msg)
         self.assertEqual(saved_checkpoint["working_notes"], [{"text": "Budget is $42,000", "file": "brief.md"}])
         self.assertIn("brief.md", saved_checkpoint["read_ledger"])
+
+    def test_shell_opt_in_and_isolated_env_and_scope(self):
+        import os
+        tools_off = {t["function"]["name"] for t in agent.available_tools(self.workspace, "ask", False, False, allow_shell=False)}
+        self.assertNotIn("run_command", tools_off)
+        tools_on = {t["function"]["name"] for t in agent.available_tools(self.workspace, "ask", False, False, allow_shell=True)}
+        self.assertIn("run_command", tools_on)
+
+        old = os.environ.get("GITHUB_TOKEN")
+        os.environ["GITHUB_TOKEN"] = "ghp_secret_test_value"
+        try:
+            env = agent.isolated_env("/tmp/pipkin-test-tmp")
+            self.assertNotIn("GITHUB_TOKEN", env)
+            self.assertEqual(env["HOME"], "/tmp/pipkin-test-tmp")
+            self.assertEqual(env["TMPDIR"], "/tmp/pipkin-test-tmp")
+        finally:
+            if old is None:
+                os.environ.pop("GITHUB_TOKEN", None)
+            else:
+                os.environ["GITHUB_TOKEN"] = old
+
+        scope = agent.describe_command_scope("rm -f notes.md && echo ok", self.workspace)
+        self.assertIn("May modify files", scope)
+        self.assertIn("Isolated to", scope)
+        self.assertIn("notes.md", scope)
+        ro_scope = agent.describe_command_scope("ls -la index.html", self.workspace)
+        self.assertIn("Read-only inspection", ro_scope)
+        self.assertIn("index.html", ro_scope)
+
+    def test_sandbox_blocks_write_outside_workspace(self):
+        import os, sys, tempfile
+        if sys.platform != "darwin" or not os.path.isfile("/usr/bin/sandbox-exec"):
+            self.skipTest("sandbox-exec only on macOS")
+        with tempfile.TemporaryDirectory() as outside:
+            target = os.path.join(outside, "escape.txt")
+            result = agent.run_command(self.workspace, f'touch "{target}"', lambda: None)
+            self.assertFalse(os.path.exists(target), "sandbox must block writes outside workspace")
+            self.assertNotIn("[exit code 0]", result)

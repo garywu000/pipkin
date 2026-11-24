@@ -2059,10 +2059,12 @@ class ChatHandler(BaseHTTPRequestHandler):
             terminal_id = payload.get("terminal")
             has_browser = payload.get("browser", False)
             allow_terminal = payload.get("allowTerminal", True)
+            allow_shell = payload.get("allowShell", False)
             protect_memory = payload.get("protectMemory", True)
             if (terminal_id is not None and not isinstance(terminal_id, str)
                     or not isinstance(has_browser, bool)
                     or not isinstance(allow_terminal, bool)
+                    or not isinstance(allow_shell, bool)
                     or not isinstance(protect_memory, bool)):
                 raise ValueError()
             if not isinstance(task, str) or not task.strip() or len(task) > 40_000:
@@ -2318,10 +2320,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 request_step,
                 emit, check, approve, workspace=workspace, mode=mode, web=web, memory=allow_memory,
                 max_steps=max_steps, num_ctx=settings["num_ctx"], think=think, panels=panels, workflow=workflow,
-                undo=undo_store(self.server.server_port),
+                undo=undo_store(self.server.server_port), allow_shell=allow_shell,
             )
             system = system_prompt(workspace, mode, web, allow_memory, memories, instructions.strip(), context.strip(),
-                                   notes_text, notes_name, panels=panels, workflow=workflow)
+                                   notes_text, notes_name, panels=panels, workflow=workflow, allow_shell=allow_shell)
             if artifact:
                 if workflow != "site" and mode == "read":
                     raise WorkPaused("Choose Ask first or Auto-edit to save a document.")

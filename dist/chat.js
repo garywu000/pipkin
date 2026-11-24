@@ -105,7 +105,7 @@ const PALETTE_IDS = PALETTES.map((p) => p.id);
 
 const defaultSettings = {
   theme: "system", palette: "emerald", enterToSend: true, showStats: true, temperature: 0.7, instructions: "",
-  memoryEnabled: true, protectMemory: true, permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
+  memoryEnabled: true, protectMemory: true, allowShell: false, permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
   sidebarCollapsed: false, sidebarWidth: 268,
 };
 const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
@@ -3267,6 +3267,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
           instructions: settings.instructions.slice(0, 6000), maxSteps: Number(settings.maxSteps) || 24,
           terminal: window.PipkinPanels?.terminalAllowed?.() ? (window.PipkinPanels?.activeTerminalId() || null) : null,
           allowTerminal: window.PipkinPanels?.terminalAllowed?.() ?? true,
+          allowShell: Boolean(settings.allowShell),
           browser: Boolean(window.PipkinPanels?.browserAllowed?.()),
           protectMemory: settings.protectMemory !== false,
         }),
@@ -3572,6 +3573,8 @@ function openSettings(tabId = "tab-general") {
   byId("setting-stats").checked = settings.showStats;
   const protectBox = byId("setting-protect-memory");
   if (protectBox) protectBox.checked = settings.protectMemory !== false;
+  const shellBox = byId("setting-allow-shell");
+  if (shellBox) shellBox.checked = Boolean(settings.allowShell);
   renderContextRecommendation(modelInfo.models.find((m) => m.name === modelInfo.model));
   byId("setting-temperature").value = settings.temperature;
   byId("temperature-value").textContent = Number(settings.temperature).toFixed(2);
@@ -4302,6 +4305,9 @@ byId("setting-steps").addEventListener("change", (event) => saveSettings({ maxSt
 byId("permission-choice").addEventListener("change", (event) => {
   saveSettings({ permission: event.target.value });
   syncAgentControls();
+});
+byId("setting-allow-shell")?.addEventListener("change", (event) => {
+  saveSettings({ allowShell: event.target.checked });
 });
 byId("setting-model").addEventListener("change", (event) => chooseModel(event.target.value, modelInfo.num_ctx));
 byId("setting-context").addEventListener("change", (event) => chooseModel(modelInfo.model, Number(event.target.value)));

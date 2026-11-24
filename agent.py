@@ -19,6 +19,8 @@ import signal
 import socket
 import stat
 import subprocess
+import sys
+import tempfile
 import time
 from unicodedata import normalize
 from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
@@ -1052,59 +1054,124 @@ def long_running(command):
             "To search, use search_text. Choose a command that finishes, or skip this check.")
 
 
-def run_command(workspace, command, check):
-    env = dict(os.environ)
-    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    env.setdefault("TERM", "dumb")
+SAFE_ENV_KEYS = ("LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME")
+WRITE_CMD_RE = re.compile(
+    r"(?:^|[;&|(]\s*)(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|tee|install|dd|truncate|patch)\b|"
+    r"(?:^|[^0-9])>>?(?!=)|sed\s+-[a-zA-Z]*i|git\s+(?:add|commit|reset|checkout|clean|rm|mv|apply|stash)\b|"
+    r"(?:pip3?|npm|pnpm|yarn|brew|cargo)\s+(?:install|uninstall|add|remove|update)\b"
+)
+SCRIPT_CMD_RE = re.compile(r"(?:^|[;&|(]\s*)(?:python3?|node|ruby|perl|swift|sh|bash|zsh)\b")
+
+
+def isolated_env(tmp_dir):
+    """Build a sanitized environment without ambient tokens, SSH sockets, or cloud credentials."""
+    env = {key: os.environ[key] for key in SAFE_ENV_KEYS if key in os.environ}
+    base_path = os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + base_path
+    env["HOME"] = str(tmp_dir)
+    env["TMPDIR"] = str(tmp_dir)
+    env["SHELL"] = "/bin/zsh"
+    env["TERM"] = "dumb"
     env["PAGER"] = "cat"
     env["GIT_PAGER"] = "cat"
-    process = subprocess.Popen(
-        ["/bin/zsh", "-c", command], cwd=str(workspace.path), stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, start_new_session=True,
+    env["NO_COLOR"] = "1"
+    return env
+
+
+def _sb_escape(path):
+    return str(path).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def seatbelt_profile(workspace_path, tmp_dir):
+    """macOS Seatbelt profile: allow reads, block network, allow writes only in workspace + scoped temp dir."""
+    ws = os.path.realpath(str(workspace_path))
+    td = os.path.realpath(str(tmp_dir))
+    return (
+        "(version 1)"
+        "(allow default)"
+        "(deny network-outbound)"
+        "(deny network-inbound)"
+        "(deny file-write*)"
+        f'(allow file-write* (subpath "{_sb_escape(ws)}") (subpath "{_sb_escape(td)}") (literal "/dev/null"))'
     )
-    started = time.monotonic()
-    deadline = started + COMMAND_TIMEOUT
-    last_output = started
-    output = bytearray()
-    try:
-        os.set_blocking(process.stdout.fileno(), False)
-        while True:
-            check()
-            chunk = process.stdout.read(65536)
-            now = time.monotonic()
-            if chunk:
-                last_output = now
-                if len(output) < 400_000:
-                    output.extend(chunk)
-            elif process.poll() is not None:
-                rest = process.stdout.read() or b""
-                output.extend(rest[: max(0, 400_000 - len(output))])
-                break
-            else:
-                time.sleep(0.05)
-            if now > deadline:
-                raise TimeoutError(f"ran for {COMMAND_TIMEOUT}s without finishing")
-            if now - last_output > COMMAND_IDLE:
-                raise TimeoutError(f"printed nothing for {COMMAND_IDLE}s")
-    except TimeoutError as why:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
-        # Tell the model how to recover, so it changes approach instead of rerunning the same command.
-        return (clip(output.decode("utf-8", "replace"), 6000) + f"\n[Stopped: the command {why}. It is probably "
-                "waiting for input, serving, or watching. Do not run it again. Use a command that exits on its own "
-                "(add flags such as -c 1, --no-pager or a timeout), split it into smaller checks, or verify with "
-                "read_file, search_text or check_page instead.]")
-    except BaseException:
+
+
+def describe_command_scope(command, workspace):
+    """Return a plain-English scope summary shown above the command on the approval card."""
+    writes = bool(WRITE_CMD_RE.search(command))
+    runs_script = bool(SCRIPT_CMD_RE.search(command))
+    kind = "May modify files" if writes else ("Runs script (may modify files)" if runs_script else "Read-only inspection")
+    # Extract likely workspace-relative file/folder tokens mentioned in the command.
+    tokens = []
+    for raw in re.findall(r"""(?:"([^"]+)"|'([^']+)'|([^\s;&|<>]+))""", command):
+        tok = (raw[0] or raw[1] or raw[2]).strip()
+        if not tok or tok.startswith("-") or tok in {"&&", "||", "|", ";"}:
+            continue
+        if "/" in tok or "." in tok:
+            if tok not in tokens:
+                tokens.append(tok)
+        if len(tokens) >= 6:
+            break
+    sandbox_note = f"Isolated to {workspace.path.name} · No network · Sanitized env"
+    lines = [f"Scope: {kind} ({sandbox_note})"]
+    if tokens:
+        lines.append("May touch: " + ", ".join(tokens))
+    return "\n".join(lines)
+
+
+def run_command(workspace, command, check):
+    with tempfile.TemporaryDirectory(prefix="pipkin-cmd-") as tmp_dir:
+        env = isolated_env(tmp_dir)
+        argv = ["/bin/zsh", "-c", command]
+        if sys.platform == "darwin" and os.path.isfile("/usr/bin/sandbox-exec"):
+            argv = ["/usr/bin/sandbox-exec", "-p", seatbelt_profile(workspace.path, tmp_dir), *argv]
+        process = subprocess.Popen(
+            argv, cwd=str(workspace.path), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, start_new_session=True,
+        )
+        started = time.monotonic()
+        deadline = started + COMMAND_TIMEOUT
+        last_output = started
+        output = bytearray()
         try:
+            os.set_blocking(process.stdout.fileno(), False)
+            while True:
+                check()
+                chunk = process.stdout.read(65536)
+                now = time.monotonic()
+                if chunk:
+                    last_output = now
+                    if len(output) < 400_000:
+                        output.extend(chunk)
+                elif process.poll() is not None:
+                    rest = process.stdout.read() or b""
+                    output.extend(rest[: max(0, 400_000 - len(output))])
+                    break
+                else:
+                    time.sleep(0.05)
+                if now > deadline:
+                    raise TimeoutError(f"ran for {COMMAND_TIMEOUT}s without finishing")
+                if now - last_output > COMMAND_IDLE:
+                    raise TimeoutError(f"printed nothing for {COMMAND_IDLE}s")
+        except TimeoutError as why:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise
-    finally:
-        process.stdout.close()
-    text = output.decode("utf-8", "replace").rstrip()
-    return clip(text, 6000) + f"\n[exit code {process.returncode}]"
+            process.wait()
+            # Tell the model how to recover, so it changes approach instead of rerunning the same command.
+            return (clip(output.decode("utf-8", "replace"), 6000) + f"\n[Stopped: the command {why}. It is probably "
+                    "waiting for input, serving, or watching. Do not run it again. Use a command that exits on its own "
+                    "(add flags such as -c 1, --no-pager or a timeout), split it into smaller checks, or verify with "
+                    "read_file, search_text or check_page instead.]")
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+        finally:
+            process.stdout.close()
+        text = output.decode("utf-8", "replace").rstrip()
+        return clip(text, 6000) + f"\n[exit code {process.returncode}]"
 
 
 # ---------------------------------------------------------------- tool schemas
@@ -1246,20 +1313,20 @@ class _PageReferences(HTMLParser):
                 self.references.append(value)
 
 
-def available_tools(workspace, mode, web, memory, panels=None, workflow=None):
+def available_tools(workspace, mode, web, memory, panels=None, workflow=None, *, allow_shell=True):
     tools = [PLAN_TOOL, NOTE_TOOL]
     if workspace is not None:
         tools += READ_TOOLS
         if workflow == "site":
             tools += SITE_TOOLS
         if mode != "read":
-            tools += WRITE_TOOLS
+            tools += [t for t in WRITE_TOOLS if allow_shell or t["function"]["name"] != "run_command"]
     if web:
         tools += WEB_TOOLS
     if panels is not None:
         if getattr(panels, "has_terminal", True):
             tools.append(TERMINAL_READ_TOOL)
-            if mode != "read":
+            if mode != "read" and allow_shell:
                 tools.append(TERMINAL_RUN_TOOL)
         if getattr(panels, "has_browser", False):
             tools += BROWSER_TOOLS
@@ -1269,7 +1336,7 @@ def available_tools(workspace, mode, web, memory, panels=None, workflow=None):
 
 
 def system_prompt(workspace, mode, web, memory, memories, instructions, context, notes="", notes_name=None, panels=None,
-                  workflow=None):
+                  workflow=None, *, allow_shell=True):
     today = datetime.date.today().strftime("%A, %B %d, %Y")
     lines = [
         "You are Pipkin, an autonomous assistant running locally on the user's Mac. You work in a loop: plan, call tools, "
@@ -1279,8 +1346,12 @@ def system_prompt(workspace, mode, web, memory, memories, instructions, context,
     if workspace is not None:
         permission = {
             "read": "Read-only: you can list, search and read files only.",
-            "ask": "You can edit files and run commands; the user approves each change or command before it runs.",
-            "auto": "File edits apply automatically; the user approves each shell command before it runs.",
+            "ask": ("You can edit files and run isolated commands; the user approves each change or command before it runs."
+                    if allow_shell else
+                    "You can edit files (the user approves each edit). Shell commands are disabled unless the user enables them in Settings › Agent."),
+            "auto": ("File edits apply automatically; the user approves each isolated shell command before it runs."
+                     if allow_shell else
+                     "File edits apply automatically. Shell commands are disabled unless the user enables them in Settings › Agent."),
         }[mode]
         lines.append(f"Workspace folder: {workspace.path.name} (all paths are relative to it). {permission}")
     else:
@@ -1483,14 +1554,16 @@ def summarize_exchange(dropped):
 
 class Agent:
     def __init__(self, request_model, emit, check, approve, *, workspace=None, mode="ask", web=True,
-                 memory=True, max_steps=24, num_ctx=8192, think=False, panels=None, workflow=None, undo=None):
+                 memory=True, max_steps=24, num_ctx=8192, think=False, panels=None, workflow=None, undo=None,
+                 allow_shell=True):
         self.request_model, self.emit, self.check = request_model, emit, check
         self.panels = panels
         self.workflow = workflow
         self.request_approval = approve
         self.workspace, self.mode, self.web, self.memory = workspace, mode, web, memory
         self.max_steps, self.num_ctx, self.think = max_steps, num_ctx, think
-        self.tools = available_tools(workspace, mode, web, memory, panels, workflow)
+        self.allow_shell = bool(allow_shell)
+        self.tools = available_tools(workspace, mode, web, memory, panels, workflow, allow_shell=self.allow_shell)
         self.tool_names = {tool["function"]["name"] for tool in self.tools}
         self.seen = set()
         self.counter = 0
@@ -1899,6 +1972,8 @@ class Agent:
         if name == "terminal_read":
             return self.panels.terminal_read(as_int(args.get("lines"), 60, 5, 200))
         if name == "terminal_run":
+            if not self.allow_shell:
+                raise ValueError("Shell commands are disabled. The user can opt in under Settings › Agent › Allow shell commands.")
             command = require_str(args, "command", 2000).strip()
             if "\n" in command or "\r" in command:
                 raise ValueError("Send one command line at a time.")
@@ -2018,11 +2093,14 @@ class Agent:
                     result += "\n\nThe static link check could not open the saved page."
             return result
         if name == "run_command":
+            if not self.allow_shell:
+                raise ValueError("Shell commands are disabled. The user can opt in under Settings › Agent › Allow shell commands.")
             command = require_str(args, "command", 2000).strip()
             blocked = builtin_tool_command(command, self.tool_names) or long_running(command)
             if blocked:
                 raise ValueError(blocked)
-            if not self.approve("command", "Run a command in " + workspace.path.name, command):
+            detail = describe_command_scope(command, workspace) + "\n\n$ " + command
+            if not self.approve("command", "Run isolated command in " + workspace.path.name, detail):
                 return "The user declined to run this command. Do not retry it."
             self.begin_effect(describe(name, args))
             return run_command(workspace, command, self.check)
