@@ -271,3 +271,58 @@ class RepeatedCommandFailureTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContinueStoppedRunTest(unittest.TestCase):
+    """A message sent right after a stop continues the stopped run, carrying the message as a steering note."""
+
+    def test_resume_with_a_note_gives_the_note_to_the_model_and_keeps_the_task(self):
+        import run as bench
+        import server
+        seen = []
+        replies = iter([{"tool_calls": [{"function": {"name": "run_command", "arguments": {"command": "echo one"}}}]}])
+
+        def step(_handler, messages, _tools, _think, _check, emit, **options):
+            emit("step")
+            if options.get("output_schema") is not None:
+                return {"content": json.dumps({"route": "agent"})}
+            seen.append(messages)
+            return next(replies, {"content": "Moved on to the next step."})
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ws").mkdir()
+            sessions = server.BrowserSessions()
+            with patch.object(server, "CURRENT", {"model": "replay", "num_ctx": 8192}), \
+                    patch.object(server, "SETTINGS_FILE", root / "settings.json"), \
+                    patch.object(server, "SESSIONS", sessions), patch.object(server, "WORKSPACES", {}), \
+                    patch.object(sessions, "ensure_loaded"), patch.object(server.ChatHandler, "agent_step", step):
+                key = server.grant_workspace(server.Workspace(root / "ws"))
+                checkpoint = str(uuid4())
+                base = {"workspace": key, "mode": "ask", "web": False, "allowMemory": False, "think": False,
+                        "maxSteps": 6, "allowShell": True}
+                with bench.request("/api/agent/run", {**base, "task": "Original task.", "checkpoint": checkpoint},
+                                   timeout=30) as response:
+                    run_id, kinds = None, []
+                    for line in response:
+                        event = json.loads(line)
+                        kinds.append(event["event"])
+                        if event["event"] == "run":
+                            run_id = event["id"]
+                        if event["event"] == "approval":
+                            bench.post("/api/agent/stop", {"run": run_id})
+                    self.assertIn("stopped", kinds)
+                with self.assertRaises(RuntimeError, msg="a note needs a run to continue"):
+                    with bench.request("/api/agent/run", {**base, "task": "x", "checkpoint": str(uuid4()),
+                                                          "steering": "Use the result you have."}):
+                        pass
+                seen.clear()
+                events = []
+                with bench.request("/api/agent/run", {**base, "task": "Use the result you have.", "resume": checkpoint,
+                                                      "steering": "Use the result you have."}, timeout=30) as response:
+                    events = [json.loads(line) for line in response]
+        self.assertIn("steering", [event["event"] for event in events])
+        self.assertIn("result", [event["event"] for event in events])
+        sent = json.dumps(seen[0])
+        self.assertIn("Original task.", sent, "the stopped run's task is kept")
+        self.assertIn("Use the result you have.", sent)

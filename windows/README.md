@@ -15,7 +15,7 @@ The ZIP includes the .NET runtime.
 Check **Task Manager → Performance → GPU → Dedicated GPU memory** for your card’s VRAM. If you use integrated graphics or CPU inference, start with the system RAM column instead. The main README has [model choices and starting settings for Windows and Mac](../README.md#choosing-a-model-for-agent).
 
 ## Running a Built Zip (No Coding Required)
-1. Download [Pipkin v2.1.0 for Windows x64](https://github.com/garywu000/pipkin/releases/download/v2.1.0/Pipkin-windows-x64.zip) and extract the full `Pipkin` folder.
+1. Download [Pipkin v2.1.1 for Windows x64](https://github.com/garywu000/pipkin/releases/download/v2.1.1/Pipkin-windows-x64.zip) and extract the full `Pipkin` folder.
 2. Double-click **`Pipkin.exe`**.
 3. Pipkin starts its local server, opens the app window, and stops the server it started when you close it. First-launch setup lets you choose an appearance, model, and default mode.
 

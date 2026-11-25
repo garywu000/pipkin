@@ -61,6 +61,8 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 
 ## Progress log (newest first; keep at most 8 entries, delete the oldest)
 
+- 2026-11-25: v2.1.1 Agent reliability from a live Qwen 27B (IQ3_XXS) test. `agent.py`: near-repeat command guard (same output with no file change → told to move on, a third near-copy is not run, then the stall pause), `loose_edit` fallback for snippets indented differently per line, a once-per-file refusal of `write_file` rewrites that would delete existing lines, `[S1]` chat source IDs stripped from saved files, `read_file`/`read_files` described as reading PDF and Word text (plus a one-time tip when a command scripts a PDF), `read_files` takes six files and names any it skipped, and bare task filenames ("calc.py") found in subfolders no longer trigger a create-the-file nudge. `dist/chat.js`/`server.py`: a message sent after a stopped run continues it with the message as a steering note; runs the server refused show the real reason and no Resume Work; a busy model is retried for about 12 s. Check a stopped run, then type a correction; check an edit whose old_text indentation is off.
+
 - 2026-11-25: Added an Agent model guide for Mac and Windows with unified memory, dedicated VRAM, and CPU guidance, model examples, context starting points, and benchmark coverage. Check the hardware table from either README.
 
 - 2026-11-25: Updated the GitHub README and Windows guide for v2.1.0 with platform download buttons, first-launch steps, and shareable skills. Check the download buttons and the three-step setup on GitHub.
@@ -75,8 +77,6 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 
 - 2026-11-24: v2.0.6, the first release shipped through one-click updates (the update helper now removes its emptied staging folder). Deliberately not promoted into Pipkin.app: the user is testing Update now from v2.0.5. Check that Settings › General shows v2.0.6 after Restart to update.
 
-- 2026-11-24: v2.0.5 one-click updates. `updater.py` verifies a signed `pipkin-update.json` (pure-Python Ed25519, key in the maintainer's Keychain), downloads and hash-checks the platform zip, extracts it safely, and stages a helper; the Mac/Windows shells run that fixed-path helper on `apply-update`, quit, and the helper swaps the app (with rollback) and reopens it. Banner: Update now → progress → Restart to update. Also a hand cursor on every clickable control. Check Settings › General and, after the next release, Update now on a v2.0.5 install.
 
-- 2026-11-24: v2.0.4 redesign. New token system in `dist/style.css` (warm paper neutrals tinted by the palette via `--tint`, palettes only set accent families), floating main sheet framed by the window chrome, rounded display font, suggestion-card icons, pill mode switch, View Transition theme cross-fade (`applyTheme` in `dist/chat.js`), `solidColor()` so the native title bar gets rgb() even from color-mix colors, MathML sizing, and fixes for the stale scroll-to-bottom button, omnibox double outline, and see-through narrow side panel. README screenshots re-captured in WebKit. Check Light/Dark/System with each palette, the title bar color, Settings, onboarding, and a narrow window.
 
 At the end of every task that changed files, add one line to this log: date, what changed, and what the user should check.

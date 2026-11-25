@@ -29,7 +29,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
-from uuid import UUID
+from uuid import UUID, uuid4
 import xml.etree.ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 import agent as agent_module
@@ -46,7 +46,7 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 RELEASE_REPO = "garywu000/pipkin"
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
 RELEASE_URL_PREFIX = f"https://github.com/{RELEASE_REPO}/releases/"
@@ -2678,6 +2678,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if checkpoint_id is not None or not valid_checkpoint_id(resume_id):
                     raise ValueError()
                 checkpoint_id = resume_id
+            # A message sent right after a stopped run continues it, carrying the message as a steering note.
+            resume_note = payload.get("steering")
+            if resume_note is not None:
+                if resume_id is None or not isinstance(resume_note, str):
+                    raise ValueError()
+                resume_note = resume_note.strip()
+                if not 0 < len(resume_note) <= STEERING_NOTE_LIMIT:
+                    raise ValueError()
             task = payload["task"]
             key = payload.get("workspace")
             context = payload.get("context", "")
@@ -2754,7 +2762,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.send_json(403, {"error": "Choose your workspace folder again.", "code": "workspace_required"})
                 return
         if not GENERATION.acquire(blocking=False):
-            self.send_json(409, {"error": "The model is already working in another tab."})
+            self.send_json(409, {"error": "The model is busy finishing another request. Try again in a moment.",
+                                 "code": "busy"})
             return
 
         # The limit counts the agent's own working time; time spent waiting on the user's approval is excluded.
@@ -2953,6 +2962,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                         web = has_browser = False
                     allow_memory = allow_memory and restored["memory"]
                     run["steering"] = list(restored.get("steering", []))
+                    if resume_note:
+                        notes = run["steering"]
+                        if len(notes) >= 8 or sum(len(note["text"]) for note in notes) + len(resume_note) > STEERING_RUN_LIMIT:
+                            self.send_json(409, {"error": "This run has reached its steering note limit. Start a new chat "
+                                                          "for a fresh task, or use Resume Work without a note."})
+                            return
+                        notes.append({"id": str(uuid4()), "text": resume_note})
+                        checkpoint.save(steering=list(notes))
                 else:
                     if checkpoint.path.exists():
                         self.send_json(409, {"error": "This Work run already has a checkpoint. Use Resume Work."})

@@ -193,6 +193,58 @@ class RepeatedFailureTest(PlanFirstTest):
         tool_msgs = [m["content"] for m in seen[-1] if m["role"] == "tool"]
         self.assertIn("already ran with no workspace changes", tool_msgs[1])
 
+    def test_near_repeat_commands_are_flagged_then_skipped_until_workspace_changes(self):
+        # Seen with Qwen: the same PDF script rerun with one more "#" in its banner each time, same text out.
+        body = "Circuit Workshop. Workshop meets Thursday at 4:00 p.m. Bring a notebook."
+        command = lambda marks: f"python3 -c \"print('{'#' * marks} stream 0'); print('{body}')\""
+        approvals = []
+        replies = iter([
+            {"tool_calls": [tool("run_command", command=command(5))]},
+            {"tool_calls": [tool("run_command", command=command(6))]},
+            {"tool_calls": [tool("run_command", command=command(7))]},
+            {"tool_calls": [tool("write_file", path="summary.md", content="Thursday 4:00 p.m.\n")]},
+            {"tool_calls": [tool("run_command", command=command(8))]},
+            {"content": "Done."},
+        ])
+        seen, notices = [], []
+
+        def model(messages, _tools, _think):
+            seen.append(messages)
+            return next(replies)
+
+        def emit(event, **fields):
+            if event == "notice":
+                notices.append(fields["text"])
+
+        Agent(model, emit, lambda: None, lambda *a: approvals.append(a) or True,
+              workspace=self.workspace, mode="auto", web=False).run("System", [], "Summarize the packet.")
+        tool_msgs = [m["content"] for m in seen[-1] if m["role"] == "tool"]
+        self.assertNotIn("same result", tool_msgs[0])
+        self.assertIn("same result an earlier command already returned", tool_msgs[1])
+        self.assertTrue(tool_msgs[2].startswith("Not run:"), tool_msgs[2])
+        self.assertEqual(len([a for a in approvals if a[0] == "command"]), 3, "the skipped command is never run")
+        self.assertIn(body, tool_msgs[4], "a file change clears the repeat history")
+        self.assertNotIn("same result", tool_msgs[4])
+        self.assertTrue(any("Skipped a command" in text for text in notices))
+
+    def test_different_commands_with_tiny_outputs_are_not_repeats(self):
+        replies = iter([
+            {"tool_calls": [tool("run_command", command="mkdir -p a")]},
+            {"tool_calls": [tool("run_command", command="mkdir -p b")]},
+            {"tool_calls": [tool("run_command", command="mkdir -p c")]},
+            {"content": "Done."},
+        ])
+        seen = []
+
+        def model(messages, _tools, _think):
+            seen.append(messages)
+            return next(replies)
+
+        Agent(model, lambda *_, **__: None, lambda: None, lambda *a: True,
+              workspace=self.workspace, mode="auto", web=False).run("System", [], "Make folders.")
+        tool_msgs = [m["content"] for m in seen[-1] if m["role"] == "tool"]
+        self.assertFalse(any("same result" in text or text.startswith("Not run:") for text in tool_msgs), tool_msgs)
+
     def test_html_write_auto_runs_check_page_in_default_mode(self):
         self.workspace.write_text("notes.md", "# Notes\n")
         replies = iter([

@@ -1933,7 +1933,9 @@ function updateControls() {
   permissionButton.disabled = replying;
   promptBox.readOnly = (replying && !steering) || switchingChat || !historyReady;
   promptBox.maxLength = steering ? 2000 : 40000;
-  promptBox.placeholder = steering ? "Steer this run…" : agent ? "Describe a task for the agent…" : "Message Pipkin";
+  promptBox.placeholder = steering ? "Steer this run…"
+    : agent && !replying && stoppedRunToContinue() ? "Correct the stopped run and continue it…"
+    : agent ? "Describe a task for the agent…" : "Message Pipkin";
   stopButton.hidden = !replying;
   stopAfterStepButton.hidden = !activeAgentRun?.runId || activeAgentRun.state !== "working";
   sendButton.hidden = replying && !steering;
@@ -2786,7 +2788,10 @@ function addMessage(message, { animate = true } = {}) {
         resume.addEventListener("click", () => resumeWork(message.agentRun.checkpointId));
         actions.append(resume);
         view.updateResume = () => {
-          resume.dataset.available = String(["stopped", "error"].includes(message.agentRun.state));
+          // runId is null only when the server never started the run (older saved runs have no runId at all).
+          const started = message.agentRun.runId !== null;
+          resume.dataset.started = String(started);
+          resume.dataset.available = String(started && ["stopped", "error"].includes(message.agentRun.state));
         };
         view.updateResume();
       }
@@ -2845,6 +2850,11 @@ function updateLastActions() {
     const id = article.dataset.checkpointId;
     if (!id) continue;
     const resume = article.querySelector("[data-resume-work]");
+    // A later attempt that never started leaves the checkpoint as it was, so the earlier Resume Work stays.
+    if (resume?.dataset.started === "false") {
+      resume.hidden = true;
+      continue;
+    }
     if (resume) resume.hidden = checkpoints.has(id) || resume.dataset.available !== "true";
     checkpoints.add(id);
   }
@@ -3885,12 +3895,17 @@ async function sendMessage(event) {
     return;
   }
   if (!canRunSkill(skill, text)) return;
+  const continuing = !command && !humanize && !files.length && text.length <= 2000 ? stoppedRunToContinue() : null;
   const proceed = async () => {
     const attachments = files;
     promptBox.value = "";
     autoGrow();
     files = [];
     updateFiles();
+    if (continuing) {
+      await submitTurn(text, [], true, { resume: continuing.checkpointId, steering: text });
+      return;
+    }
     await submitTurn(text, attachments, agentMode.checked, { skill, humanize });
   };
   if (skill?.source === "workspace" && skill.security?.level === "review" && !trustedWorkspaceSkills.has(skillTrustKey(skill))) {
@@ -3911,6 +3926,17 @@ async function sendMessage(event) {
   await proceed();
 }
 
+/* The chat's last reply, when it is a Work run that stopped (or paused) after starting in the current workspace.
+   A message sent now continues that run with the message as a correction instead of starting over without it. */
+function stoppedRunToContinue() {
+  if (!agentMode.checked || !agentWorkspace) return null;
+  const last = history.at(-1);
+  const run = last?.role === "assistant" ? last.agentRun : null;
+  if (!run?.checkpointId || run.runId === null || !["stopped", "error"].includes(run.state)) return null;
+  if (run.workspacePath && agentWorkspace.path && run.workspacePath !== agentWorkspace.path) return null;
+  return run;
+}
+
 async function resumeWork(checkpointId) {
   if (activeReply || switchingChat || changingChats || choosingWorkspace || !historyReady) return;
   if (!modelCanReply()) {
@@ -3922,7 +3948,7 @@ async function resumeWork(checkpointId) {
   await submitTurn("Resume Work", [], true, { resume: checkpointId });
 }
 
-async function submitTurn(text, attachments, useAgent, { resume = null, skill = null, modeOverride = null, humanize = null } = {}) {
+async function submitTurn(text, attachments, useAgent, { resume = null, steering = null, skill = null, modeOverride = null, humanize = null } = {}) {
   // A title request takes a few seconds and holds the model; let it finish so this turn isn't refused as busy.
   if (titleJob) await titleJob.done;
   useAgent = useAgent && !humanize;
@@ -4100,11 +4126,12 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
       const streamAbort = new AbortController();
       if (controller.signal.aborted) streamAbort.abort();
       else controller.signal.addEventListener("abort", () => streamAbort.abort(), { once: true });
-      const response = await fetch("/api/agent/run", {
+      const sendRun = () => fetch("/api/agent/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...(resume ? { resume } : { checkpoint: agentRun.checkpointId }),
+          ...(resume && steering ? { steering } : {}),
           workspace: agentWorkspace?.key || null, task, context: notes, history: agentHistory(),
           mode, web, think: settings.think && !thinkToggle.hidden,
           ...(workflow ? { workflow, artifact: {
@@ -4124,6 +4151,17 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
         }),
         signal: streamAbort.signal,
       });
+      let response = await sendRun();
+      /* Right after a stop, the previous run or the model keep-alive can hold the model for a few seconds.
+         Wait for it instead of failing the new run at once. */
+      for (let attempt = 0; response.status === 409 && attempt < 8; attempt += 1) {
+        const problem = await response.clone().json().catch(() => ({}));
+        if (problem.code !== "busy") break;
+        announce("Waiting for the model to finish the previous step…");
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (streamAbort.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        response = await sendRun();
+      }
       if (response.status === 403) {
         const problem = await response.json().catch(() => ({}));
         if (problem.code === "workspace_required") {
@@ -4353,9 +4391,11 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
     if (agentRun) {
       const stopped = error.name === "AbortError";
       if (agentRun.state === "working") Agent.finish(agentRun, stopped ? "stopped" : "error");
-      answer = agentRun.answer || (agentRun.entries.length
-        ? (stopped ? "_Agent run stopped._" : `**The agent could not finish:** ${error.message || "unknown error"}`)
-        : "");
+      // A run the server refused or that failed before its first event has no checkpoint to resume, so say why.
+      const reason = error.message || "unknown error";
+      answer = agentRun.answer || (stopped
+        ? (agentRun.entries.length ? "_Agent run stopped._" : "")
+        : agentRun.runId ? `**The agent could not finish:** ${reason}` : `**Work didn't start:** ${reason}`);
       if (answer) view.renderReply(answer);
       view.activity?.render();
     } else if (answer.trim() && error.name === "AbortError") {
@@ -4407,7 +4447,8 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
       if (previewTurn?.reply === view.article) showTurnPreview(previewTurn);
     } else if (savedTurn) {
       if (agentRun) {
-        Agent.finish(agentRun, "stopped", "Work stopped. You can resume from the checkpoint.");
+        Agent.finish(agentRun, "stopped", agentRun.runId
+          ? "Work stopped. You can resume from the checkpoint." : "Work stopped before it started.");
         view.updateResume?.();
         view.activity?.render();
       }

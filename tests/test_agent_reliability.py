@@ -113,15 +113,60 @@ class ReliabilityTest(unittest.TestCase):
         ])
         self.assertEqual((self.root / "calc.py").read_text(), "def average(values):\n    return sum(values) / len(values)\n")
 
-    def test_read_files_over_limit_reads_first_four(self):
-        for n in range(6):
+    MEMBERS = ('<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <title>Members</title>\n</head>\n'
+               '<body>\n  <ul>\n    <li>Lena (captain)</li>\n    <li>Marcus (mechanical)</li>\n    <li>Priya (electrical)</li>\n'
+               '  </ul>\n</body>\n</html>\n')
+
+    def test_edit_with_mismatched_indentation_per_line_still_applies(self):
+        # Qwen 27B's two failed attempts in a live run: the snippet's lines were indented unlike the file's.
+        for old, new in [("    <title>Members</title>\n  </head>", "    <title>Members</title>\n    <link rel=\"stylesheet\" href=\"style.css\">\n  </head>"),
+                         ("    <title>Members</title>\n</head>", "    <title>Members</title>\n    <link rel=\"stylesheet\" href=\"style.css\">\n</head>")]:
+            (self.root / "members.html").write_text(self.MEMBERS)
+            self.run_agent([
+                {"tool_calls": [tool("read_file", path="members.html")]},
+                {"tool_calls": [tool("edit_file", path="members.html", old_text=old, new_text=new)]},
+                {"content": "Linked the stylesheet."},
+            ])
+            self.assertEqual((self.root / "members.html").read_text(), self.MEMBERS.replace(
+                "  <title>Members</title>\n", '  <title>Members</title>\n  <link rel="stylesheet" href="style.css">\n'))
+
+    def test_rewrite_that_drops_content_is_refused_once(self):
+        (self.root / "members.html").write_text(self.MEMBERS)
+        rewrite = self.MEMBERS.replace("    <li>Lena (captain)</li>\n    <li>Marcus (mechanical)</li>\n    <li>Priya (electrical)</li>\n", "")
+        _, _, outputs = self.run_agent([
+            {"tool_calls": [tool("read_file", path="members.html")]},
+            {"tool_calls": [tool("write_file", path="members.html", content=rewrite)]},
+            {"content": "Done."},
+        ])
+        self.assertIn("would delete 3 existing lines", outputs[1])
+        self.assertIn("Lena (captain)", outputs[1])
+        self.assertEqual((self.root / "members.html").read_text(), self.MEMBERS)
+        _, _, outputs = self.run_agent([
+            {"tool_calls": [tool("read_file", path="members.html")]},
+            {"tool_calls": [tool("write_file", path="members.html", content=rewrite)]},
+            {"tool_calls": [tool("write_file", path="members.html", content=rewrite)]},
+            {"content": "Removed the list as asked."},
+        ])
+        self.assertEqual((self.root / "members.html").read_text(), rewrite, "a repeated write goes through")
+
+    def test_chat_source_ids_are_not_written_into_files(self):
+        self.run_agent([
+            {"tool_calls": [tool("write_file", path="summary.md", content="Meets Thursday [S7].\n- [ ] Notebook [S7]\n- [ ] Glasses [S6, S7]\n")]},
+            {"content": "Saved summary.md."},
+        ], task="Create summary.md.")
+        self.assertEqual((self.root / "summary.md").read_text(), "Meets Thursday.\n- [ ] Notebook\n- [ ] Glasses\n")
+
+    def test_read_files_over_limit_reads_first_six_and_names_the_rest(self):
+        for n in range(8):
             (self.root / f"f{n}.txt").write_text(f"file {n}")
         _, _, outputs = self.run_agent([
-            {"tool_calls": [tool("read_files", files=[{"path": f"f{n}.txt"} for n in range(6)])]},
+            {"tool_calls": [tool("read_files", files=[{"path": f"f{n}.txt"} for n in range(8)])]},
             {"content": "Read them."},
         ])
-        self.assertIn("first 4 of 6", outputs[0])
-        self.assertIn("file 3", outputs[0])
+        self.assertIn("first 6 of 8", outputs[0])
+        self.assertIn("Not read yet: f6.txt, f7.txt", outputs[0])
+        self.assertIn("file 5", outputs[0])
+        self.assertNotIn("file 6", outputs[0])
 
     def test_empty_search_in_short_file_returns_the_file(self):
         (self.root / "notes.md").write_text("- Glycolysis happens in the cytoplasm.\n")
