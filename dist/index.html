@@ -249,6 +249,16 @@
               <label class="switch"><input id="setting-stats" type="checkbox"><span></span><span class="sr-only">Show response stats</span></label>
             </div>
             <div class="setting">
+              <div>
+                <strong>Check for updates</strong>
+                <p id="update-setting-note">Check GitHub Releases when Pipkin opens so you don't miss security fixes.</p>
+              </div>
+              <div class="update-setting-controls">
+                <button id="check-updates-now" class="button small" type="button">Check now</button>
+                <label class="switch"><input id="setting-check-updates" type="checkbox"><span></span><span class="sr-only">Check for updates</span></label>
+              </div>
+            </div>
+            <div class="setting">
               <div><strong>Welcome setup</strong><p>Replay the first-launch intro and personalization tour.</p></div>
               <button id="replay-welcome" class="button" type="button">Replay</button>
             </div>
@@ -468,6 +478,7 @@
 
     <footer class="composer-area">
       <form id="composer" class="composer">
+        <div id="update-banner" class="update-banner" role="status" hidden></div>
         <div id="live-run-banner" class="live-run-banner" role="status" hidden></div>
         <div id="pressure-banner" class="pressure-banner" role="status" hidden></div>
         <div id="feedback" class="feedback" role="status"></div>

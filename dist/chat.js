@@ -167,7 +167,7 @@ const SHORTCUT_ITEMS = [
 const RESERVED_SHORTCUTS = new Set(["Mod+Q", "Mod+W", "Mod+C", "Mod+V", "Mod+X", "Mod+A", "Mod+Z", "Mod+R"]);
 
 const defaultSettings = {
-  theme: "system", palette: "emerald", enterToSend: true, showStats: true, temperature: 0.7, instructions: "",
+  theme: "system", palette: "emerald", enterToSend: true, showStats: true, checkUpdates: true, temperature: 0.7, instructions: "",
   memoryEnabled: true, protectMemory: true, allowShell: false, exploreModel: "", shortcuts: {},
   permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
   sidebarCollapsed: false, sidebarWidth: 268,
@@ -1877,6 +1877,99 @@ function renderPressureBanner() {
   );
   banner.hidden = false;
 }
+
+/* ---------- GitHub Releases Update Notice ---------- */
+const UPDATE_DISMISS_KEY = "pipkin-dismissed-update";
+let updateInfo = { enabled: settings.checkUpdates !== false, current: "", latest: "", available: false, url: "", checked: false };
+
+function renderUpdateBanner() {
+  const banner = byId("update-banner");
+  if (!banner) return;
+  if (settings.checkUpdates === false || !updateInfo?.available || !updateInfo?.latest) {
+    banner.hidden = true;
+    return;
+  }
+  const dismissed = readLocal(UPDATE_DISMISS_KEY, "");
+  if (dismissed === updateInfo.latest) {
+    banner.hidden = true;
+    return;
+  }
+  const href = typeof updateInfo.url === "string" && updateInfo.url.startsWith("https://github.com/garywu000/pipkin/releases/")
+    ? updateInfo.url
+    : `https://github.com/garywu000/pipkin/releases/tag/v${updateInfo.latest}`;
+  const link = el("a", {
+    className: "button small accent",
+    href,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    text: "View release",
+  });
+  const dismiss = el("button", {
+    type: "button", className: "icon-button small",
+    title: "Dismiss", "aria-label": "Dismiss update notice",
+  }, icon("x"));
+  dismiss.addEventListener("click", () => {
+    writeLocal(UPDATE_DISMISS_KEY, updateInfo.latest);
+    banner.hidden = true;
+  });
+  banner.replaceChildren(
+    el("div", { className: "update-banner-copy" },
+      icon("download"),
+      el("span", { text: `Pipkin v${updateInfo.latest} is available (you're on v${updateInfo.current || ""}).` })),
+    el("div", { className: "update-banner-actions" }, link, dismiss),
+  );
+  banner.hidden = false;
+}
+
+function renderUpdateSettingNote() {
+  const note = byId("update-setting-note");
+  const btn = byId("check-updates-now");
+  if (btn) btn.disabled = settings.checkUpdates === false;
+  if (!note) return;
+  const cur = updateInfo?.current ? `v${updateInfo.current}` : "Current version";
+  if (settings.checkUpdates === false) {
+    note.textContent = `${cur} · Automatic checks off. Pipkin won't contact GitHub Releases.`;
+    return;
+  }
+  if (updateInfo?.available && updateInfo?.latest) {
+    note.textContent = `${cur} · Pipkin v${updateInfo.latest} is available on GitHub Releases.`;
+    return;
+  }
+  if (updateInfo?.checked) {
+    note.textContent = `${cur} · You're up to date.`;
+    return;
+  }
+  note.textContent = "Check GitHub Releases when Pipkin opens so you don't miss security fixes.";
+}
+
+async function checkForUpdates(force = false, announceResult = false) {
+  if (settings.checkUpdates === false) {
+    renderUpdateBanner();
+    renderUpdateSettingNote();
+    return;
+  }
+  const btn = byId("check-updates-now");
+  if (announceResult && btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+  try {
+    const response = await fetch(force ? "/api/update?force=1" : "/api/update");
+    if (!response.ok) return;
+    updateInfo = await response.json();
+    if (force && updateInfo.available) writeLocal(UPDATE_DISMISS_KEY, "");
+    renderUpdateBanner();
+    renderUpdateSettingNote();
+    if (announceResult) {
+      if (updateInfo.available) toast(`Pipkin v${updateInfo.latest} is available`);
+      else if (updateInfo.checked) toast(`Pipkin v${updateInfo.current} is up to date`);
+      else toast("Could not reach GitHub Releases right now");
+    }
+  } catch {
+    if (announceResult) toast("Could not reach GitHub Releases right now");
+  } finally {
+    if (announceResult && btn) { btn.disabled = settings.checkUpdates === false; btn.textContent = "Check now"; }
+  }
+}
+
+setTimeout(() => { if (settings.checkUpdates !== false) void checkForUpdates(false, false); }, 1500);
 
 function renderContextRecommendation(model) {
   const box = byId("context-recommend");
@@ -3821,6 +3914,9 @@ function openSettings(tabId = "tab-general") {
   settingsDialog.querySelector(`input[name="permission"][value="${settings.permission}"]`).checked = true;
   byId("setting-enter").checked = settings.enterToSend;
   byId("setting-stats").checked = settings.showStats;
+  const updateBox = byId("setting-check-updates");
+  if (updateBox) updateBox.checked = settings.checkUpdates !== false;
+  if (typeof renderUpdateSettingNote === "function") renderUpdateSettingNote();
   const protectBox = byId("setting-protect-memory");
   if (protectBox) protectBox.checked = settings.protectMemory !== false;
   const shellBox = byId("setting-allow-shell");
@@ -4539,6 +4635,24 @@ byId("setting-stats").addEventListener("change", (event) => {
   saveSettings({ showStats: event.target.checked });
   renderConversation();
 });
+byId("setting-check-updates")?.addEventListener("change", (event) => {
+  const enabled = event.target.checked;
+  saveSettings({ checkUpdates: enabled });
+  fetch("/api/update/preference", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }).then(() => {
+    if (enabled) void checkForUpdates(false, false);
+    else {
+      updateInfo = { enabled: false, current: updateInfo?.current || "", latest: "", available: false, url: "", checked: false };
+      renderUpdateBanner();
+      renderUpdateSettingNote();
+    }
+  }).catch(() => {});
+  renderUpdateBanner();
+  renderUpdateSettingNote();
+});
+byId("check-updates-now")?.addEventListener("click", () => void checkForUpdates(true, true));
 byId("replay-welcome").addEventListener("click", () => {
   settingsDialog.close();
   window.PipkinOnboarding?.open({ preview: true });
@@ -4582,7 +4696,7 @@ byId("memory-form").addEventListener("submit", (event) => {
 /* ====================================================================== */
 
 const dataStores = ["titles", "projects", "conversations", "chat"];
-const IMPORT_LOCKED_SETTINGS = ["allowShell", "permission", "webMode", "protectMemory", "sidebarCollapsed", "sidebarWidth"];
+const IMPORT_LOCKED_SETTINGS = ["allowShell", "permission", "webMode", "protectMemory", "checkUpdates", "sidebarCollapsed", "sidebarWidth"];
 const BACKUP_ITERATIONS = 600000;
 
 function storeEntries(database, store) {

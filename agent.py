@@ -762,7 +762,7 @@ EXIT_CODE = re.compile(r"\[exit code (\d+)\]\s*$")
 
 
 NEXT_STEP = re.compile(
-    r"\b(?:I will|I'll|I am going to|I'm going to|Let me(?! know)|Let's|Next,? I(?: will|'ll)?|Now,? I(?: will|'ll)?|I need to|I should)"
+    r"\b(?:I will|I'll|I am going to|I'm going to|Let me(?! know)|Let's|Next(?:\s+step\s*:|,?\s+I(?: will|'ll)?)|Now,?\s+I(?: will|'ll)?|I need to|I should)"
     r"\s+(?:now\s+|next\s+|then\s+|first\s+|proceed (?:to|with)\s+|go ahead and\s+)?"
     r"(?:proceed|use|read|run|create|write|edit|check|open|search|update|fix|add|call|look|try|start|make|build|generate|"
     r"verify|test|map|list|extract|save|apply|modify|change|replace|inspect|review|examine|find|attempt)\b",
@@ -791,12 +791,12 @@ def claims_change(text):
 
 
 def announces_next_step(text):
-    """True when a reply's last paragraph promises an action ("I will now run the tests") instead of reporting results."""
+    """True when a reply's ending promises an action ("I will now run the tests" / "Next step: Fix ...") instead of reporting results."""
     paragraphs = [part for part in re.split(r"\n\s*\n", str(text or "").strip()) if part.strip()]
     if not paragraphs:
         return False
-    tail = paragraphs[-1][-500:]
-    if re.search(r"\b(?:if you(?:'d)? (?:like|want|need|prefer)|happy to help|let me know|feel free)\b", tail, re.IGNORECASE):
+    tail = "\n\n".join(paragraphs[-2:])[-500:]
+    if re.search(r"\b(?:if you(?:'d)? (?:like|want|need|prefer)|happy to help|let me know|feel free)\b", paragraphs[-1][-500:], re.IGNORECASE):
         return False
     return bool(NEXT_STEP.search(tail))
 
@@ -2586,6 +2586,14 @@ class Agent:
                 count = before.count(old)
                 if count == 0:
                     old, new, count = reindent_edit(before, old, new)
+                if count == 0 and "\n" not in old and "\\n" in old and "\\n" not in before:
+                    u_old = old.replace("\\n", "\n").replace("\\t", "\t")
+                    u_new = new.replace("\\n", "\n").replace("\\t", "\t")
+                    u_count = before.count(u_old)
+                    if u_count == 0:
+                        u_old, u_new, u_count = reindent_edit(before, u_old, u_new)
+                    if u_count == 1:
+                        old, new, count = u_old, u_new, u_count
                 if count != 1:
                     raise ValueError("old_text was not found exactly once in the file. Copy a unique snippet from the "
                                      "current contents." + self.recovery_view(path) if count == 0
