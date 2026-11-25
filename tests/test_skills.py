@@ -146,6 +146,13 @@ class WorkspaceSkillPackTests(unittest.TestCase):
                     "instructions": "Should never load through symlink.",
                 }), encoding="utf-8")
                 os.symlink(secret, skills_dir / "escaped.pipkin-skill")
+            else:
+                linked = Path(ws_dir) / "linked-skill.pipkin-skill"
+                linked.write_text(skills.serialize_skill({
+                    "name": "linked-skill",
+                    "instructions": "Windows must exclude hard-linked skills.",
+                }), encoding="utf-8")
+                os.link(linked, skills_dir / linked.name)
 
             loaded = skills.load_workspace_skills(workspace)
             names = [s["name"] for s in loaded["skills"]]

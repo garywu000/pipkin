@@ -487,7 +487,9 @@ def load_workspace_skills(workspace: "agent.Workspace", check: Optional[Callable
                         continue
                     if agent._is_reparse_point(st) or not stat.S_ISREG(st.st_mode):
                         continue
-                    if not agent.ordinary_link(st):
+                    # Windows DirEntry.stat() does not report link counts. The
+                    # Windows open path checks the real metadata before reading.
+                    if not workspace._windows and not agent.ordinary_link(st):
                         continue
                     entries.append((entry.name, st.st_size))
             entries.sort(key=lambda pair: pair[0].casefold())
@@ -510,7 +512,8 @@ def load_workspace_skills(workspace: "agent.Workspace", check: Optional[Callable
                         info = workspace._win_check_entry(target)
                         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                             continue
-                        raw = target.read_bytes()[:MAX_SKILL_FILE_BYTES + 1]
+                        with target.open("rb") as stream:
+                            raw = stream.read(MAX_SKILL_FILE_BYTES + 1)
                     else:
                         fd = os.open(filename, agent.FILE_FLAGS, dir_fd=folder)
                         try:
