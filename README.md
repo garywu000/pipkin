@@ -11,6 +11,7 @@ Chat with an Ollama model on your computer, or give Agent a folder and turn your
 <p align="center">
   <a href="https://github.com/garywu000/pipkin/releases/tag/v2.1.0"><strong>v2.1.0 release notes</strong></a> ·
   <a href="#get-started">Get started</a> ·
+  <a href="#choosing-a-model-for-agent">Choose a model</a> ·
   <a href="#shareable-skills">Shareable skills</a> ·
   <a href="#try-site">Try /site</a> ·
   <a href="#build-from-source">Build from source</a>
@@ -27,7 +28,7 @@ Chat with an Ollama model on your computer, or give Agent a folder and turn your
 
 ### 2. Pick a local model
 
-In Pipkin’s first-launch setup, choose your appearance and select an installed **Local Ollama model**. If the list is empty, make sure Ollama is running and download a model in Terminal on Mac or PowerShell on Windows. Try this starter if it fits your computer.
+In Pipkin’s first-launch setup, choose your appearance and select an installed **Local Ollama model**. If the list is empty, make sure Ollama is running and download a model in Terminal on Mac or PowerShell on Windows. Start with `qwen3:8b` on a 16 GB Mac, or use `qwen3:4b-instruct` on an 8 GB Mac. See the [model guide](#choosing-a-model-for-agent) for larger models and memory settings.
 
 ~~~sh
 ollama pull qwen3:8b
@@ -46,6 +47,25 @@ Pipkin starts its local server automatically and loads your model when you send 
 > Already using Pipkin? Open **Settings → General → Check for updates**. When the update appears, choose **Update now**, then **Restart to update**.
 
 ![Pipkin’s first-launch Choose your look screen with three appearance options and five color palettes](docs/screenshots/customize.png)
+
+## Choosing a model for Agent
+
+Agent works with local Ollama models that support **tool calling**. That is how the model asks Pipkin to read a file, apply an edit, or run a check. An 8 GB M1 or M2 Mac can try Agent with a small model and a short task. On a 64 GB Mac, the same Agent can use a larger model. Check the exact Ollama tag for the **tools** capability. [Ollama tool calling](https://docs.ollama.com/capabilities/tool-calling)
+
+| Mac unified memory | Models to try | Starting context and tasks |
+| --- | --- | --- |
+| **8 GB** | [`qwen3:4b-instruct`](https://ollama.com/library/qwen3:4b-instruct) (about 2.5 GB download). If memory is tight, try [`qwen3:1.7b`](https://ollama.com/library/qwen3:1.7b) (about 1.4 GB) for very simple tasks. | **4K**, one model. Start with one short source file and one clearly named output, such as turning `notes.md` into `checklist.md`. |
+| **16–24 GB** | [`qwen3:8b`](https://ollama.com/library/qwen3:8b) (about 5.2 GB) is the everyday starting point. With more headroom, try [`gemma4:12b`](https://ollama.com/library/gemma4:12b) as a Gemma option. | **8K**. Try a small webpage from a brief, a focused edit with a check, or a short document built from a few sources. |
+| **32 GB** | [`qwen3.6:27b`](https://ollama.com/library/qwen3.6:27b) is an option when you have room for its weights and context. Keep an 8B model handy for quick tasks. | Start at **8K** and try **16K** if memory allows. Try a multi-file change or a longer document, with a concrete check for each part. |
+| **64 GB or more** | Try [`qwen3.6:35b`](https://ollama.com/library/qwen3.6:35b) or [`gemma4:31b`](https://ollama.com/library/gemma4:31b) for more involved work. | Start at **16K**. Try **32K** when the task needs more source material and memory pressure stays normal. Split large projects into milestones you can verify. |
+
+**Using Gemma on a smaller Mac?** Standard `gemma3:4b` is a Chat option. For Agent, `gemma4:e2b-it-q4_K_M` supports tool calling. Its 4.6 GB download leaves less headroom on an 8 GB Mac, so start with the lighter Qwen model at that tier. [Gemma 3 4B](https://ollama.com/library/gemma3:4b) · [Gemma 4 E2B](https://ollama.com/library/gemma4:e2b-it-q4_K_M)
+
+These are starting points. Pipkin’s live benchmarks include a successful Qwen 8B stop-and-resume run at 8K and a successful two-page PDF-to-site run with a quantized Qwen 27B at 16K on a 24 GiB Mac. The other model and memory combinations are suggestions based on Ollama’s published capabilities and sizes. Use an Ollama version that supports the model and your OS. [Pipkin live benchmarks](benchmarks/README.md#initial-live-baseline) · [Ollama macOS requirements](https://docs.ollama.com/macos)
+
+- **Budget for the whole run.** Download size covers the model package. The running model also needs memory for its context, and macOS and your other apps share that pool. On a Windows PC with a discrete GPU, check GPU VRAM as well as system RAM. CPU offload can make a model run more slowly. [Ollama context length](https://docs.ollama.com/context-length) · [Ollama hardware support](https://docs.ollama.com/gpu)
+- **Tune for responsiveness.** Use **Settings → Model → Context window** and leave **Explorer model** off at first. Pipkin offers 4K to 64K. The model card’s maximum context describes what the model can accept, given enough memory. Keep memory protection enabled. If the system slows down or the memory graph shows sustained pressure, try a shorter context or a smaller model.
+- **Match the task to the model.** Small models can miss instructions or repeat tool calls on longer tasks. Larger models can also make mistakes or hit Pipkin’s run limits. Start with a real pass condition, such as “Save `checklist.md` with three bullets from `notes.md`.” Use **Ask first**, then open the saved file and check it before giving Agent a bigger task.
 
 ## Shareable skills
 

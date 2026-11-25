@@ -61,6 +61,8 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 
 ## Progress log (newest first; keep at most 8 entries, delete the oldest)
 
+- 2026-11-25: Added a README guide for choosing an Agent model from 8 GB to 64 GB Macs, including Ollama tool support, starting contexts, Windows GPU memory, and live benchmark evidence. Check the model guide from the GitHub homepage.
+
 - 2026-11-25: Updated the GitHub README and Windows guide for v2.1.0 with platform download buttons, first-launch steps, and shareable skills. Check the download buttons and the three-step setup on GitHub.
 
 - 2026-11-25: Fixed Windows workspace skill discovery for v2.1.0. Directory entries on Windows do not report link counts, so the loader now checks real file metadata before reading and still rejects hard links. Check that folder skills appear in `/skills` on Windows.
@@ -76,7 +78,5 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 - 2026-11-24: v2.0.5 one-click updates. `updater.py` verifies a signed `pipkin-update.json` (pure-Python Ed25519, key in the maintainer's Keychain), downloads and hash-checks the platform zip, extracts it safely, and stages a helper; the Mac/Windows shells run that fixed-path helper on `apply-update`, quit, and the helper swaps the app (with rollback) and reopens it. Banner: Update now → progress → Restart to update. Also a hand cursor on every clickable control. Check Settings › General and, after the next release, Update now on a v2.0.5 install.
 
 - 2026-11-24: v2.0.4 redesign. New token system in `dist/style.css` (warm paper neutrals tinted by the palette via `--tint`, palettes only set accent families), floating main sheet framed by the window chrome, rounded display font, suggestion-card icons, pill mode switch, View Transition theme cross-fade (`applyTheme` in `dist/chat.js`), `solidColor()` so the native title bar gets rgb() even from color-mix colors, MathML sizing, and fixes for the stale scroll-to-bottom button, omnibox double outline, and see-through narrow side panel. README screenshots re-captured in WebKit. Check Light/Dark/System with each palette, the title bar color, Settings, onboarding, and a narrow window.
-
-- 2026-11-24: v2.0.3 pre-v2.1 hygiene: connected pipkin-dev directly to GitHub origin/main (matching garywu000 commit identity), added privacy-safe GitHub Releases update check (`GET /api/update`, `POST /api/update/preference`) with dismissible update banner + Settings › General toggle & Check now button, and re-ran live `benchmarks/sim.py` checks. Check Settings › General › Check for updates and `git status -sb`.
 
 At the end of every task that changed files, add one line to this log: date, what changed, and what the user should check.
