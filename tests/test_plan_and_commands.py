@@ -227,6 +227,22 @@ class RepeatedFailureTest(PlanFirstTest):
         self.assertNotIn("same result", tool_msgs[4])
         self.assertTrue(any("Skipped a command" in text for text in notices))
 
+    def test_commands_that_change_files_are_not_repeats_even_with_the_same_output(self):
+        banner = "Saving the generated report into the workspace folder now."
+        replies = iter([{"tool_calls": [tool("run_command", command=f"echo {banner}; echo {n} > out{n}.txt")]} for n in range(3)]
+                       + [{"content": "Done."}])
+        seen = []
+
+        def model(messages, _tools, _think):
+            seen.append(messages)
+            return next(replies)
+
+        Agent(model, lambda *_, **__: None, lambda: None, lambda *a: True,
+              workspace=self.workspace, mode="auto", web=False).run("System", [], "Write three files.")
+        tool_msgs = [m["content"] for m in seen[-1] if m["role"] == "tool"]
+        self.assertFalse(any("same result" in text or text.startswith("Not run:") for text in tool_msgs), tool_msgs)
+        self.assertEqual(sorted(p.name for p in self.path.glob("out*.txt")), ["out0.txt", "out1.txt", "out2.txt"])
+
     def test_different_commands_with_tiny_outputs_are_not_repeats(self):
         replies = iter([
             {"tool_calls": [tool("run_command", command="mkdir -p a")]},

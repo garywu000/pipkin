@@ -859,6 +859,29 @@ def missing_task_files(task, workspace):
     return missing[:4]
 
 
+def workspace_fingerprint(root, limit=5000):
+    """A cheap digest of the workspace's file names, sizes and modified times, to tell whether a command changed it."""
+    digest = sha256()
+    skip = {"node_modules", "__pycache__", "venv", ".venv"}
+    seen = 0
+    try:
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = sorted(name for name in dirs if not name.startswith(".") and name not in skip)
+            digest.update(folder.encode("utf-8", "replace") + b"\0" + "\0".join(sorted(dirs)).encode("utf-8", "replace"))
+            for name in sorted(files):
+                try:
+                    info = os.stat(os.path.join(folder, name), follow_symlinks=False)
+                except OSError:
+                    continue
+                digest.update(f"{name}\0{info.st_size}\0{info.st_mtime_ns}\n".encode("utf-8", "replace"))
+                seen += 1
+            if seen >= limit:
+                break
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def workspace_file_names(root, limit=5000):
     """Lowercased names of files anywhere in the workspace, skipping hidden and dependency folders."""
     names = set()
@@ -3118,15 +3141,25 @@ class Agent:
                     elif name in WORKSPACE_READS and self.visible(messages, key):
                         output = "This exact call's result is already above in this conversation. Use it instead of calling again."
                     else:
+                        before_state = (workspace_fingerprint(self.workspace.path)
+                                        if name == "run_command" and self.workspace is not None else None)
                         output = self.execute(name, args)
+                        if before_state is not None and workspace_fingerprint(self.workspace.path) != before_state:
+                            # The command changed files, so earlier results (and exact repeats) may be stale now.
+                            self.command_results.clear()
+                            self.ran_commands.clear()
+                            self.failed_commands.clear()
+                            before_state = "changed"
                         if name in WRITE_TOOL_NAMES:
                             self.seen.add(key)
                         elif name == "run_command" and not output.startswith("The user declined"):
                             if command_failed(output):
                                 self.failed_commands.add(key)
                             else:
-                                self.ran_commands.add(key)
-                                if isinstance(args, dict) and self.record_command(str(args.get("command", "")), output):
+                                if before_state != "changed":
+                                    self.ran_commands.add(key)
+                                if (isinstance(args, dict) and before_state != "changed"
+                                        and self.record_command(str(args.get("command", "")), output)):
                                     repeated_result = True
                                     output += ("\n\n(This is the same result an earlier command already returned, with no "
                                                "file changes since, so it adds nothing new. Use the result you have and move "
