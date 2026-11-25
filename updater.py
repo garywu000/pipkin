@@ -226,7 +226,7 @@ def install_blocker(root, platform_name=None):
         return "One-click updates are available in the Mac and Windows apps."
     if root is None:
         return "This copy of Pipkin runs from source, so update it with git."
-    if "/AppTranslocation/" in str(root):
+    if "/AppTranslocation/" in Path(root).as_posix():
         return "Move Pipkin to your Applications folder, then reopen it to enable one-click updates."
     if not (os.access(root, os.W_OK) and os.access(root.parent, os.W_OK)):
         return f"Pipkin can't write to {root.parent}, so download the new version from GitHub instead."
