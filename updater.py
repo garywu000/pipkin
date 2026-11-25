@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import plistlib
 import re
 import shlex
@@ -190,7 +191,7 @@ def verify_manifest(raw, public_hex=None):
 def asset_key(platform_name=None, machine=None):
     plat = platform_name or sys.platform
     if plat == "darwin":
-        arch = machine or os.uname().machine
+        arch = machine or platform.machine()
         return "macos-arm64" if arch == "arm64" else "macos-x86_64"
     if plat == "win32":
         return "windows-x64"
