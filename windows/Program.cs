@@ -61,7 +61,7 @@ internal sealed class MainWindow : Form
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
         bool dark = IsWindowsDarkMode();
-        BackColor = dark ? Color.FromArgb(14, 19, 17) : Color.FromArgb(245, 247, 246);
+        BackColor = dark ? Color.FromArgb(16, 24, 21) : Color.FromArgb(225, 230, 223);
         ForeColor = dark ? Color.FromArgb(230, 236, 233) : Color.FromArgb(24, 32, 28);
 
         _statusLabel = new Label

@@ -138,11 +138,11 @@ const narrow = window.matchMedia("(max-width: 860px)");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const PALETTES = [
-  { id: "emerald", name: "Emerald", note: "Forest & mist", a: "#0d8a5e", b: "#38d9d9", bg: "#edf3f1" },
-  { id: "ocean", name: "Ocean", note: "Slate & cobalt", a: "#1d68b8", b: "#38bdf8", bg: "#edf2f7" },
-  { id: "amber", name: "Amber", note: "Sand & gold", a: "#b86318", b: "#f0a34b", bg: "#f5f1ea" },
-  { id: "rose", name: "Rose", note: "Blossom & plum", a: "#b83b68", b: "#c084fc", bg: "#f6eff2" },
-  { id: "graphite", name: "Graphite", note: "Calm mono", a: "#374151", b: "#94a3b8", bg: "#f2f3f5" },
+  { id: "emerald", name: "Emerald", note: "Forest & paper", a: "#128a5f", b: "#3cc9bd", bg: "#f6f8f4" },
+  { id: "ocean", name: "Ocean", note: "Slate & cobalt", a: "#2463c9", b: "#4cc3f5", bg: "#f5f7fa" },
+  { id: "amber", name: "Amber", note: "Clay & honey", a: "#b9601a", b: "#f0a55a", bg: "#faf5ee" },
+  { id: "rose", name: "Rose", note: "Blossom & plum", a: "#bd3d6b", b: "#c79bf7", bg: "#faf3f5" },
+  { id: "graphite", name: "Graphite", note: "Calm mono", a: "#39404d", b: "#9aa5b4", bg: "#f4f5f6" },
 ];
 const PALETTE_IDS = PALETTES.map((p) => p.id);
 
@@ -286,8 +286,34 @@ function syncPaletteChoice() {
   }
 }
 
+/* Window chrome colors may come back as color(srgb …) from color-mix(); the shells only parse rgb(). */
+function solidColor(value) {
+  try {
+    const canvas = solidColor.canvas || (solidColor.canvas = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }));
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.clearRect(0, 0, 1, 1);
+    ctx.fillStyle = value;
+    ctx.fillRect(0, 0, 1, 1);
+    const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+    return `rgb(${r}, ${g}, ${b})`;
+  } catch {
+    return value;
+  }
+}
+
 function applyTheme(animate = false) {
   if (animate && !reducedMotion.matches) {
+    /* A single cross-fade snapshot is far cheaper than transitioning every element's colors. */
+    if (document.startViewTransition && !applyTheme.transitioning) {
+      applyTheme.transitioning = true;
+      document.documentElement.classList.add("theme-swap");
+      const swap = document.startViewTransition(() => applyTheme(false));
+      swap.finished.finally(() => {
+        applyTheme.transitioning = false;
+        document.documentElement.classList.remove("theme-swap");
+      });
+      return;
+    }
     document.documentElement.classList.add("theme-transition");
     clearTimeout(themeTransitionTimer);
     themeTransitionTimer = setTimeout(() => document.documentElement.classList.remove("theme-transition"), 460);
@@ -300,7 +326,7 @@ function applyTheme(animate = false) {
   syncPaletteChoice();
   requestAnimationFrame(() => notifyShell({
     type: "theme",
-    background: getComputedStyle(document.body).backgroundColor,
+    background: solidColor(getComputedStyle(document.body).backgroundColor),
     scheme: settings.theme,
   }));
 }
@@ -1096,23 +1122,25 @@ function toggleSidebar() {
 
 const suggestions = {
   chat: [
-    ["Explain a concept", "simply, with an analogy", "Explain how large language models use attention, with a simple analogy and a small example."],
-    ["Write code", "a practical script", "Write a Python script that renames the photos in a folder by the date they were taken. Explain how to run it."],
-    ["Humanize a draft", "a message, email, or short draft", "/humanize "],
-    ["Plan something", "step by step", "Make a 4-week plan to learn the basics of SQL, with one small project per week."],
+    ["Explain a concept", "simply, with an analogy", "bulb", "Explain how large language models use attention, with a simple analogy and a small example."],
+    ["Write code", "a practical script", "terminal", "Write a Python script that renames the photos in a folder by the date they were taken. Explain how to run it."],
+    ["Humanize a draft", "a message, email, or short draft", "edit", "/humanize "],
+    ["Plan something", "step by step", "list", "Make a 4-week plan to learn the basics of SQL, with one small project per week."],
   ],
   work: [
-    ["Map this project", "structure and entry points", "Give me an overview of this project: its structure, main entry points, how to run it, and anything that looks unfinished."],
-    ["Find and fix a bug", "investigate, then propose a fix", "Look for the most likely bug in this project, explain it with file:line references, and fix it."],
-    ["Research the web", "search and summarize sources", "Search the web for the latest Ollama release notes and summarize the most important new features with links."],
-    ["Write tests", "for an untested module", "Find a module without tests, write focused unit tests for it, and run them."],
+    ["Map this project", "structure and entry points", "folder", "Give me an overview of this project: its structure, main entry points, how to run it, and anything that looks unfinished."],
+    ["Find and fix a bug", "investigate, then propose a fix", "search", "Look for the most likely bug in this project, explain it with file:line references, and fix it."],
+    ["Research the web", "search and summarize sources", "globe", "Search the web for the latest Ollama release notes and summarize the most important new features with links."],
+    ["Write tests", "for an untested module", "check", "Find a module without tests, write focused unit tests for it, and run them."],
   ],
 };
 
 function renderSuggestions() {
   const mode = agentMode.checked ? "work" : "chat";
-  byId("suggestions").replaceChildren(...suggestions[mode].map(([title, sub, prompt]) => {
-    const button = el("button", { type: "button", className: "suggestion" }, el("strong", { text: title }), el("span", { text: sub }));
+  byId("suggestions").replaceChildren(...suggestions[mode].map(([title, sub, glyph, prompt]) => {
+    const button = el("button", { type: "button", className: "suggestion" },
+      el("i", { className: "suggestion-icon", "aria-hidden": "true" }, icon(glyph)),
+      el("strong", { text: title }), el("span", { text: sub }));
     button.addEventListener("click", () => {
       promptBox.value = prompt;
       autoGrow();
@@ -1376,6 +1404,7 @@ function renderConversation() {
   }
   syncTurns();
   scrollToLatest();
+  scrollBottomButton.hidden = true;
   updateTokenMeter();
 }
 

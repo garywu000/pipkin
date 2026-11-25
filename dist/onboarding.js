@@ -135,8 +135,8 @@
     const P = plat();
     const modeGrid = el("div", { className: "ob-theme-grid" },
       themePreviewCard("system", "System", `Matches ${P.osName}`),
-      themePreviewCard("light", "Light", "Luminous porcelain"),
-      themePreviewCard("dark", "Dark", "Obsidian glass"));
+      themePreviewCard("light", "Light", "Warm paper"),
+      themePreviewCard("dark", "Dark", "Soft night"));
     const palettes = host.getPalettes?.() || [];
     const paletteGrid = el("div", { className: "ob-palette-grid" }, ...palettes.map(paletteCard));
     const body = el("div", { className: "ob-stack" },

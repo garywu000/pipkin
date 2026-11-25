@@ -81,8 +81,8 @@ static NSColor *ParseCSSColor(NSString *css) {
 static NSColor *DefaultBackground(void) {
     return [NSColor colorWithName:nil dynamicProvider:^NSColor *(NSAppearance *appearance) {
         BOOL dark = [[appearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqual:NSAppearanceNameDarkAqua];
-        return dark ? [NSColor colorWithSRGBRed:0x0c / 255.0 green:0x0f / 255.0 blue:0x0e / 255.0 alpha:1]
-                    : [NSColor colorWithSRGBRed:0xed / 255.0 green:0xf3 / 255.0 blue:0xf1 / 255.0 alpha:1];
+        return dark ? [NSColor colorWithSRGBRed:0x10 / 255.0 green:0x18 / 255.0 blue:0x15 / 255.0 alpha:1]
+                    : [NSColor colorWithSRGBRed:0xe1 / 255.0 green:0xe6 / 255.0 blue:0xdf / 255.0 alpha:1];
     }];
 }
 

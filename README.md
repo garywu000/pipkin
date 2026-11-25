@@ -5,7 +5,7 @@
 <p align="center"><strong>Local AI chat and a workspace agent for macOS and Windows.</strong><br>
 Turn your own files into finished work with a model that runs on your machine.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.0.2"><strong>Download v2.0.2</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.0.4"><strong>Download v2.0.4</strong></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#chat-and-projects">Features</a> ·
   <a href="#try-site">Try /site</a> ·
@@ -21,13 +21,13 @@ Pipkin is a desktop app for [Ollama](https://ollama.com) on macOS and Windows. U
 
 ### macOS
 
-1. Download [Pipkin for Apple silicon](https://github.com/garywu000/pipkin/releases/download/v2.0.2/Pipkin-macos-arm64.zip), unzip it, and open **Pipkin.app**. This preview is ad-hoc signed. If macOS blocks the download, use the [source build](#build-from-source).
+1. Download [Pipkin for Apple silicon](https://github.com/garywu000/pipkin/releases/download/v2.0.4/Pipkin-macos-arm64.zip), unzip it, and open **Pipkin.app**. This preview is ad-hoc signed. If macOS blocks the download, use the [source build](#build-from-source).
 2. Install [Ollama for macOS](https://ollama.com/download/mac) and download a local model. First-run setup has an Ollama guide if no model is installed.
 
 ### Windows
 
 1. On an x64 PC running Windows 11 or Windows 10 22H2, install [Ollama for Windows](https://ollama.com/download/windows) and [Python 3.9 or later](https://www.python.org/downloads/windows/) with **Add Python to PATH**. Install the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if it is missing (pre-installed on Windows 11). The Windows ZIP is self-contained — no separate .NET install is required.
-2. Download [Pipkin for Windows x64](https://github.com/garywu000/pipkin/releases/download/v2.0.2/Pipkin-windows-x64.zip), extract the full **Pipkin** folder, and double-click **Pipkin.exe**. Pipkin manages its own local server, so opening a terminal is only needed for tasks such as downloading a model.
+2. Download [Pipkin for Windows x64](https://github.com/garywu000/pipkin/releases/download/v2.0.4/Pipkin-windows-x64.zip), extract the full **Pipkin** folder, and double-click **Pipkin.exe**. Pipkin manages its own local server, so opening a terminal is only needed for tasks such as downloading a model.
 
 See the [Windows guide](windows/README.md) for details. The [Windows build and test run](https://github.com/garywu000/pipkin/actions/runs/45325460976) produced the ZIP attached to v1.9.0.
 
@@ -115,6 +115,7 @@ Use `/study-guide` or `/checklist` for navigable HTML with a contents list and a
 ## Privacy and permissions
 
 - Local model inference, chat history, settings, and token totals stay on your computer. Web search, page fetches, and the browser contact the sites involved.
+- **Update check.** When Pipkin opens, it asks GitHub Releases for the latest version number (no chats, files, or settings are sent) and shows a notice if a newer one exists. Turn it off in **Settings → General → Check for updates**; Pipkin then makes no update requests.
 - Agent file tools are scoped to your selected workspace. On Windows, these tools reject paths through symbolic links and junctions, drive escapes, and reserved device names.
 - **Shell commands are off by default.** Enable them in **Settings → Agent → Allow shell commands**. Agent commands require approval and show a scope preview. The macOS workspace command runner restricts writes to the workspace and a temporary directory and blocks network access. On Windows, approved PowerShell workspace commands start in the workspace with a reduced environment and use your Windows account’s file and network permissions.
 
@@ -124,6 +125,8 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.0.4](https://github.com/garywu000/pipkin/releases/tag/v2.0.4) | A new look: the chat sits on a floating sheet framed by the window, warm paper-toned surfaces tinted by your palette, refreshed Emerald, Ocean, Amber, Rose, and Graphite colors in light and dark, rounded headings on macOS, icons on the starter cards, and a pill Chat/Agent switch. Theme changes cross-fade smoothly. Fixes: equations render at a readable size with a proper math font, the scroll-to-bottom button no longer lingers on an empty chat, the side panel search box lost its double outline, the narrow-window side panel stays opaque, and the window title bar always matches the theme. |
+| [v2.0.3](https://github.com/garywu000/pipkin/releases/tag/v2.0.3) | Update notice: Pipkin checks GitHub Releases when it opens and shows a dismissible banner when a newer version is available, with a switch and **Check now** button in **Settings → General**. Small-model fixes: a reply that ends with “Next step: …” is sent back to finish the work, and edits recover when a model double-escapes line breaks. |
 | [v2.0.2](https://github.com/garywu000/pipkin/releases/tag/v2.0.2) | Work reliability with small local models, found by running live Qwen 8B tasks: file tools read PDFs and Word files; Work never rewrites an existing file the model has not read, and `write_page` cannot replace an existing page; models that promise a next step, claim a change that did not happen, or skip a requested file are sent back or corrected; edits tolerate indentation slips; failed edits show the current file; `read_files` reads the first four ranges instead of failing; `write_page` supports links; tests no longer leave cache folders. Includes `benchmarks/sim.py` for live task simulations. |
 | [v2.0.1](https://github.com/garywu000/pipkin/releases/tag/v2.0.1) | Security hardening: web fetches connect only to the public address they were checked against (blocks DNS-rebinding access to localhost and your network), approved Mac commands can no longer launch or script other apps to leave the sandbox, imported backups keep this device's shell, approval, and web settings, file writes re-check hard links after opening, and settings and transfers are saved atomically and privately. New backups use 600,000 PBKDF2 iterations and passphrases need 8+ characters. Long replies render with less CPU while streaming. |
 | [v2.0.0](https://github.com/garywu000/pipkin/releases/tag/v2.0.0) | Cross-device backup & handoff without a cloud account: optional client-side AES-256-GCM encrypted `.pipkin-backup` files, smart import preview & merge, and Folder Handoff (iCloud Drive, OneDrive, Dropbox, or USB). Self-contained Windows ZIP (no separate .NET install) with native `.ico` icon, MIT `LICENSE`, updated `SECURITY.md`, and dual macOS + Windows CI. |
