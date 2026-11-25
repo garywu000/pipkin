@@ -2587,8 +2587,9 @@ class Agent:
                 if count == 0:
                     old, new, count = reindent_edit(before, old, new)
                 if count == 0 and "\n" not in old and "\\n" in old and "\\n" not in before:
-                    u_old = old.replace("\\n", "\n").replace("\\t", "\t")
-                    u_new = new.replace("\\n", "\n").replace("\\t", "\t")
+                    eol = "\r\n" if "\r\n" in before else "\n"
+                    u_old = old.replace("\\n", eol).replace("\\t", "\t")
+                    u_new = new.replace("\\n", eol).replace("\\t", "\t")
                     u_count = before.count(u_old)
                     if u_count == 0:
                         u_old, u_new, u_count = reindent_edit(before, u_old, u_new)
