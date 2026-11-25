@@ -239,6 +239,7 @@ class FullUpdateTest(unittest.TestCase):
             self.assertEqual((self.root / "Pipkin.exe").read_text(), "new")
             self.assertFalse((self.root.parent / "Pipkin.previous").exists())
         self.assertFalse(script.exists())
+        self.assertFalse(list(job.dir.glob("staged-*")), "the emptied staging folder should be cleaned up")
         result = self.updater().status()["lastResult"]
         self.assertEqual(result, {"ok": True, "version": "9.9.9", "message": ""})
 

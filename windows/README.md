@@ -11,7 +11,7 @@ Pipkin on Windows uses **Microsoft Edge WebView2** in a C# desktop shell and sha
 *(Starting in v2.0.0, `Pipkin-windows-x64.zip` is **self-contained** — you do **not** need to install the .NET 8 Desktop Runtime separately.)*
 
 ## Running a Built Zip (No Coding Required)
-1. Download [Pipkin-windows-x64.zip](https://github.com/garywu000/pipkin/releases/download/v2.0.5/Pipkin-windows-x64.zip) and extract the full `Pipkin` folder.
+1. Download [Pipkin-windows-x64.zip](https://github.com/garywu000/pipkin/releases/download/v2.0.6/Pipkin-windows-x64.zip) and extract the full `Pipkin` folder.
 2. Double-click **`Pipkin.exe`**.
 3. Pipkin starts its local server, opens the app window, and stops the server it started when you close it. First-launch setup lets you choose an appearance, model, and default mode.
 

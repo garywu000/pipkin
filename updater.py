@@ -349,7 +349,10 @@ try {{
     Move-Item -LiteralPath $backup -Destination $app
   }}
 }} catch {{ $message = $_.Exception.Message }}
-if ($ok) {{ Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }}
+if ($ok) {{
+  Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Split-Path -Parent $new) -Recurse -Force -ErrorAction SilentlyContinue
+}}
 Write-Result $ok $message
 if ($env:PIPKIN_UPDATE_NO_RELAUNCH -ne '1') {{ Start-Process -FilePath (Join-Path $app 'Pipkin.exe') }}
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
@@ -370,6 +373,7 @@ rm -rf "$BACKUP"
 if mv "$APP" "$BACKUP"; then
   if mv "$NEW" "$APP" && [ -x "$APP/Contents/MacOS/Pipkin" ]; then
     ok=true
+    rm -rf "$(dirname "$NEW")"
   else
     message="The new version could not be put in place, so Pipkin kept the current one."
     rm -rf "$APP"; mv "$BACKUP" "$APP"

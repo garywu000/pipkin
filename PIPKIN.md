@@ -61,6 +61,8 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 
 ## Progress log (newest first; keep at most 8 entries, delete the oldest)
 
+- 2026-11-24: v2.0.6, the first release shipped through one-click updates (the update helper now removes its emptied staging folder). Deliberately not promoted into Pipkin.app: the user is testing Update now from v2.0.5. Check that Settings › General shows v2.0.6 after Restart to update.
+
 - 2026-11-24: v2.0.5 one-click updates. `updater.py` verifies a signed `pipkin-update.json` (pure-Python Ed25519, key in the maintainer's Keychain), downloads and hash-checks the platform zip, extracts it safely, and stages a helper; the Mac/Windows shells run that fixed-path helper on `apply-update`, quit, and the helper swaps the app (with rollback) and reopens it. Banner: Update now → progress → Restart to update. Also a hand cursor on every clickable control. Check Settings › General and, after the next release, Update now on a v2.0.5 install.
 
 - 2026-11-24: v2.0.4 redesign. New token system in `dist/style.css` (warm paper neutrals tinted by the palette via `--tint`, palettes only set accent families), floating main sheet framed by the window chrome, rounded display font, suggestion-card icons, pill mode switch, View Transition theme cross-fade (`applyTheme` in `dist/chat.js`), `solidColor()` so the native title bar gets rgb() even from color-mix colors, MathML sizing, and fixes for the stale scroll-to-bottom button, omnibox double outline, and see-through narrow side panel. README screenshots re-captured in WebKit. Check Light/Dark/System with each palette, the title bar color, Settings, onboarding, and a narrow window.
@@ -74,7 +76,5 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 - 2026-11-24: Reviewed v1.2 through v1.9 and updated installation, features, and version history for macOS and Windows. Verified the Windows release ZIP against the successful CI package. Included platform_os.py in Mac source builds and refreshed the memory graph screenshot.
 
 - 2026-11-23: Updated the v1.2 README and captured new screenshots of first-launch customization, the welcome screen, Chat, Agent approval, the Harness launcher, and model memory using sample data. Check the screenshots and first-run instructions on GitHub.
-
-- 2026-11-23: Prepared v1.2. Harness output tiles use the originating workspace and the launcher closes when the native browser opens. Undo All records completed actions and points out failed or skipped files if it stops. Check a saved output from Review and a multi-file undo.
 
 At the end of every task that changed files, add one line to this log: date, what changed, and what the user should check.

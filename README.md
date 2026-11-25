@@ -5,7 +5,7 @@
 <p align="center"><strong>Local AI chat and a workspace agent for macOS and Windows.</strong><br>
 Turn your own files into finished work with a model that runs on your machine.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.0.5"><strong>Download v2.0.5</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.0.6"><strong>Download v2.0.6</strong></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#chat-and-projects">Features</a> ·
   <a href="#try-site">Try /site</a> ·
@@ -21,13 +21,13 @@ Pipkin is a desktop app for [Ollama](https://ollama.com) on macOS and Windows. U
 
 ### macOS
 
-1. Download [Pipkin for Apple silicon](https://github.com/garywu000/pipkin/releases/download/v2.0.5/Pipkin-macos-arm64.zip), unzip it, and open **Pipkin.app**. This preview is ad-hoc signed. If macOS blocks the download, use the [source build](#build-from-source).
+1. Download [Pipkin for Apple silicon](https://github.com/garywu000/pipkin/releases/download/v2.0.6/Pipkin-macos-arm64.zip), unzip it, and open **Pipkin.app**. This preview is ad-hoc signed. If macOS blocks the download, use the [source build](#build-from-source).
 2. Install [Ollama for macOS](https://ollama.com/download/mac) and download a local model. First-run setup has an Ollama guide if no model is installed.
 
 ### Windows
 
 1. On an x64 PC running Windows 11 or Windows 10 22H2, install [Ollama for Windows](https://ollama.com/download/windows) and [Python 3.9 or later](https://www.python.org/downloads/windows/) with **Add Python to PATH**. Install the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if it is missing (pre-installed on Windows 11). The Windows ZIP is self-contained — no separate .NET install is required.
-2. Download [Pipkin for Windows x64](https://github.com/garywu000/pipkin/releases/download/v2.0.5/Pipkin-windows-x64.zip), extract the full **Pipkin** folder, and double-click **Pipkin.exe**. Pipkin manages its own local server, so opening a terminal is only needed for tasks such as downloading a model.
+2. Download [Pipkin for Windows x64](https://github.com/garywu000/pipkin/releases/download/v2.0.6/Pipkin-windows-x64.zip), extract the full **Pipkin** folder, and double-click **Pipkin.exe**. Pipkin manages its own local server, so opening a terminal is only needed for tasks such as downloading a model.
 
 See the [Windows guide](windows/README.md) for details. The [Windows build and test run](https://github.com/garywu000/pipkin/actions/runs/45325460976) produced the ZIP attached to v1.9.0.
 
@@ -125,6 +125,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.0.6](https://github.com/garywu000/pipkin/releases/tag/v2.0.6) | The first release delivered through one-click updates. After a successful update, the helper also removes its emptied staging folder. |
 | [v2.0.5](https://github.com/garywu000/pipkin/releases/tag/v2.0.5) | One-click updates: **Update now** in the update banner downloads the next version, verifies its signature and checksum, and **Restart to update** swaps it in and reopens Pipkin with your chats and settings intact (Mac and Windows). Every clickable control now shows the hand cursor. Updating from v2.0.4 or earlier is a one-time manual download. |
 | [v2.0.4](https://github.com/garywu000/pipkin/releases/tag/v2.0.4) | A new look: the chat sits on a floating sheet framed by the window, warm paper-toned surfaces tinted by your palette, refreshed Emerald, Ocean, Amber, Rose, and Graphite colors in light and dark, rounded headings on macOS, icons on the starter cards, and a pill Chat/Agent switch. Theme changes cross-fade smoothly. Fixes: buttons such as **Continue** and **Apply change** stay readable on hover, equations render at a readable size with a proper math font, the scroll-to-bottom button no longer lingers on an empty chat, the side panel search box lost its double outline, the narrow-window side panel stays opaque, and the window title bar always matches the theme. |
 | [v2.0.3](https://github.com/garywu000/pipkin/releases/tag/v2.0.3) | Update notice: Pipkin checks GitHub Releases when it opens and shows a dismissible banner when a newer version is available, with a switch and **Check now** button in **Settings → General**. Small-model fixes: a reply that ends with “Next step: …” is sent back to finish the work, and edits recover when a model double-escapes line breaks. |
