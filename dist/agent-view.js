@@ -153,6 +153,7 @@
       case "approval_result": {
         const entry = run.entries.find((item) => item.type === "approval" && item.id === event.id);
         if (entry) {
+          delete entry.submitting;
           entry.decision = event.cancelled ? "expired" : event.approved ? "approved" : "denied";
           if (event.cancelled) entry.reason = event.reason || null;
         }
@@ -222,6 +223,7 @@
     for (const entry of run.entries) {
       if (entry.type === "tool" && entry.state === "running") entry.state = "fail";
       if (entry.type === "approval" && !entry.decision) {
+        delete entry.submitting;
         entry.decision = "expired";
         entry.reason = "ended";
       }
@@ -360,8 +362,9 @@
     card.append(entry.kind === "edit" ? diffView(entry.detail) : el("div", { className: "tool-output", text: "$ " + entry.detail }));
     const footer = el("footer");
     if (!entry.decision) {
-      const deny = el("button", { type: "button", className: "button small", text: "Deny" });
-      const allow = el("button", { type: "button", className: "button small accent", text: entry.kind === "command" ? "Run command" : "Apply change" });
+      const deny = el("button", { type: "button", className: "button small", text: "Deny", disabled: Boolean(entry.submitting) });
+      const allow = el("button", { type: "button", className: "button small accent", disabled: Boolean(entry.submitting),
+        text: entry.submitting ? "Sending…" : entry.kind === "command" ? "Run command" : "Apply change" });
       deny.addEventListener("click", () => onApprove?.(entry, false));
       allow.addEventListener("click", () => onApprove?.(entry, true));
       footer.append(el("span", { className: "decision", text: entry.kind === "command" ? (/your terminal/i.test(entry.title || "") ? "Types into your terminal panel." : "Runs in your workspace folder.") : "Writes to your workspace folder." }), deny, allow);
@@ -484,11 +487,11 @@
           const card = el("div");
           let decision = "";
           const update = () => {
-            const next = entry.decision || null;
+            const next = entry.decision || (entry.submitting ? "submitting" : null);
             if (decision === next) return;
             decision = next;
             card.replaceChildren(approvalCard(entry, onApprove));
-            if (card.parentNode === node) node.firstChild.replaceWith(statusIcon(decision === "approved" ? "ok" : decision ? "declined" : "running"));
+            if (card.parentNode === node) node.firstChild.replaceWith(statusIcon(entry.decision === "approved" ? "ok" : entry.decision ? "declined" : "running"));
           };
           node.append(statusIcon("running"), card);
           row = { node, card, update };

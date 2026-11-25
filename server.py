@@ -2505,6 +2505,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                     run["steering_seen"] < len(run["steering"])):
                 self.send_json(409, {"error": "This action is no longer waiting for approval."})
                 return
+            if call_id in run["decisions"] and run["decisions"][call_id] is not approved:
+                self.send_json(409, {"error": "A decision for this action has already been received."})
+                return
             run["decisions"][call_id] = approved
             run["changed"].notify_all()
         self.send_json(200, {"ok": True})
@@ -2708,7 +2711,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         run = {"changed": Condition(), "pending": set(), "decisions": {}, "stop_after_step": Event(),
                "steering": [], "steering_seen": 0, "browser": {}}
         stop_requested = run["stop_after_step"].is_set
-        run_log = {"events": [], "seq": 0, "dropped_structural": 0, "ended": None, "lock": Lock()}
+        run_log = {"events": [], "seq": 0, "dropped_structural": 0, "terminal": False, "ended": None, "lock": Lock()}
         prune_run_logs()
         with RUNS_LOCK:
             RUNS[run_id] = run
@@ -2779,6 +2782,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                     line = json.dumps({"event": event, "seq": seq, **fields}, ensure_ascii=False)
                     events = run_log["events"]
                     events.append((seq, event, line))
+                    if event in ("result", "stopped", "error"):
+                        run_log["terminal"] = True
                     if len(events) > RUN_LOG_LIMIT:
                         # Drop oldest streaming token chunks first so structural events (approvals, tool results,
                         # outputs, final result) survive even very long thinking bursts.
@@ -2959,7 +2964,17 @@ class ChatHandler(BaseHTTPRequestHandler):
                       steering_pending=steering_pending, saved=restored,
                       save_checkpoint=checkpoint.save if checkpoint else None)
         except (AgentStopped, BrokenPipeError, ConnectionResetError):
-            pass
+            if streaming and not run_log["terminal"]:
+                files = agent.saved_files if agent is not None else []
+                outputs = agent.outputs if agent is not None else []
+                text = "Work stopped before finishing."
+                if checkpoint is not None:
+                    text += " Resume Work to continue from the saved checkpoint."
+                try:
+                    # send_event logs the outcome before attempting to write to the closed connection.
+                    send_event("stopped", text=text, files=files, outputs=outputs)
+                except OSError:
+                    pass
         except WorkPaused as pause:
             if memory_guard.paused:
                 SESSIONS.unload()

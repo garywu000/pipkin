@@ -3307,24 +3307,27 @@ async function clearAgentWorkspace() {
 }
 
 async function answerApproval(run, entry, approved, view) {
-  if (!run.runId || entry.decision || run.state !== "working") return;
-  entry.decision = approved ? "approved" : "denied";
+  if (!run.runId || entry.decision || entry.submitting || run.state !== "working") return;
+  entry.submitting = true;
   view.activity?.render();
+  const request = new AbortController();
+  const timeout = setTimeout(() => request.abort(), 8000);
   try {
     const response = await fetch("/api/agent/approve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run: run.runId, id: entry.id, approved }),
+      signal: request.signal,
     });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error);
   } catch (error) {
-    if (run.state !== "working") return;
-    // Show the buttons again instead of a dead "Not answered": if the server already moved on, the resync below
-    // delivers the real outcome; if it is still waiting, you can answer again.
-    entry.decision = null;
+    if (run.state !== "working" || entry.decision) return;
+    // A transport failure only reopens the buttons if the server's receipt hasn't already arrived.
+    delete entry.submitting;
     view.activity?.render();
     announce((error.message || "Could not send your decision.") + " Try again.", true);
   } finally {
+    clearTimeout(timeout);
     if (activeAgentRun === run) activeAgentResync?.(600);
   }
 }
@@ -3708,7 +3711,8 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
       const task = currentMessage.content;
       let lastSeq = 0;
       let lastEventAt = Date.now();
-      let resyncing = false;
+      let replayTask = null;
+      let timelineGap = false;
       let resyncEnded = null;
       let streamClosed = false;
       let serverDone = false;
@@ -3789,20 +3793,28 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
         if (part.event === "run" || info.final !== undefined) updateControls();
         paint(() => agentRun.answer || agentRun.draft);
       };
-      const resync = async ({ final = false } = {}) => {
-        if (resyncing || !agentRun.runId || controller.signal.aborted) return false;
-        if (!final && (streamClosed || streamAbort.signal.aborted)) return false;
-        resyncing = true;
+      const replayEvents = async () => {
+        const replayAbort = new AbortController();
+        const abortReplay = () => replayAbort.abort();
+        controller.signal.addEventListener("abort", abortReplay, { once: true });
+        const timeout = setTimeout(abortReplay, 8000);
         let ok = false;
         try {
           for (let page = 0; page < 25; page += 1) {
             const reply = await fetch("/api/agent/events", {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ run: agentRun.runId, after: lastSeq }),
+              signal: replayAbort.signal,
             });
             if (!reply.ok) break;
-            ok = true;
             const data = await reply.json();
+            if (replayAbort.signal.aborted || !Array.isArray(data?.events)) break;
+            ok = true;
+            if (data.gap && !timelineGap) {
+              timelineGap = true;
+              agentRun.entries.push({ type: "text", text: "Some earlier activity could not be recovered." });
+              paint(() => agentRun.answer || agentRun.draft);
+            }
             for (const part of data.events) {
               try {
                 handleAgentEvent(part);
@@ -3820,7 +3832,8 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
         } catch {
           // The server is busy or the page is offline; the next trigger tries again.
         } finally {
-          resyncing = false;
+          clearTimeout(timeout);
+          controller.signal.removeEventListener("abort", abortReplay);
         }
         // The run ended (either server closed it or we already received the final result) but the live stream never said so.
         if ((resyncEnded || done) && !streamAbort.signal.aborted) {
@@ -3828,6 +3841,12 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
           streamAbort.abort();
         }
         return ok;
+      };
+      const resync = async ({ final = false } = {}) => {
+        if (!agentRun.runId || controller.signal.aborted) return false;
+        if (!final && (streamClosed || streamAbort.signal.aborted)) return false;
+        replayTask ||= replayEvents().finally(() => { replayTask = null; });
+        return replayTask;
       };
       // After you answer or steer, check soon and again shortly after, so the result shows without waiting.
       activeAgentResync = (delay = 0) => {
@@ -3880,6 +3899,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
           await resync({ final: true });
         }
       }
+      if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
       if (resyncEnded?.error) throw resyncEnded.error;
       if (!done) throw (streamError && streamError.name !== "AbortError" ? streamError : new Error("The agent run was interrupted."));
       if (agentRun.usage) stats = agentRun.usage;

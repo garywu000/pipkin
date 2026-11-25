@@ -2689,7 +2689,12 @@ class Agent:
             if not self.approve("command", "Run isolated command in " + workspace.path.name, detail):
                 return "The user declined to run this command. Do not retry it."
             self.begin_effect(describe(name, args))
-            return run_command(workspace, command, self.check)
+            try:
+                return run_command(workspace, command, self.check)
+            except (BrokenPipeError, ConnectionResetError):
+                raise
+            except OSError:
+                return "The command could not run to completion.\n[Stopped: Could not open the command or workspace.]"
         raise ValueError("Unknown tool.")
 
     def run(self, system, history, task, *, stop_requested=lambda: False, take_steering=tuple,

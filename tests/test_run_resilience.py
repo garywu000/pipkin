@@ -3,7 +3,9 @@ import json
 import os
 from pathlib import Path
 import sys
+from threading import Condition, Event
 from tempfile import TemporaryDirectory
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -89,7 +91,8 @@ class RunEventLogTest(unittest.TestCase):
                         streamed.append(event)
                         if event["event"] == "run":
                             run_id = event["id"]
-                        on_event(event, run_id, bench)
+                        if on_event(event, run_id, bench) is False:
+                            break
                 return streamed, run_id, bench
 
     def test_events_are_numbered_and_replayable_after_the_run(self):
@@ -119,6 +122,36 @@ class RunEventLogTest(unittest.TestCase):
         self.assertEqual(result["reason"], "steering")
         tool = next(event for event in streamed if event["event"] == "tool_result")
         self.assertTrue(tool["cancelled"])
+
+    def test_disconnect_while_waiting_records_a_resumable_stop(self):
+        streamed, run_id, bench = self.run_scripted(lambda event, *_: event["event"] != "approval")
+        self.assertEqual(streamed[-1]["event"], "approval")
+        after = streamed[-1]["seq"]
+        deadline = time.monotonic() + 4
+        while True:
+            replay = bench.post("/api/agent/events", {"run": run_id, "after": after})
+            if replay["done"]:
+                break
+            self.assertLess(time.monotonic(), deadline, "the disconnected run should release its approval")
+            time.sleep(0.025)
+        self.assertEqual(replay["pending"], [])
+        self.assertEqual([event["event"] for event in replay["events"]], ["stopped"])
+        self.assertIn("Resume Work", replay["events"][0]["text"])
+
+    def test_retry_can_confirm_but_cannot_replace_pending_decision(self):
+        import run as bench
+        import server
+
+        run_id, call_id = "test-approval-id", "one"
+        state = {"changed": Condition(), "pending": {call_id}, "decisions": {},
+                 "stop_after_step": Event(), "steering_seen": 0, "steering": []}
+        request = {"run": run_id, "id": call_id, "approved": False}
+        with patch.dict(server.RUNS, {run_id: state}):
+            self.assertTrue(bench.post("/api/agent/approve", request)["ok"])
+            self.assertTrue(bench.post("/api/agent/approve", request)["ok"])
+            with self.assertRaisesRegex(RuntimeError, "HTTP 409"):
+                bench.post("/api/agent/approve", {**request, "approved": True})
+        self.assertIs(state["decisions"][call_id], False)
 
     def test_structural_events_survive_long_thinking_bursts(self):
         import run as bench
@@ -220,6 +253,20 @@ class RepeatedCommandFailureTest(unittest.TestCase):
             self.assertIn("read_file already reads PDFs", tool_msgs[0])
             self.assertIn("2 shell commands failed in a row", tool_msgs[1])
             self.assertTrue(any("2 commands failed in a row" in n for n in notices))
+
+    def test_command_that_fails_to_start_does_not_prompt_twice(self):
+        with TemporaryDirectory() as directory:
+            workspace = Workspace(Path(directory))
+            call = {"tool_calls": [{"function": {"name": "run_command", "arguments": {"command": "echo test"}}}]}
+            replies = iter([call, call, {"content": "The check could not start."}])
+            approvals = []
+            work = agent.Agent(lambda *_: next(replies), lambda *_a, **_k: None, lambda: None,
+                               lambda *details: approvals.append(details) or True,
+                               workspace=workspace, mode="auto", web=False, allow_shell=True)
+            with patch.object(agent, "run_command", side_effect=OSError("Test process could not start")) as command:
+                work.run("System", [], "Run a check.")
+            self.assertEqual(command.call_count, 1)
+            self.assertEqual(len(approvals), 1)
 
 
 if __name__ == "__main__":
