@@ -1907,9 +1907,22 @@ function renderPressureBanner() {
   banner.hidden = false;
 }
 
-/* ---------- GitHub Releases Update Notice ---------- */
+/* ---------- GitHub Releases Update Notice & one-click updates ---------- */
 const UPDATE_DISMISS_KEY = "pipkin-dismissed-update";
+const RELEASES_URL = "https://github.com/garywu000/pipkin/releases/";
 let updateInfo = { enabled: settings.checkUpdates !== false, current: "", latest: "", available: false, url: "", checked: false };
+let updateJob = { state: "idle" };
+let updatePollTimer = 0;
+
+/* One-click install needs the desktop app (it does the swap and relaunch) and a release the server can verify. */
+const canSelfUpdate = () => Boolean(nativeShell || windowsShell) && updateInfo?.installable === true;
+
+function releaseLink(text, className = "button small accent") {
+  const href = typeof updateInfo.url === "string" && updateInfo.url.startsWith(RELEASES_URL)
+    ? updateInfo.url
+    : `${RELEASES_URL}tag/v${updateInfo.latest}`;
+  return el("a", { className, href, target: "_blank", rel: "noopener noreferrer", text });
+}
 
 function renderUpdateBanner() {
   const banner = byId("update-banner");
@@ -1918,36 +1931,103 @@ function renderUpdateBanner() {
     banner.hidden = true;
     return;
   }
-  const dismissed = readLocal(UPDATE_DISMISS_KEY, "");
-  if (dismissed === updateInfo.latest) {
+  const job = updateJob?.version === updateInfo.latest ? updateJob : { state: "idle" };
+  if (job.state === "idle" && readLocal(UPDATE_DISMISS_KEY, "") === updateInfo.latest) {
     banner.hidden = true;
     return;
   }
-  const href = typeof updateInfo.url === "string" && updateInfo.url.startsWith("https://github.com/garywu000/pipkin/releases/")
-    ? updateInfo.url
-    : `https://github.com/garywu000/pipkin/releases/tag/v${updateInfo.latest}`;
-  const link = el("a", {
-    className: "button small accent",
-    href,
-    target: "_blank",
-    rel: "noopener noreferrer",
-    text: "View release",
-  });
-  const dismiss = el("button", {
-    type: "button", className: "icon-button small",
-    title: "Dismiss", "aria-label": "Dismiss update notice",
-  }, icon("x"));
-  dismiss.addEventListener("click", () => {
-    writeLocal(UPDATE_DISMISS_KEY, updateInfo.latest);
-    banner.hidden = true;
-  });
+  const actions = [];
+  let message = `Pipkin v${updateInfo.latest} is available (you're on v${updateInfo.current || ""}).`;
+  let progress = null;
+  banner.dataset.state = job.state;
+  if (job.state === "downloading") {
+    const pct = job.total ? Math.min(100, Math.round((job.received / job.total) * 100)) : 0;
+    message = `Downloading Pipkin v${updateInfo.latest}… ${pct}%`;
+    progress = el("div", { className: "update-progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct) },
+      el("i", { style: `width:${pct}%` }));
+  } else if (job.state === "verifying") {
+    message = "Checking the download's signature…";
+    progress = el("div", { className: "update-progress indeterminate" }, el("i"));
+  } else if (job.state === "ready") {
+    message = `Pipkin v${updateInfo.latest} is ready. Restart to finish updating.`;
+    const restart = el("button", { type: "button", className: "button small accent", text: "Restart to update" });
+    restart.addEventListener("click", restartToUpdate);
+    actions.push(restart);
+  } else if (job.state === "restarting") {
+    message = "Restarting Pipkin…";
+  } else if (job.state === "error") {
+    message = job.error || "The update could not be installed.";
+    const retry = el("button", { type: "button", className: "button small", text: "Try again" });
+    retry.addEventListener("click", startUpdate);
+    actions.push(retry, releaseLink("Download"));
+  } else if (canSelfUpdate()) {
+    const install = el("button", { type: "button", className: "button small accent", text: "Update now" });
+    install.addEventListener("click", startUpdate);
+    actions.push(releaseLink("What's new", "button small"), install);
+  } else {
+    actions.push(releaseLink("View release"));
+  }
+  if (["idle", "error"].includes(job.state)) {
+    const dismiss = el("button", { type: "button", className: "icon-button small", title: "Dismiss", "aria-label": "Dismiss update notice" }, icon("x"));
+    dismiss.addEventListener("click", () => {
+      writeLocal(UPDATE_DISMISS_KEY, updateInfo.latest);
+      updateJob = { state: "idle" };
+      banner.hidden = true;
+    });
+    actions.push(dismiss);
+  }
   banner.replaceChildren(
     el("div", { className: "update-banner-copy" },
-      icon("download"),
-      el("span", { text: `Pipkin v${updateInfo.latest} is available (you're on v${updateInfo.current || ""}).` })),
-    el("div", { className: "update-banner-actions" }, link, dismiss),
+      icon(job.state === "error" ? "alert" : job.state === "ready" ? "check" : "download"),
+      el("span", { text: message })),
+    el("div", { className: "update-banner-actions" }, ...actions),
+    ...(progress ? [progress] : []),
   );
   banner.hidden = false;
+}
+
+async function pollUpdateJob() {
+  clearTimeout(updatePollTimer);
+  try {
+    const response = await fetch("/api/update/status");
+    if (response.ok) {
+      const status = await response.json();
+      if (status.lastResult) announceUpdateResult(status.lastResult);
+      if (updateJob.state !== "restarting") updateJob = status;
+    }
+  } catch {
+    // The server is busy or restarting; the next poll catches up.
+  }
+  renderUpdateBanner();
+  if (["downloading", "verifying"].includes(updateJob.state)) updatePollTimer = setTimeout(pollUpdateJob, 500);
+}
+
+async function startUpdate() {
+  updateJob = { state: "downloading", version: updateInfo.latest, received: 0, total: 0 };
+  renderUpdateBanner();
+  try {
+    const response = await fetch("/api/update/download", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const data = await response.json().catch(() => ({}));
+    updateJob = response.ok ? data : { state: "error", version: updateInfo.latest, error: data.error || "The update could not start." };
+  } catch {
+    updateJob = { state: "error", version: updateInfo.latest, error: "Pipkin's local server did not answer. Try again." };
+  }
+  renderUpdateBanner();
+  if (["downloading", "verifying"].includes(updateJob.state)) updatePollTimer = setTimeout(pollUpdateJob, 400);
+}
+
+function restartToUpdate() {
+  if (activeReply && !window.confirm("Pipkin is still working. Restart now and stop the current run?")) return;
+  updateJob = { ...updateJob, state: "restarting" };
+  renderUpdateBanner();
+  notifyShell({ type: "apply-update" });
+}
+
+function announceUpdateResult(result) {
+  if (result.ok) toast(`Pipkin updated to v${result.version}`);
+  else toast(`The update to v${result.version} didn't finish. ${result.message || ""} Pipkin kept the current version.`.trim());
 }
 
 function renderUpdateSettingNote() {
@@ -1961,7 +2041,9 @@ function renderUpdateSettingNote() {
     return;
   }
   if (updateInfo?.available && updateInfo?.latest) {
-    note.textContent = `${cur} · Pipkin v${updateInfo.latest} is available on GitHub Releases.`;
+    note.textContent = canSelfUpdate()
+      ? `${cur} · Pipkin v${updateInfo.latest} is available. Use Update now above the message box.`
+      : `${cur} · Pipkin v${updateInfo.latest} is available on GitHub Releases.${updateInfo.installBlocker ? " " + updateInfo.installBlocker : ""}`;
     return;
   }
   if (updateInfo?.checked) {
@@ -1998,7 +2080,10 @@ async function checkForUpdates(force = false, announceResult = false) {
   }
 }
 
-setTimeout(() => { if (settings.checkUpdates !== false) void checkForUpdates(false, false); }, 1500);
+setTimeout(() => {
+  void pollUpdateJob();  // also reports whether an update just finished installing
+  if (settings.checkUpdates !== false) void checkForUpdates(false, false);
+}, 1500);
 
 function renderContextRecommendation(model) {
   const box = byId("context-recommend");

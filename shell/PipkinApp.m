@@ -580,6 +580,10 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
         [self togglePet:nil];
         return;
     }
+    if ([type isEqual:@"apply-update"] && window == self.main) {
+        [self applyUpdate];
+        return;
+    }
     if ([type isEqual:@"busy"]) {
         window.busy = [message[@"value"] boolValue];
         BOOL busy = self.main.busy || self.dev.busy;
@@ -751,6 +755,31 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
     } else {
         [self showMainWindowForAction:action];
     }
+}
+
+/// Runs the helper the server staged after verifying a signed update, then quits so it can swap in the new
+/// version and reopen Pipkin. The script path is fixed; nothing from the page chooses what runs.
+- (void)applyUpdate {
+    NSString *script = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Pipkin/updates/apply-update.sh"];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:script error:nil];
+    if (!attrs || [attrs[NSFileOwnerAccountID] unsignedIntValue] != getuid() || ([attrs[NSFilePosixPermissions] unsignedShortValue] & 022)) {
+        AppLog(@"No usable update helper at %@", script);
+        return;
+    }
+    NSTask *task = [NSTask new];
+    task.executableURL = [NSURL fileURLWithPath:@"/bin/sh"];
+    task.arguments = @[script, [NSString stringWithFormat:@"%d", getpid()]];
+    task.standardInput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error]) {
+        AppLog(@"Could not start the update helper: %@", error.localizedDescription);
+        return;
+    }
+    AppLog(@"Installing update; helper pid %d", task.processIdentifier);
+    self.quitConfirmed = YES;
+    [NSApp terminate:nil];
 }
 
 - (void)togglePet:(id)sender {

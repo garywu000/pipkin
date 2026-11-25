@@ -31,6 +31,13 @@ You are improving Pipkin, the app you are running inside. This folder is a separ
 - Prefer search_text and outline_file over shell grep; they are faster and cheaper.
 - You cannot see the UI. Tell the user exactly what to check in the Pipkin Dev window (View › Reload for dist changes; Develop › Restart Dev Server for .py changes).
 
+## Releasing (one-click updates depend on this)
+1. Bump `APP_VERSION` in `server.py`, `shell/Info.plist` (version and build), and `windows/PipkinWindows.csproj`; `tests/test_update_check.py` checks they match.
+2. Push `main`, then tag `vX.Y.Z` and push the tag. CI builds `Pipkin-windows-x64.zip`; build the Mac zip with `sh shell/package.sh <empty folder>`.
+3. Sign both zips on the maintainer Mac: `python3 updater.py sign X.Y.Z <Pipkin-macos-arm64.zip> <Pipkin-windows-x64.zip>`. This writes `pipkin-update.json`; the private key lives in the login Keychain (`pipkin-release-signing`). Never commit it or put it in CI.
+4. Upload all three files to the GitHub release. A release without `pipkin-update.json` can only be installed by hand.
+5. If the Keychain key is lost, older apps can no longer update in one click: ship the new key in a release users download by hand.
+
 ## Backlog (ideas, highest value first)
 - Connected accounts — Build the GitHub and Google Workspace plan below in phases.
 - Agent performance — Benchmark the current planning and batching defaults on longer workloads, then assess an 8B exploration mode. Improve recovery from repeated tool failures.
@@ -54,6 +61,8 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 
 ## Progress log (newest first; keep at most 8 entries, delete the oldest)
 
+- 2026-11-24: v2.0.5 one-click updates. `updater.py` verifies a signed `pipkin-update.json` (pure-Python Ed25519, key in the maintainer's Keychain), downloads and hash-checks the platform zip, extracts it safely, and stages a helper; the Mac/Windows shells run that fixed-path helper on `apply-update`, quit, and the helper swaps the app (with rollback) and reopens it. Banner: Update now → progress → Restart to update. Also a hand cursor on every clickable control. Check Settings › General and, after the next release, Update now on a v2.0.5 install.
+
 - 2026-11-24: v2.0.4 redesign. New token system in `dist/style.css` (warm paper neutrals tinted by the palette via `--tint`, palettes only set accent families), floating main sheet framed by the window chrome, rounded display font, suggestion-card icons, pill mode switch, View Transition theme cross-fade (`applyTheme` in `dist/chat.js`), `solidColor()` so the native title bar gets rgb() even from color-mix colors, MathML sizing, and fixes for the stale scroll-to-bottom button, omnibox double outline, and see-through narrow side panel. README screenshots re-captured in WebKit. Check Light/Dark/System with each palette, the title bar color, Settings, onboarding, and a narrow window.
 
 - 2026-11-24: v2.0.3 pre-v2.1 hygiene: connected pipkin-dev directly to GitHub origin/main (matching garywu000 commit identity), added privacy-safe GitHub Releases update check (`GET /api/update`, `POST /api/update/preference`) with dismissible update banner + Settings › General toggle & Check now button, and re-ran live `benchmarks/sim.py` checks. Check Settings › General › Check for updates and `git status -sb`.
@@ -67,7 +76,5 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 - 2026-11-23: Updated the v1.2 README and captured new screenshots of first-launch customization, the welcome screen, Chat, Agent approval, the Harness launcher, and model memory using sample data. Check the screenshots and first-run instructions on GitHub.
 
 - 2026-11-23: Prepared v1.2. Harness output tiles use the originating workspace and the launcher closes when the native browser opens. Undo All records completed actions and points out failed or skipped files if it stops. Check a saved output from Review and a multi-file undo.
-
-- 2026-11-23: Fixed a boot crash from the Harness side panel: syncAgentControls() ran at startup and reached syncHarnessPanel() before `const harnessPanel` was declared (temporal dead zone), so chat.js stopped at that line: no chat history, models stuck on "Loading models…", status stuck on "Connecting", and most buttons without handlers. The Harness element lookups now sit with the other lookups at the top of chat.js. Rule: any top-level code that runs during boot may only use `const`/`let` declared above it; verify a page change by loading it in a browser and checking the console, not only with node --check.
 
 At the end of every task that changed files, add one line to this log: date, what changed, and what the user should check.

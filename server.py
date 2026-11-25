@@ -35,6 +35,7 @@ from zipfile import BadZipFile, ZipFile
 import agent as agent_module
 import artifacts
 import platform_os
+import updater
 from agent import (
     FILE_FLAGS, PERMISSION_MODES, SOURCE_GUIDANCE, WEB_TOOLS, Agent, AgentStopped, ApprovalCancelled, Sources,
     UndoConflict, UndoStore, WorkPaused, Workspace, clip, project_notes, system_prompt, validate_path, web_fetch, web_search,
@@ -43,7 +44,7 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.0.5"
 RELEASE_REPO = "garywu000/pipkin"
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
 RELEASE_URL_PREFIX = f"https://github.com/{RELEASE_REPO}/releases/"
@@ -51,12 +52,13 @@ UPDATE_CACHE_TTL = 6 * 60 * 60
 UPDATE_ERROR_TTL = 5 * 60
 UPDATE_FORCE_COOLDOWN = 30
 _UPDATE_LOCK = Lock()
-_UPDATE_CACHE = {"checked_at": 0.0, "ttl": 0.0, "payload": None}
+_UPDATE_CACHE = {"checked_at": 0.0, "ttl": 0.0, "payload": None, "release": None}
 _SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$")
 # Used until the user picks a model; the README recommends it for 16 GB Macs. A saved choice always wins.
 DEFAULT_MODEL = "qwen3:8b"
 CONTEXT_SIZES = (4096, 8192, 16384, 32768, 65536)
 SETTINGS_FILE = platform_os.app_data_dir() / "settings.json"
+UPDATER = updater.Updater(SETTINGS_FILE.parent, root=updater.install_root())
 USAGE_FILE = SETTINGS_FILE.with_name("usage.sqlite3")
 SETTINGS_LOCK = Lock()
 TRANSFER_FILE = SETTINGS_FILE.parent / "transfer.json"
@@ -598,8 +600,9 @@ def check_latest_release(*, force=False, opener=None):
     fetch = opener or urllib.request.urlopen
     try:
         with fetch(req, timeout=4) as response:
-            raw = response.read(65536)
+            raw = response.read(512 * 1024)
         data = json.loads(raw.decode("utf-8", "replace"))
+        release = None
         if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
             payload = {"enabled": True, "current": APP_VERSION, "available": False, "checked": True}
         else:
@@ -611,6 +614,17 @@ def check_latest_release(*, force=False, opener=None):
                 latest_label = f"{parsed[0]}.{parsed[1]}.{parsed[2]}"
                 raw_url = str(data.get("html_url") or "")
                 url = raw_url if raw_url.startswith(RELEASE_URL_PREFIX) else f"{RELEASE_URL_PREFIX}tag/v{latest_label}"
+                assets = {
+                    item["name"]: item["browser_download_url"]
+                    for item in data.get("assets") or []
+                    if isinstance(item, dict) and isinstance(item.get("name"), str)
+                    and isinstance(item.get("browser_download_url"), str)
+                    and item["browser_download_url"].startswith(updater.DOWNLOAD_PREFIX)
+                }
+                release = {"version": latest_label, "assets": assets}
+                blocker = updater.install_blocker(UPDATER.root)
+                if not blocker and updater.MANIFEST_NAME not in assets:
+                    blocker = "This release can only be installed from GitHub."
                 payload = {
                     "enabled": True,
                     "current": APP_VERSION,
@@ -618,15 +632,19 @@ def check_latest_release(*, force=False, opener=None):
                     "available": is_newer_version(latest_label, APP_VERSION),
                     "url": url,
                     "checked": True,
+                    "installable": blocker is None,
+                    "installBlocker": blocker,
                 }
         ttl = UPDATE_CACHE_TTL
     except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
         payload = {"enabled": True, "current": APP_VERSION, "available": False, "checked": False}
+        release = None
         ttl = UPDATE_ERROR_TTL
     with _UPDATE_LOCK:
         _UPDATE_CACHE["checked_at"] = time.monotonic()
         _UPDATE_CACHE["ttl"] = ttl
         _UPDATE_CACHE["payload"] = payload
+        _UPDATE_CACHE["release"] = release
     return dict(payload)
 
 
@@ -1542,6 +1560,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.list_models()
         elif self.path == "/api/telemetry":
             self.send_json(200, system_telemetry())
+        elif self.path == "/api/update/status":
+            self.send_json(200, UPDATER.status())
         elif self.path in ("/api/update", "/api/update?force=1"):
             self.send_json(200, check_latest_release(force=self.path.endswith("force=1")))
         elif self.path == "/api/usage":
@@ -1653,6 +1673,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/update/preference":
             self.set_update_preference()
+            return
+        if self.path == "/api/update/download":
+            self.start_update_download()
             return
         if self.path == "/api/model/unload":
             self.unload_model()
@@ -2346,6 +2369,21 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         update_settings_file(protect_memory=enabled)
         self.send_json(200, {"ok": True, "auto_protect": enabled})
+
+    def start_update_download(self):
+        if not update_check_enabled():
+            self.send_json(409, {"error": "Turn on Check for updates in Settings first."})
+            return
+        check_latest_release()
+        with _UPDATE_LOCK:
+            release = _UPDATE_CACHE.get("release")
+        if not release:
+            self.send_json(409, {"error": "Pipkin could not reach GitHub Releases. Try again in a moment."})
+            return
+        try:
+            self.send_json(200, UPDATER.start(release, APP_VERSION))
+        except updater.UpdateError as error:
+            self.send_json(409, {"error": str(error)})
 
     def set_update_preference(self):
         try:

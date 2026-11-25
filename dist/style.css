@@ -767,6 +767,13 @@ body:not([data-sidebar-collapsed]) #history-toggle, body:not([data-sidebar-colla
 .update-banner-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .update-banner-actions a.button { text-decoration: none; }
 .update-setting-controls { display: flex; align-items: center; gap: 10px; flex: none; }
+.update-banner { flex-wrap: wrap; }
+.update-banner[data-state="error"] { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 34%, transparent); }
+.update-banner[data-state="error"] .update-banner-copy .icon { color: var(--warn); }
+.update-progress { flex: 1 0 100%; height: 4px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.update-progress i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .3s var(--ease-out); }
+.update-progress.indeterminate i { width: 35%; animation: update-sweep 1.1s var(--ease-in-out) infinite; }
+@keyframes update-sweep { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
 .live-run-banner {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   margin-bottom: 8px; padding: 7px 10px 7px 12px; border-radius: 13px; font-size: .82rem;

@@ -212,11 +212,45 @@ internal sealed class MainWindow : Form
             {
                 FlashTaskbarIfInactive(type == "attention" ? 5u : 2u);
             }
+            else if (type == "apply-update" && e.Source.StartsWith($"http://127.0.0.1:{Port}/", StringComparison.Ordinal))
+            {
+                ApplyUpdate();
+            }
         }
         catch
         {
             // Ignore unrecognized messages from the page.
         }
+    }
+
+    /// Runs the helper the server staged after verifying a signed update, then closes so it can swap in the new
+    /// version and reopen Pipkin. The script path is fixed; nothing from the page chooses what runs.
+    private void ApplyUpdate()
+    {
+        string dataRoot = Environment.GetEnvironmentVariable("LOCALAPPDATA")
+            ?? Environment.GetEnvironmentVariable("APPDATA")
+            ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string script = Path.Combine(dataRoot, "Pipkin", "updates", "apply-update.ps1");
+        if (!File.Exists(script)) return;
+        try
+        {
+            var startInfo = new ProcessStartInfo("powershell.exe")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            };
+            foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
+                                        "-AppPid", Environment.ProcessId.ToString() })
+                startInfo.ArgumentList.Add(arg);
+            Process.Start(startInfo);
+        }
+        catch
+        {
+            return;
+        }
+        _isBusy = false;
+        Close();
     }
 
     private void FlashTaskbarIfInactive(uint count)
