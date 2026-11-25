@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="264" height="76" viewBox="0 0 264 76" role="img" aria-labelledby="title">
+  <title id="title">Download for Windows, x64 ZIP</title>
+  <rect x=".5" y=".5" width="263" height="75" rx="17" fill="#183e66" stroke="#386696"/>
+  <rect x="13" y="13" width="50" height="50" rx="12" fill="#28517a"/>
+  <path d="M26 26h11v11H26zm13 0h11v11H39zM26 39h11v11H26zm13 0h11v11H39z" fill="#e6f3ff"/>
+  <g font-family="system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="75" y="34" fill="#fff" font-size="14.5" font-weight="700">Download for Windows</text>
+    <text x="75" y="53" fill="#cce4fa" font-size="12">Windows x64 · ZIP</text>
+  </g>
+  <path d="M242 29v15m-5-5 5 5 5-5m-12 10h14" fill="none" stroke="#e6f3ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -61,6 +61,8 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 
 ## Progress log (newest first; keep at most 8 entries, delete the oldest)
 
+- 2026-11-25: Updated the GitHub README and Windows guide for v2.1.0 with platform download buttons, first-launch steps, and shareable skills. Check the download buttons and the three-step setup on GitHub.
+
 - 2026-11-25: Fixed Windows workspace skill discovery for v2.1.0. Directory entries on Windows do not report link counts, so the loader now checks real file metadata before reading and still rejects hard links. Check that folder skills appear in `/skills` on Windows.
 
 - 2026-11-25: v2.1.0 Shareable Skills & Verified Workflow Packs. Added `skills.py` and upgraded `dist/skills.js` with the `.pipkin-skill` / `.pipkin-skill-pack` and Markdown frontmatter formats, 7 declarative post-run verification checks (file match, local HTML links, required heading/text, min words, citations, no TODO/TBD placeholders) with automatic one-shot self-fix retry in `agent.py` and timeline check cards in `dist/agent-view.js`, a Security Preview & Install dialog (with drag-and-drop import, export, and static safety scan for prompt-override/shell/network/secret patterns), and project-scoped Workspace Skill Packs (`.pipkin/skills/` loaded safely without symlink escapes and protected from agent writes). Check `/skills` (Import, Export, New skill with checks, Save to folder), dropping a `.pipkin-skill` file onto Pipkin, and running a workspace skill from `.pipkin/skills/`.

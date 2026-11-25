@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="264" height="76" viewBox="0 0 264 76" role="img" aria-labelledby="title">
+  <title id="title">Download for macOS, Apple Silicon ZIP</title>
+  <rect x=".5" y=".5" width="263" height="75" rx="17" fill="#10483b" stroke="#28725f"/>
+  <rect x="13" y="13" width="50" height="50" rx="12" fill="#215d4d"/>
+  <g fill="none" stroke="#e4fff3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M26 31a2 2 0 0 1 2-2h20a2 2 0 0 1 2 2v13H26z"/>
+    <path d="M26 44h24l4 5H22z"/>
+  </g>
+  <g font-family="system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="75" y="34" fill="#fff" font-size="17" font-weight="700">Download for Mac</text>
+    <text x="75" y="53" fill="#c4ede0" font-size="12">Apple Silicon · ZIP</text>
+  </g>
+  <path d="M238 29v15m-5-5 5 5 5-5m-12 10h14" fill="none" stroke="#e4fff3" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

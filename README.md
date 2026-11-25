@@ -2,46 +2,62 @@
   <img src="dist/favicon.png" alt="Pipkin app icon" width="88" height="88">
 </p>
 <h1 align="center">Pipkin</h1>
-<p align="center"><strong>Local AI chat and a workspace agent for macOS and Windows.</strong><br>
-Turn your own files into finished work with a model that runs on your machine.</p>
+<p align="center"><strong>Local AI chat and a workspace agent for Mac and Windows.</strong><br>
+Chat with an Ollama model on your computer, or give Agent a folder and turn your files into a website, document, or presentation.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.0.6"><strong>Download v2.0.6</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/download/v2.1.0/Pipkin-macos-arm64.zip"><img src="docs/download-macos.svg" alt="Download Pipkin for Mac, Apple Silicon ZIP" width="264" height="76"></a>
+  <a href="https://github.com/garywu000/pipkin/releases/download/v2.1.0/Pipkin-windows-x64.zip"><img src="docs/download-windows.svg" alt="Download Pipkin for Windows, x64 ZIP" width="264" height="76"></a>
+</p>
+<p align="center">
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.1.0"><strong>v2.1.0 release notes</strong></a> ·
   <a href="#get-started">Get started</a> ·
-  <a href="#chat-and-projects">Features</a> ·
+  <a href="#shareable-skills">Shareable skills</a> ·
   <a href="#try-site">Try /site</a> ·
-  <a href="#version-history">Version history</a> ·
   <a href="#build-from-source">Build from source</a>
 </p>
 
-Pipkin is a desktop app for [Ollama](https://ollama.com) on macOS and Windows. Use **Chat** for questions, writing, and research. Use **Agent** to plan a task, work inside a folder you choose, and review the files it saves. Local models run on your computer.
-
-![Pipkin on macOS in the Emerald light theme, showing the Chat and Agent switch and suggested prompts](docs/screenshots/welcome.png)
-
 ## Get started
 
-### macOS
+### 1. Install and open
 
-1. Download [Pipkin for Apple silicon](https://github.com/garywu000/pipkin/releases/download/v2.0.6/Pipkin-macos-arm64.zip), unzip it, and open **Pipkin.app**. This preview is ad-hoc signed. If macOS blocks the download, use the [source build](#build-from-source).
-2. Install [Ollama for macOS](https://ollama.com/download/mac) and download a local model. First-run setup has an Ollama guide if no model is installed.
+| Platform | Install first | Open Pipkin |
+| --- | --- | --- |
+| **Mac · Apple Silicon** | Install and open [Ollama for macOS](https://ollama.com/download/mac). If macOS prompts for Command Line Tools to run Python, install them. | Extract the ZIP, move **Pipkin.app** to **Applications**, then open it. The Mac build is ad-hoc signed. If macOS blocks it, use the [source build](#build-from-source). |
+| **Windows · x64** | On Windows 11 or Windows 10 22H2, install and open [Ollama for Windows](https://ollama.com/download/windows). Install [Python 3.9+](https://www.python.org/downloads/windows/) with **Add Python to PATH** and the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if missing. | Extract the full **Pipkin** folder, then open **Pipkin.exe** inside it. The ZIP bundles .NET. See the [Windows setup guide](windows/README.md). |
 
-### Windows
+### 2. Pick a local model
 
-1. On an x64 PC running Windows 11 or Windows 10 22H2, install [Ollama for Windows](https://ollama.com/download/windows) and [Python 3.9 or later](https://www.python.org/downloads/windows/) with **Add Python to PATH**. Install the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if it is missing (pre-installed on Windows 11). The Windows ZIP is self-contained — no separate .NET install is required.
-2. Download [Pipkin for Windows x64](https://github.com/garywu000/pipkin/releases/download/v2.0.6/Pipkin-windows-x64.zip), extract the full **Pipkin** folder, and double-click **Pipkin.exe**. Pipkin manages its own local server, so opening a terminal is only needed for tasks such as downloading a model.
+In Pipkin’s first-launch setup, choose your appearance and select an installed **Local Ollama model**. If the list is empty, make sure Ollama is running and download a model in Terminal on Mac or PowerShell on Windows. Try this starter if it fits your computer.
 
-See the [Windows guide](windows/README.md) for details. The [Windows build and test run](https://github.com/garywu000/pipkin/actions/runs/45325460976) produced the ZIP attached to v1.9.0.
+~~~sh
+ollama pull qwen3:8b
+~~~
 
-### Choose a model and start
+After the download, the model appears in Pipkin’s picker. Agent needs a model that supports tool calls.
 
-For a first model, try `ollama pull qwen3:8b` if it fits your computer. Agent needs a model that supports tool calls. Choose **Chat** or **Agent** in Pipkin. For Agent, select a folder and use **Ask first** to review proposed changes. Pipkin loads the model on demand. Click the model status and choose **Unload model** to free model memory during a session.
+### 3. Send your first prompt
 
-### Customize your first launch
+- **Chat** lets you ask a question or attach a file. Try “Summarize this file in five bullets.”
+- **Agent** works in a folder you select. Start with **Ask first** to review file changes, then [try a sample website task](#try-site).
 
-Choose **Light**, **Dark**, or **System** appearance, then preview **Emerald**, **Ocean**, **Amber**, **Rose**, and **Graphite** palettes. Pipkin remembers your choice. You can change it in **Settings → General** or replay the walkthrough from **Welcome setup**.
+Pipkin starts its local server automatically and loads your model when you send a prompt. Use **Unload model** in the model status menu to free model memory.
+
+> [!TIP]
+> Already using Pipkin? Open **Settings → General → Check for updates**. When the update appears, choose **Update now**, then **Restart to update**.
 
 ![Pipkin’s first-launch Choose your look screen with three appearance options and five color palettes](docs/screenshots/customize.png)
 
-The setup walkthrough also lets you pick an installed model, choose your default Chat or Agent mode, and set personal preferences. On Windows, the app uses Windows shortcut labels and a matching Light or Dark title bar. Rebind shortcuts under **Settings → General → Keyboard shortcuts**.
+## Shareable skills
+
+Type `/skills` to make a workflow reusable. Add your instructions and optional checks for saved files, local links, headings, text, word count, citation markers, or placeholders. In Agent, the **Skill checks** card shows the results. The general Work editor can ask the model for one correction when a check fails.
+
+- **Share** a single skill as a `.pipkin-skill` or export your library as a `.pipkin-skill-pack`.
+- **Import** by dropping the file into Pipkin or choosing **Import skill…**. The preview shows the skill’s instructions, checks, and flagged patterns before you install it.
+- **Keep skills with a project** by saving them in its `.pipkin/skills/` folder. They appear with a **Folder** badge when you open that workspace.
+
+See **Known limitations** in the [v2.1.0 release notes](https://github.com/garywu000/pipkin/releases/tag/v2.1.0) for the current verification and pack-import limits.
+
+![Pipkin on macOS in the Emerald light theme, showing the Chat and Agent switch and suggested prompts](docs/screenshots/welcome.png)
 
 ## Chat and projects
 
@@ -125,6 +141,8 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.1.0](https://github.com/garywu000/pipkin/releases/tag/v2.1.0) | Shareable skills and packs, workspace skills, import previews, and automatic Work output checks. Improved Stop and approval recovery. |
+| [v2.0.7](https://github.com/garywu000/pipkin/releases/tag/v2.0.7) | Smoother Agent timers across chat switches, recovery when stream updates stall, and fewer retries of failed commands. Improved support for cloud-synced files on macOS. |
 | [v2.0.6](https://github.com/garywu000/pipkin/releases/tag/v2.0.6) | The first release delivered through one-click updates. After a successful update, the helper also removes its emptied staging folder. |
 | [v2.0.5](https://github.com/garywu000/pipkin/releases/tag/v2.0.5) | One-click updates: **Update now** in the update banner downloads the next version, verifies its signature and checksum, and **Restart to update** swaps it in and reopens Pipkin with your chats and settings intact (Mac and Windows). Every clickable control now shows the hand cursor. Updating from v2.0.4 or earlier is a one-time manual download. |
 | [v2.0.4](https://github.com/garywu000/pipkin/releases/tag/v2.0.4) | A new look: the chat sits on a floating sheet framed by the window, warm paper-toned surfaces tinted by your palette, refreshed Emerald, Ocean, Amber, Rose, and Graphite colors in light and dark, rounded headings on macOS, icons on the starter cards, and a pill Chat/Agent switch. Theme changes cross-fade smoothly. Fixes: buttons such as **Continue** and **Apply change** stay readable on hover, equations render at a readable size with a proper math font, the scroll-to-bottom button no longer lingers on an empty chat, the side panel search box lost its double outline, the narrow-window side panel stays opaque, and the window title bar always matches the theme. |
@@ -145,10 +163,10 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Roadmap
 
-- **Distribution.** Signed and notarized Mac builds, Windows installer improvements, and a project license.
+- **Distribution.** Developer ID signing and notarization for Mac builds, plus Windows installer improvements.
 - **Benchmark comparisons.** Publish repeated trials with the same hardware, model, context, and task when comparing single-model and Explorer runs.
 - **Connected accounts.** Read-first access to GitHub and Google Workspace, with reviewed writes.
-- **Extensibility.** Shareable skills, scheduled work, and moving conversations between devices.
+- **Extensibility.** More reusable workflows and scheduled work.
 
 Have an idea or a task Pipkin should finish? [Open an issue](https://github.com/garywu000/pipkin/issues).
 
@@ -181,10 +199,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 | [`windows/`](windows/) | Windows WebView2 host and ZIP packaging |
 | [`agent.py`](agent.py) | Agent loop, workspace tools, context management, recovery, undo, and site checks |
 | [`artifacts.py`](artifacts.py) | Content plans and rendering for sites, Word, PowerPoint, and PDF |
+| [`skills.py`](skills.py) | Portable skill formats, workspace skill loading, and declarative checks |
 | [`benchmarks/`](benchmarks/) | Work benchmark tasks, graders, and recorded baselines |
 | [`tests/`](tests/) | Agent and workspace regression tests |
 | [`docs/screenshots/`](docs/screenshots/) | Images used in this README |
 
 ## License
 
-Project licensing is still being decided. Bundled libraries have their own [license notices](THIRD_PARTY_NOTICES.md).
+Pipkin is distributed under the [MIT License](LICENSE). See the [third-party notices](THIRD_PARTY_NOTICES.md) for bundled libraries.
