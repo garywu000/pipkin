@@ -61,6 +61,8 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 
 ## Progress log (newest first; keep at most 8 entries, delete the oldest)
 
+- 2026-11-24: v2.0.7 agent resilience fixes: allow same-user hard links from cloud sync clients (writes swap a new file atomically), fix timer freezing across chat switches, disable WebKit hidden-window occlusion throttling in `PipkinApp.m`, add numbered event log + self-healing `/api/agent/events` resync (preserving structural events over long thinking bursts and cleanly finishing runs on dead/dropped streams), block duplicate failed commands before re-approval and nudge after consecutive shell failures, and fix macOS sandbox heredocs/`xcrun_db` noise. Check a long Agent run while switching chats/windows and reading files in a synced folder.
+
 - 2026-11-24: v2.0.6, the first release shipped through one-click updates (the update helper now removes its emptied staging folder). Deliberately not promoted into Pipkin.app: the user is testing Update now from v2.0.5. Check that Settings › General shows v2.0.6 after Restart to update.
 
 - 2026-11-24: v2.0.5 one-click updates. `updater.py` verifies a signed `pipkin-update.json` (pure-Python Ed25519, key in the maintainer's Keychain), downloads and hash-checks the platform zip, extracts it safely, and stages a helper; the Mac/Windows shells run that fixed-path helper on `apply-update`, quit, and the helper swaps the app (with rollback) and reopens it. Banner: Update now → progress → Restart to update. Also a hand cursor on every clickable control. Check Settings › General and, after the next release, Update now on a v2.0.5 install.
@@ -74,7 +76,5 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 - 2026-11-24: v2.0.1 security hardening (pushed and released with v2.0.0). Web fetches pin the checked DNS answer (no rebinding to localhost/LAN), the Mac command sandbox blocks open/osascript/launchctl/Apple Events, backup imports keep local shell/approval/web settings and never overwrite projects, writes re-check hard links after opening, settings/transfers save atomically as 0600, backups use 600k PBKDF2 and 8+ char passphrases, long streaming replies repaint less often. Check importing an old backup, a web fetch, and an approved command in Work.
 
 - 2026-11-24: Reviewed v1.2 through v1.9 and updated installation, features, and version history for macOS and Windows. Verified the Windows release ZIP against the successful CI package. Included platform_os.py in Mac source builds and refreshed the memory graph screenshot.
-
-- 2026-11-23: Updated the v1.2 README and captured new screenshots of first-launch customization, the welcome screen, Chat, Agent approval, the Harness launcher, and model memory using sample data. Check the screenshots and first-run instructions on GitHub.
 
 At the end of every task that changed files, add one line to this log: date, what changed, and what the user should check.

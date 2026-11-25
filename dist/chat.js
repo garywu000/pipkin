@@ -214,6 +214,8 @@ let activeReplyHistory = null;
 let stashedLiveRun = null;
 let activeAgentRun = null;
 let activeAgentActivity = null;
+/* Set while a Work run streams: fetches any events the live stream missed. */
+let activeAgentResync = null;
 let followLatest = true;
 let previousScroll = 0;
 const queuedSteering = new Map();
@@ -3317,9 +3319,13 @@ async function answerApproval(run, entry, approved, view) {
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error);
   } catch (error) {
     if (run.state !== "working") return;
-    entry.decision = "expired";
+    // Show the buttons again instead of a dead "Not answered": if the server already moved on, the resync below
+    // delivers the real outcome; if it is still waiting, you can answer again.
+    entry.decision = null;
     view.activity?.render();
-    announce(error.message || "Could not send your decision.", true);
+    announce((error.message || "Could not send your decision.") + " Try again.", true);
+  } finally {
+    if (activeAgentRun === run) activeAgentResync?.(600);
   }
 }
 
@@ -3383,6 +3389,7 @@ async function sendSteering(run, text) {
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error);
     pending.saved = Boolean(run.checkpointId);
     if (activeAgentRun === run && queuedSteering.has(id)) renderSteering("steering_queued");
+    if (activeAgentRun === run) activeAgentResync?.(900);
   } catch (error) {
     if (activeAgentRun !== run) return;
     if (queuedSteering.delete(id)) {
@@ -3699,6 +3706,17 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
       const earlier = compactedContext ? "Summary of older turns\n" + compactedContext.text : "";
       const notes = [await requestContext(), earlier].filter(Boolean).join("\n\n").slice(0, 6000);
       const task = currentMessage.content;
+      let lastSeq = 0;
+      let lastEventAt = Date.now();
+      let resyncing = false;
+      let resyncEnded = null;
+      let streamClosed = false;
+      let serverDone = false;
+      const resyncTimers = new Set();
+      // Stop aborts the run's stream; so does a resync that finds the run already finished.
+      const streamAbort = new AbortController();
+      if (controller.signal.aborted) streamAbort.abort();
+      else controller.signal.addEventListener("abort", () => streamAbort.abort(), { once: true });
       const response = await fetch("/api/agent/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3720,7 +3738,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
           browser: Boolean(window.PipkinPanels?.browserAllowed?.()),
           protectMemory: settings.protectMemory !== false,
         }),
-        signal: controller.signal,
+        signal: streamAbort.signal,
       });
       if (response.status === 403) {
         const problem = await response.json().catch(() => ({}));
@@ -3730,7 +3748,15 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
         }
         throw new Error(problem.error || "The agent request was rejected.");
       }
-      await readStream(response, (part) => {
+      /* macOS throttles a page whose window is covered, so the live stream can fall behind or stall. Every event
+         carries a number; when the page comes back into view, goes quiet, or sends an answer, it asks the server
+         for anything it missed. Events already seen are skipped, so a late stream and a resync never double up. */
+      const handleAgentEvent = (part) => {
+        if (Number.isInteger(part.seq)) {
+          if (part.seq <= lastSeq) return;
+          lastSeq = part.seq;
+        }
+        lastEventAt = Date.now();
         if (part.event === "error") throw new Error(part.text);
         if (part.event === "tool_result" || part.event === "checkpoint_restored") mergeSources(part.sources);
         const info = Agent.apply(agentRun, part);
@@ -3762,8 +3788,100 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
         }
         if (part.event === "run" || info.final !== undefined) updateControls();
         paint(() => agentRun.answer || agentRun.draft);
-      });
-      if (!done) throw new Error("The agent run was interrupted.");
+      };
+      const resync = async ({ final = false } = {}) => {
+        if (resyncing || !agentRun.runId || controller.signal.aborted) return false;
+        if (!final && (streamClosed || streamAbort.signal.aborted)) return false;
+        resyncing = true;
+        let ok = false;
+        try {
+          for (let page = 0; page < 25; page += 1) {
+            const reply = await fetch("/api/agent/events", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ run: agentRun.runId, after: lastSeq }),
+            });
+            if (!reply.ok) break;
+            ok = true;
+            const data = await reply.json();
+            for (const part of data.events) {
+              try {
+                handleAgentEvent(part);
+              } catch (error) {
+                resyncEnded = { error };
+              }
+            }
+            if (data.more) continue;
+            if (data.done) {
+              serverDone = true;
+              if (!resyncEnded) resyncEnded = { done: true };
+            }
+            break;
+          }
+        } catch {
+          // The server is busy or the page is offline; the next trigger tries again.
+        } finally {
+          resyncing = false;
+        }
+        // The run ended (either server closed it or we already received the final result) but the live stream never said so.
+        if ((resyncEnded || done) && !streamAbort.signal.aborted) {
+          if (!resyncEnded) resyncEnded = { done: true };
+          streamAbort.abort();
+        }
+        return ok;
+      };
+      // After you answer or steer, check soon and again shortly after, so the result shows without waiting.
+      activeAgentResync = (delay = 0) => {
+        for (const wait of [delay, delay + 1500, delay + 4000]) {
+          const timerId = setTimeout(() => {
+            resyncTimers.delete(timerId);
+            void resync();
+          }, wait);
+          resyncTimers.add(timerId);
+        }
+      };
+      const onVisible = () => { if (!document.hidden) void resync(); };
+      document.addEventListener("visibilitychange", onVisible);
+      window.addEventListener("focus", onVisible);
+      const quietWatch = setInterval(() => {
+        if (Date.now() - lastEventAt > 4000) void resync();
+      }, 2000);
+      let streamError = null;
+      try {
+        await readStream(response, handleAgentEvent);
+      } catch (error) {
+        streamError = error;
+      } finally {
+        streamClosed = true;
+        clearInterval(quietWatch);
+        for (const timerId of resyncTimers) clearTimeout(timerId);
+        resyncTimers.clear();
+        document.removeEventListener("visibilitychange", onVisible);
+        window.removeEventListener("focus", onVisible);
+        activeAgentResync = null;
+      }
+      if (controller.signal.aborted) {
+        throw streamError || new DOMException("Aborted", "AbortError");
+      }
+      // If the live stream closed or errored before delivering the end of the run, catch up via /api/agent/events.
+      if (!controller.signal.aborted && agentRun.runId) {
+        let misses = 0;
+        while (!done && !resyncEnded?.error && !serverDone && !controller.signal.aborted) {
+          const reached = await resync({ final: true });
+          if (done || resyncEnded?.error || serverDone || controller.signal.aborted) break;
+          if (!reached) {
+            misses += 1;
+            if (misses >= 3) break;
+          } else {
+            misses = 0;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+        if (done && !agentRun.usage && !serverDone && !controller.signal.aborted) {
+          await resync({ final: true });
+        }
+      }
+      if (resyncEnded?.error) throw resyncEnded.error;
+      if (!done) throw (streamError && streamError.name !== "AbortError" ? streamError : new Error("The agent run was interrupted."));
       if (agentRun.usage) stats = agentRun.usage;
       announce();
       return;
@@ -3834,7 +3952,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
   } catch (error) {
     if (agentRun) {
       const stopped = error.name === "AbortError";
-      Agent.finish(agentRun, stopped ? "stopped" : "error");
+      if (agentRun.state === "working") Agent.finish(agentRun, stopped ? "stopped" : "error");
       answer = agentRun.answer || (agentRun.entries.length
         ? (stopped ? "_Agent run stopped._" : `**The agent could not finish:** ${error.message || "unknown error"}`)
         : "");

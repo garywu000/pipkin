@@ -152,7 +152,10 @@
         return { approval: true };
       case "approval_result": {
         const entry = run.entries.find((item) => item.type === "approval" && item.id === event.id);
-        if (entry) entry.decision = event.cancelled ? "expired" : event.approved ? "approved" : "denied";
+        if (entry) {
+          entry.decision = event.cancelled ? "expired" : event.approved ? "approved" : "denied";
+          if (event.cancelled) entry.reason = event.reason || null;
+        }
         break;
       }
       case "plan":
@@ -218,7 +221,10 @@
     if (run.draft.trim() && state !== "complete") settleDraft(run);
     for (const entry of run.entries) {
       if (entry.type === "tool" && entry.state === "running") entry.state = "fail";
-      if (entry.type === "approval" && !entry.decision) entry.decision = "expired";
+      if (entry.type === "approval" && !entry.decision) {
+        entry.decision = "expired";
+        entry.reason = "ended";
+      }
     }
     if (message) run.answer = message;
   }
@@ -345,7 +351,9 @@
 
   function approvalCard(entry, onApprove) {
     const card = el("div", { className: "approval-card", dataset: { decision: entry.decision || "pending" } });
-    const heading = entry.decision === "approved" ? "Approved" : entry.decision === "denied" ? "Declined" : entry.decision === "expired" ? "Not answered" : "Needs your approval";
+    const EXPIRED = { steering: "Skipped (you steered the run)", stop: "Canceled (the run is stopping)", ended: "Canceled when the run stopped" };
+    const heading = entry.decision === "approved" ? "Approved" : entry.decision === "denied" ? "Declined"
+      : entry.decision === "expired" ? EXPIRED[entry.reason] || "Not answered" : "Needs your approval";
     card.append(el("header", {}, icon(entry.decision === "approved" ? "check" : entry.decision ? "x" : entry.kind === "command" ? "terminal" : "edit"), el("span", { text: `${heading} · ${entry.title}` })));
     // Once decided, the approval is shown beside the action's result inside its batch.
     if (entry.decision) return card;
@@ -548,8 +556,12 @@
         state = run.state;
         root.dataset.state = summary.dataset.state = state;
         glyph.replaceChildren(state === "working" ? spinner() : icon(state === "complete" ? "check" : "alert"));
-        if (state !== "working") clearInterval(timer);
+        if (state !== "working") {
+          clearInterval(timer);
+          timer = 0;
+        }
       }
+      ensureTimer();
       label.textContent = summaryText(run, Date.now());
       if (!isOpen) return;
       const badgeData = [run.workspace, run.mode, run.notes, run.web, run.usage?.tokens, run.usage?.steps];
@@ -620,11 +632,22 @@
       syncChildren(timeline, items);
     }
 
+    /* The elapsed time ticks on its own. It keeps running while this card is off screen (another chat is open or the
+       window is covered), so the time is right when you come back; it stops only when the run ends. */
+    function ensureTimer() {
+      if (timer || run.state !== "working") return;
+      timer = setInterval(() => {
+        if (run.state !== "working") {
+          clearInterval(timer);
+          timer = 0;
+          render();
+        } else if (root.isConnected) {
+          label.textContent = summaryText(run, Date.now());
+        }
+      }, 1000);
+    }
+
     render();
-    if (run.state === "working") timer = setInterval(() => {
-      if (!root.isConnected || run.state !== "working") clearInterval(timer);
-      else label.textContent = summaryText(run, Date.now());
-    }, 1000);
     return {
       element: root,
       render,

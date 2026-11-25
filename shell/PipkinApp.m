@@ -7,6 +7,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
 #import <WebKit/WebKit.h>
+#import <objc/message.h>
 #import <UserNotifications/UserNotifications.h>
 #import "PipkinPet.h"
 #import "PipkinBrowser.h"
@@ -168,6 +169,11 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
     _webView.navigationDelegate = self;
     _webView.UIDelegate = self;
     _webView.allowsMagnification = NO;
+    // WebKit throttles a page whose window is covered or on another Space, which held back a running Work task's
+    // updates (rows stuck on "Running…", a frozen timer) until the window was in front again. Pipkin's pages are
+    // light, and a long agent run must keep its view current, so keep them running at full speed.
+    SEL occlusion = NSSelectorFromString(@"_setWindowOcclusionDetectionEnabled:");
+    if ([_webView respondsToSelector:occlusion]) ((void (*)(id, SEL, BOOL))objc_msgSend)(_webView, occlusion, NO);
     if (@available(macOS 13.3, *)) _webView.inspectable = YES;
     @try { [_webView setValue:@NO forKey:@"drawsBackground"]; } @catch (NSException *e) {}
     _webView.pageZoom = MAX(0.6, MIN(2.0, [[NSUserDefaults standardUserDefaults] doubleForKey:@"PageZoom"] ?: 1.0));

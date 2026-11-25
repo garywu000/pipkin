@@ -38,13 +38,14 @@ import platform_os
 import updater
 from agent import (
     FILE_FLAGS, PERMISSION_MODES, SOURCE_GUIDANCE, WEB_TOOLS, Agent, AgentStopped, ApprovalCancelled, Sources,
-    UndoConflict, UndoStore, WorkPaused, Workspace, clip, project_notes, system_prompt, validate_path, web_fetch, web_search,
+    UndoConflict, UndoStore, WorkPaused, Workspace, clip, ordinary_link, project_notes, system_prompt, validate_path, web_fetch,
+    web_search,
 )
 
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.0.6"
+APP_VERSION = "2.0.7"
 RELEASE_REPO = "garywu000/pipkin"
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
 RELEASE_URL_PREFIX = f"https://github.com/{RELEASE_REPO}/releases/"
@@ -67,6 +68,26 @@ HANDOFF_FILENAME = "pipkin-latest.pipkin-backup"
 HANDOFF_LIMIT = 25 * 1024 * 1024
 RUNS = {}
 RUNS_LOCK = Lock()
+# Numbered event logs for recent runs, so a page whose live stream stalled (macOS throttles pages in covered windows)
+# can fetch what it missed. Kept for ten minutes after a run ends; each log holds at most RUN_LOG_LIMIT events.
+RUN_LOGS = {}
+RUN_LOG_KEEP = 600
+RUN_LOG_LIMIT = 4000
+RUN_LOG_MAX_RUNS = 16
+STREAMING_EVENTS = frozenset({"thinking", "delta"})
+
+
+def prune_run_logs():
+    now = time.monotonic()
+    with RUNS_LOCK:
+        for run_id in [key for key, entry in RUN_LOGS.items() if entry["ended"] is not None and now - entry["ended"] > RUN_LOG_KEEP]:
+            RUN_LOGS.pop(run_id, None)
+        if len(RUN_LOGS) > RUN_LOG_MAX_RUNS:
+            ended = sorted(
+                ((entry["ended"], key) for key, entry in RUN_LOGS.items() if entry["ended"] is not None),
+            )
+            for _, key in ended[: max(0, len(RUN_LOGS) - RUN_LOG_MAX_RUNS)]:
+                RUN_LOGS.pop(key, None)
 ASSETS = Path(__file__).resolve().parent / "dist"
 REQUEST_LIMIT = 10 * 1024 * 1024
 MAX_IMAGES = 4
@@ -1659,6 +1680,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         if self.path == "/api/agent/stop":
             self.stop_agent_after_step()
             return
+        if self.path == "/api/agent/events":
+            self.agent_events()
+            return
         if self.path == "/api/agent/steer":
             self.steer_agent()
             return
@@ -1864,7 +1888,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         try:
             info = os.lstat(snap)
             attrs = getattr(info, "st_file_attributes", 0)
-            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not stat.S_ISLNK(info.st_mode) and not (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+            if stat.S_ISREG(info.st_mode) and ordinary_link(info) and not stat.S_ISLNK(info.st_mode) and not (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
                 has_snap = True
                 modified = info.st_mtime
                 size = info.st_size
@@ -1955,7 +1979,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             if target.exists() or target.is_symlink():
                 info = os.lstat(target)
                 attrs = getattr(info, "st_file_attributes", 0)
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_ISLNK(info.st_mode) or (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+                if not stat.S_ISREG(info.st_mode) or not ordinary_link(info) or stat.S_ISLNK(info.st_mode) or (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
                     raise ValueError("Existing handoff file is not a regular file.")
             with tempfile.NamedTemporaryFile("wb", dir=folder, prefix=".pipkin-handoff-", delete=False) as stream:
                 temporary = Path(stream.name)
@@ -1986,7 +2010,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         try:
             info = os.lstat(target)
             attrs = getattr(info, "st_file_attributes", 0)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_ISLNK(info.st_mode) or (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+            if not stat.S_ISREG(info.st_mode) or not ordinary_link(info) or stat.S_ISLNK(info.st_mode) or (attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
                 raise ValueError("Handoff file is not a regular file.")
             if not 0 < info.st_size <= HANDOFF_LIMIT:
                 raise ValueError("Handoff snapshot is empty or exceeds the 25 MB limit.")
@@ -2060,7 +2084,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             else:
                 with workspace.open_path(str(requested), FILE_FLAGS) as fd:
                     info = os.fstat(fd)
-                    regular = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                    regular = stat.S_ISREG(info.st_mode) and ordinary_link(info)
                     if info.st_dev != workspace.identity[0] or not (regular or stat.S_ISDIR(info.st_mode)):
                         raise ValueError()
                     current = target.lstat()
@@ -2527,6 +2551,36 @@ class ChatHandler(BaseHTTPRequestHandler):
         else:
             self.send_json(200, {"ok": True})
 
+    def agent_events(self):
+        """Events after `after` for a live or recently ended run, plus which approvals the server is still waiting on."""
+        try:
+            payload = self.read_json(1000)
+            run_id, after = payload["run"], payload["after"]
+            if not isinstance(run_id, str) or len(run_id) != 16 or not isinstance(after, int) or after < 0:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            self.send_json(400, {"error": "Invalid agent run."})
+            return
+        prune_run_logs()
+        with RUNS_LOCK:
+            run_log = RUN_LOGS.get(run_id)
+            run = RUNS.get(run_id)
+        if run_log is None:
+            self.send_json(404, {"error": "This agent run is no longer available."})
+            return
+        pending = []
+        if run is not None:
+            with run["changed"]:
+                pending = sorted(run["pending"])
+        with run_log["lock"]:
+            missed = [line for seq, _kind, line in run_log["events"] if seq > after]
+            lines = missed[:400]
+            more = len(missed) > 400
+            done = run_log["ended"] is not None
+            gap = run_log["dropped_structural"] > after
+        self.send_json(200, {"events": [json.loads(line) for line in lines], "more": more, "done": done and not more,
+                             "pending": pending, "gap": gap})
+
     def steer_agent(self):
         try:
             payload = self.read_json(16_000)
@@ -2654,8 +2708,11 @@ class ChatHandler(BaseHTTPRequestHandler):
         run = {"changed": Condition(), "pending": set(), "decisions": {}, "stop_after_step": Event(),
                "steering": [], "steering_seen": 0, "browser": {}}
         stop_requested = run["stop_after_step"].is_set
+        run_log = {"events": [], "seq": 0, "dropped_structural": 0, "ended": None, "lock": Lock()}
+        prune_run_logs()
         with RUNS_LOCK:
             RUNS[run_id] = run
+            RUN_LOGS[run_id] = run_log
         write_lock = Lock()
         streaming = False
         awake = None
@@ -2716,7 +2773,20 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         def send_event(event, **fields):
             with write_lock:
-                self.wfile.write(json.dumps({"event": event, **fields}, ensure_ascii=False).encode() + b"\n")
+                with run_log["lock"]:
+                    run_log["seq"] += 1
+                    seq = run_log["seq"]
+                    line = json.dumps({"event": event, "seq": seq, **fields}, ensure_ascii=False)
+                    events = run_log["events"]
+                    events.append((seq, event, line))
+                    if len(events) > RUN_LOG_LIMIT:
+                        # Drop oldest streaming token chunks first so structural events (approvals, tool results,
+                        # outputs, final result) survive even very long thinking bursts.
+                        drop_idx = next((idx for idx, item in enumerate(events) if item[1] in STREAMING_EVENTS), 0)
+                        dropped_seq, dropped_kind, _ = events.pop(drop_idx)
+                        if dropped_kind not in STREAMING_EVENTS:
+                            run_log["dropped_structural"] = max(run_log["dropped_structural"], dropped_seq)
+                self.wfile.write(line.encode() + b"\n")
                 self.wfile.flush()
 
         def emit(event, **fields):
@@ -2771,12 +2841,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                 approval_started = time.monotonic()
             try:
                 emit("approval", id=call_id, kind=kind, title=title, detail=detail)
+                reason = None
                 while True:
                     check()
                     with run["changed"]:
                         cancelled = stop_requested() or steering_pending()
                         if cancelled:
                             approved = False
+                            reason = "stop" if stop_requested() else "steering"
                             break
                         if call_id in run["decisions"]:
                             approved = run["decisions"].pop(call_id)
@@ -2788,7 +2860,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     approval_started = None
                     run["pending"].discard(call_id)
                     run["decisions"].pop(call_id, None)
-            emit("approval_result", id=call_id, approved=approved, cancelled=cancelled)
+            emit("approval_result", id=call_id, approved=approved, cancelled=cancelled, reason=reason)
             if cancelled:
                 raise ApprovalCancelled()
             return approved
@@ -2910,7 +2982,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             message = str(error) if isinstance(error, ValueError) and str(error) else "The agent could not reach Ollama or the workspace."
             try:
                 if streaming:
-                    self.wfile.write(json.dumps({"event": "error", "text": message}).encode() + b"\n")
+                    send_event("error", text=message)
                 else:
                     self.send_json(503, {"error": "Could not open the Work checkpoint."})
             except OSError:
@@ -2921,8 +2993,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                        "Resume Work to try again. Details are in Develop › Show Logs (server.log).")
             try:
                 if streaming:
-                    self.wfile.write(json.dumps({"event": "error", "text": message}).encode() + b"\n")
-                    self.wfile.flush()
+                    send_event("error", text=message)
                 else:
                     self.send_json(500, {"error": message})
             except OSError:
@@ -2937,6 +3008,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             finally:
                 with RUNS_LOCK:
                     RUNS.pop(run_id, None)
+                with run_log["lock"]:
+                    run_log["ended"] = time.monotonic()
                 GENERATION.release()
 
     def terminal_request(self, action):

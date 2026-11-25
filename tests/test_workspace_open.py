@@ -65,8 +65,11 @@ class WorkspaceOpenTest(unittest.TestCase):
         except OSError:
             pass
         try:
+            # A second hard link to a file you own (as Google Drive makes while syncing) is an ordinary workspace file.
             os.link(outside, self.root / "hard-link.html")
-            bad_paths.append("hard-link.html")
+            status, launch = self.open("hard-link.html")
+            self.assertEqual(status, 200)
+            self.assertIn(str(self.workspace.path / "hard-link.html"), [str(arg) for arg in launch.call_args.args[0]])
         except OSError:
             pass
         for path in bad_paths:

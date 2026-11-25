@@ -100,6 +100,16 @@ def _is_reparse_point(info):
     return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
+def ordinary_link(info):
+    """True for a file with a single name, or (macOS/Linux) a second hard link to a file this user owns. Cloud sync
+    clients such as Google Drive hard-link files while uploading them, so refusing every link made synced folders
+    unreadable. Reads allow such links; writes never go through a link (they replace the file instead), and links to
+    files owned by someone else (for example system files) stay refused."""
+    if info.st_nlink == 1:
+        return True
+    return sys.platform != "win32" and hasattr(os, "getuid") and info.st_uid == os.getuid()
+
+
 def validate_path(path):
     if not isinstance(path, str) or len(path) > 500:
         raise ValueError("Use a relative path within the selected folder.")
@@ -323,8 +333,8 @@ class Workspace:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError("Only regular text files are supported.")
-            if info.st_nlink != 1:
-                raise ValueError("Hard-linked files are excluded from the workspace.")
+            if not ordinary_link(info):
+                raise ValueError("Hard-linked files owned by another user are excluded from the workspace.")
             with os.fdopen(os.dup(fd), "rb") as stream:
                 raw = stream.read((MAX_DOCUMENT_BYTES if kind else MAX_FILE_BYTES) + 1)
         if kind:
@@ -545,8 +555,12 @@ class Workspace:
         with self._directory(parts[:-1], create=True) as parent:
             try:
                 info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                    raise ValueError("Only regular, unlinked files can be replaced.")
+                if not stat.S_ISREG(info.st_mode) or not ordinary_link(info):
+                    raise ValueError("Only regular files can be replaced.")
+                if info.st_nlink != 1:
+                    # A cloud sync client holds a second link: write a new file and swap it in, never through the link.
+                    self._replace_linked(parent, parts[-1], data, info)
+                    return
             except FileNotFoundError:
                 pass
             # Open without truncating, then check the opened file itself, so a hard link swapped in
@@ -554,10 +568,30 @@ class Workspace:
             fd = os.open(parts[-1], WRITE_FLAGS & ~os.O_TRUNC, 0o644, dir_fd=parent)
             with os.fdopen(fd, "wb") as stream:
                 info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_dev != self.identity[0]:
-                    raise ValueError("Only regular, unlinked files can be replaced.")
+                if not stat.S_ISREG(info.st_mode) or info.st_dev != self.identity[0] or not ordinary_link(info):
+                    raise ValueError("Only regular files can be replaced.")
+                if info.st_nlink != 1:
+                    self._replace_linked(parent, parts[-1], data, info)
+                    return
                 os.ftruncate(fd, 0)
                 stream.write(data)
+
+    @staticmethod
+    def _replace_linked(parent, name, data, info):
+        staging = ".pipkin-" + token_hex(12)
+        fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fchmod(stream.fileno(), info.st_mode & 0o777)
+                os.fsync(stream.fileno())
+            os.replace(staging, name, src_dir_fd=parent, dst_dir_fd=parent)
+        finally:
+            try:
+                os.unlink(staging, dir_fd=parent)
+            except FileNotFoundError:
+                pass
 
     def file_digest(self, path):
         """SHA-256 of a regular file's bytes, or None when it no longer exists."""
@@ -624,8 +658,8 @@ class Workspace:
         with self._directory(parts[:-1]) as parent:
             name = parts[-1]
             info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise ValueError("Only regular, unlinked files can be restored.")
+            if not stat.S_ISREG(info.st_mode) or not ordinary_link(info):
+                raise ValueError("Only regular files can be restored.")
             staging = ".pipkin-" + token_hex(12)
             fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
             try:
@@ -834,8 +868,12 @@ def recovery_hint(name, output, tool_names):
                     "or one of your built-in tools, or skip this check and say it is unverified.")
         if "no such file or directory" in text:
             return "A path in the command does not exist. Check it with list_files first."
-        if "permission denied" in text or "operation not permitted" in text:
-            return "Do not change permissions or use sudo. Take another approach, or tell the user what is blocked."
+        if "modulenotfounderror" in text or "no module named" in text:
+            return ("That Python package is not installed here. Use only Python's standard library or your built-in "
+                    "tools (read_file already reads PDFs and Word documents).")
+        if "permission denied" in text or "operation not permitted" in text or "read-only file system" in text:
+            return ("The command sandbox blocks network access and writes outside the workspace and temp folder. "
+                    "Do not change permissions or use sudo; use built-in workspace tools or write inside the workspace.")
         return ("Read the error output above and fix its cause before running one corrected command. "
                 "Note that grep exits 1 when nothing matched, which is a result, not a failure.")
     if not output.startswith("Tool error:"):
@@ -1386,6 +1424,7 @@ def isolated_env(tmp_dir, *, platform_name=None):
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + base_path
     env["HOME"] = str(tmp_dir)
     env["TMPDIR"] = str(tmp_dir)
+    env["TMPPREFIX"] = str(Path(tmp_dir) / "zsh")  # zsh puts here-document files here; the default /tmp is not writable
     env["SHELL"] = "/bin/zsh"
     env["TERM"] = "dumb"
     env["PAGER"] = "cat"
@@ -1412,6 +1451,9 @@ def seatbelt_profile(workspace_path, tmp_dir):
         "(deny network-inbound)"
         "(deny file-write*)"
         f'(allow file-write* (subpath "{_sb_escape(ws)}") (subpath "{_sb_escape(td)}") (literal "/dev/null"))'
+        # Apple's python3/strings launchers (xcrun) cache tool paths in the user temp folder; without this they print
+        # "couldn't create cache file" on every command, which small models then try to debug.
+        '(allow file-write* (regex #"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db[^/]*$"))'
         # Launching apps or scripting them would run code outside this sandbox (for example `open -a Terminal x.command`).
         "(deny appleevent-send)"
         '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd")'
@@ -2049,6 +2091,7 @@ class Agent:
         self.steering_texts = []
         self.results = {}
         self.ran_commands = set()
+        self.failed_commands = set()
         self.task = ""
         self.approval_seconds = 0.0
         self.plan = []
@@ -2261,7 +2304,7 @@ class Agent:
                     return self.workspace.raw_text(name)[0]
                 with self.workspace.open_path(name, FILE_FLAGS) as fd:
                     info = os.fstat(fd)
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_dev != self.workspace.identity[0]:
+                    if not stat.S_ISREG(info.st_mode) or not ordinary_link(info) or info.st_dev != self.workspace.identity[0]:
                         return None
                     if not 0 < info.st_size <= 7_000_000:
                         return None
@@ -2716,6 +2759,7 @@ class Agent:
         site_rounds = 0
         plan_reminded = False
         failures = {}
+        cmd_failures = 0
         problems = []
         recovery_sent = False
         site_needs_page = self.workflow == "site" and self.mode != "read" and not any(
@@ -2874,14 +2918,20 @@ class Agent:
                         raise ValueError("You already made this exact change. Read the file if you need to check it.")
                     if name == "run_command" and key in self.ran_commands:
                         output = "This exact command already ran with no workspace changes since. Use its output above or run a different command."
+                    elif name == "run_command" and key in self.failed_commands:
+                        output = "Tool error: This exact command already failed with no workspace changes since. Fix the cause or use a different tool/command instead of retrying it."
+                        ok = False
                     elif name in WORKSPACE_READS and self.visible(messages, key):
                         output = "This exact call's result is already above in this conversation. Use it instead of calling again."
                     else:
                         output = self.execute(name, args)
                         if name in WRITE_TOOL_NAMES:
                             self.seen.add(key)
-                        elif name == "run_command" and not output.startswith("The user declined") and not command_failed(output):
-                            self.ran_commands.add(key)
+                        elif name == "run_command" and not output.startswith("The user declined"):
+                            if command_failed(output):
+                                self.failed_commands.add(key)
+                            else:
+                                self.ran_commands.add(key)
                     if output.startswith("The user declined"):
                         ok = None
                 except (AgentStopped, BrokenPipeError, ConnectionResetError):
@@ -2946,6 +2996,10 @@ class Agent:
                     output += "\n\n(Reminder: if a plan step is finished, call update_plan to mark it completed.)"
                     self.since_plan = 0
                 failed = ok is False or (ok is None and not cancelled) or (name == "run_command" and command_failed(output))
+                if name == "run_command" and failed and not output.startswith("The user declined"):
+                    cmd_failures += 1
+                elif (name == "run_command" and not failed) or self.saved_file:
+                    cmd_failures = 0
                 if failed:
                     signature = failure_signature(name, output)
                     failures[signature] = failures.get(signature, 0) + 1
@@ -2955,6 +3009,11 @@ class Agent:
                         hint = ("This failed the same way before. Do not try it again: use a different tool or approach, "
                                 "or skip this step and report it as unverified. " + hint).strip()
                         self.emit("notice", text=f"Same problem twice with “{clip(label, 80)}”. Asked the model to try a different approach.")
+                    elif name == "run_command" and cmd_failures >= 2:
+                        hint = (f"{cmd_failures} shell commands failed in a row. Stop trying shell workarounds — use "
+                                "built-in workspace tools (read_file, search_text, edit_file, write_file) or move on "
+                                "and report what could not be verified. " + hint).strip()
+                        self.emit("notice", text=f"{cmd_failures} commands failed in a row. Asked the model to switch approach.")
                     if hint:
                         output += "\n\n(Recovery: " + hint + ")"
                 if (plan_nudge and not plan_reminded and not self.plan and name != "update_plan"
@@ -2967,8 +3026,10 @@ class Agent:
                     self.results.clear()
                     if name == "terminal_run":
                         self.ran_commands.clear()
+                        self.failed_commands.clear()
                 elif self.saved_file:
                     self.ran_commands.clear()
+                    self.failed_commands.clear()
                     changed_path = path_identity(self.saved_file)
                     self.results = {key: (result, paths) for key, (result, paths) in self.results.items()
                                     if paths is not None and changed_path not in paths}

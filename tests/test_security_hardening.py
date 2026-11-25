@@ -54,7 +54,9 @@ class SeatbeltProfileTests(unittest.TestCase):
 
 @unittest.skipIf(sys.platform == "win32", "POSIX hard links")
 class WriteHardLinkTests(unittest.TestCase):
-    def test_write_refuses_hard_linked_target(self):
+    def test_write_never_goes_through_a_hard_link(self):
+        # Sync clients (Google Drive) hard-link files, so the write succeeds, but it replaces the workspace entry
+        # instead of writing into the shared file: the outside link keeps its own content.
         with tempfile.TemporaryDirectory() as root:
             folder = Path(root) / "project"
             folder.mkdir()
@@ -62,9 +64,9 @@ class WriteHardLinkTests(unittest.TestCase):
             outside.write_text("keep")
             os.link(outside, folder / "linked.txt")
             workspace = agent.Workspace(folder)
-            with self.assertRaises(ValueError):
-                workspace.write_text("linked.txt", "overwritten")
+            workspace.write_text("linked.txt", "overwritten")
             self.assertEqual(outside.read_text(), "keep")
+            self.assertEqual((folder / "linked.txt").read_text(), "overwritten")
 
     def test_write_replaces_regular_file(self):
         with tempfile.TemporaryDirectory() as root:
