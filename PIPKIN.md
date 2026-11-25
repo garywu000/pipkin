@@ -61,7 +61,7 @@ The next harness improvement to benchmark is a bounded PDF-to-site workflow that
 
 ## Progress log (newest first; keep at most 8 entries, delete the oldest)
 
-- 2026-11-25: Added a README guide for choosing an Agent model from 8 GB to 64 GB Macs, including Ollama tool support, starting contexts, Windows GPU memory, and live benchmark evidence. Check the model guide from the GitHub homepage.
+- 2026-11-25: Added an Agent model guide for Mac and Windows with unified memory, dedicated VRAM, and CPU guidance, model examples, context starting points, and benchmark coverage. Check the hardware table from either README.
 
 - 2026-11-25: Updated the GitHub README and Windows guide for v2.1.0 with platform download buttons, first-launch steps, and shareable skills. Check the download buttons and the three-step setup on GitHub.
 
