@@ -17,6 +17,7 @@ const stopAfterStepButton = byId("stop-after-step");
 const skillMenu = byId("skill-menu");
 const skillsDialog = byId("skills-dialog");
 const skillEditor = byId("skill-editor");
+const skillImportDialog = byId("skill-import-dialog");
 const newChatButton = byId("new-chat");
 const chatList = byId("chat-list");
 const sidebarContent = byId("sidebar-content");
@@ -178,6 +179,11 @@ if (!["auto", "on", "off"].includes(settings.webMode)) settings.webMode = settin
 delete settings.web;
 let memories = readLocal(memoryKey, []).filter((item) => typeof item === "string");
 let customSkills = Skills.normalize(readLocal(skillKey, []));
+let workspaceSkills = [];
+let workspaceSkillWarnings = [];
+let workspaceSkillsRequest = 0;
+const trustedWorkspaceSkills = new Set();
+let pendingSkillPreview = null;
 let editingSkill = null;
 let skillQuery = "";
 let dismissedSkillQuery = null;
@@ -1154,11 +1160,13 @@ function renderSuggestions() {
 }
 
 function findSkill(name) {
-  return Skills.catalog(customSkills).find((skill) => skill.name === name && skill.instructions);
+  return Skills.catalog(customSkills, workspaceSkills).find((skill) => skill.name === name && skill.instructions);
 }
 
 function turnWorkflow(skill, text) {
-  return Skills.workflows[skill?.name] || (!skill && agentMode.checked ? Skills.detectWorkflow(text) : null);
+  return Skills.workflows[skill?.name]
+    || (skill?.output && Skills.workflowOutputs.has(skill.output) ? skill.output : null)
+    || (!skill && agentMode.checked ? Skills.detectWorkflow(text) : null);
 }
 
 function canRunSkill(skill, text) {
@@ -1313,13 +1321,17 @@ function renderSkillMenu() {
   skillQuery = menuQuery;
   skillChoices = activeReply || promptBox.readOnly || dismissedSkillQuery === menuQuery ? [] :
     mentionSelection ? Skills.mentions.filter(({ name }) => name.startsWith(mentionSelection.query)) :
-      Skills.suggestions(query, customSkills);
+      Skills.suggestions(query, customSkills, workspaceSkills);
   skillMenu.hidden = !skillChoices.length;
   skillMenu.replaceChildren(...skillChoices.map((skill, index) => {
     const description = skill.name === "compact" && tokenMeter.dataset.percent
-      ? skill.description + " " + tokenMeter.dataset.percent + "% full." : skill.description;
+      ? skill.description + " " + tokenMeter.dataset.percent + "% full."
+      : skill.source === "workspace"
+        ? (skill.description ? `${skill.description} · Folder skill` : "Workspace skill (.pipkin/skills/)")
+        : skill.description;
     const option = el("button", { id: "skill-choice-" + index, type: "button", role: "option", tabIndex: -1, className: "skill-choice" },
-      icon(skill.icon || "sparkle"), el("strong", { text: (mentionSelection ? "@" : "/") + skill.name }),
+      icon(skill.icon || (skill.source === "workspace" ? "folder" : "sparkle")),
+      el("strong", { text: (mentionSelection ? "@" : "/") + skill.name }),
       el("span", { text: description }));
     option.addEventListener("click", () => chooseSuggestion(skill));
     return option;
@@ -1347,21 +1359,178 @@ function handleSkillKeys(event) {
   return false;
 }
 
-function openSkills() {
-  const rows = [...Skills.starters, ...customSkills].map((skill) => {
+function skillTrustKey(skill) {
+  return `${agentWorkspace?.path || ""}::${skill.name}::${skill.instructions.length}:${skill.instructions}`;
+}
+
+function downloadTextFile(filename, content, mime = "application/json;charset=utf-8") {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = el("a", { href: url, download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportSkillFile(skill) {
+  try {
+    const payload = Skills.serializeSkill(skill);
+    downloadTextFile(`${skill.name}.pipkin-skill`, payload);
+    toast(`Exported ${skill.name}.pipkin-skill`);
+  } catch (error) {
+    announce(error.message || "Could not export this skill.", true);
+  }
+}
+
+function exportSkillPack() {
+  if (!customSkills.length) return;
+  const stamp = new Date().toISOString().slice(0, 10);
+  downloadTextFile(`pipkin-skills-${stamp}.pipkin-skill-pack`, Skills.serializeSkillPack(customSkills));
+  toast(`Exported ${customSkills.length} ${customSkills.length === 1 ? "skill" : "skills"}`);
+}
+
+function skillRowNode(skill, { isCustom = false, isWorkspace = false, shadowed = false } = {}) {
+  const title = el("div", { className: "skill-row-title" }, el("strong", { text: "/" + skill.name }));
+  if (isWorkspace) title.append(el("span", { className: "skill-badge folder", text: "Folder" }));
+  if (skill.output && Skills.outputLabels[skill.output]) {
+    title.append(el("span", { className: "skill-badge", text: Skills.outputLabels[skill.output].split(" (")[0] }));
+  }
+  if (skill.checks?.length) {
+    title.append(el("span", {
+      className: "skill-badge checks",
+      text: `${skill.checks.length} ${skill.checks.length === 1 ? "check" : "checks"}`,
+    }));
+  }
+  if (isWorkspace && skill.security?.level === "review") {
+    title.append(el("span", { className: "skill-badge warn", text: "Review" }));
+  }
+  if (shadowed) {
+    title.append(el("span", { className: "skill-badge", text: "Overridden by yours" }));
+  }
+  const desc = [skill.description, skill.author ? `by ${skill.author}` : ""].filter(Boolean).join(" · ");
+  const row = el("div", { className: "skill-row" },
+    el("div", {}, title, desc ? el("span", { className: "skill-description", text: desc }) : null));
+  if (!shadowed) {
     const use = el("button", { type: "button", className: "button small", text: "Use", "aria-label": "Use /" + skill.name });
     use.addEventListener("click", () => chooseSkill(skill.name));
-    const row = el("div", { className: "skill-row" },
-      el("div", {}, el("strong", { text: "/" + skill.name }), el("span", { className: "skill-description", text: skill.description })), use);
-    if (customSkills.includes(skill)) {
-      const edit = el("button", { type: "button", className: "button small", text: "Edit", "aria-label": "Edit /" + skill.name });
-      edit.addEventListener("click", () => openSkillEditor(skill, skill.name));
-      row.append(edit);
+    row.append(use);
+  }
+  if (isWorkspace) {
+    const inspect = el("button", { type: "button", className: "button small", text: "Inspect", "aria-label": "Inspect /" + skill.name });
+    inspect.addEventListener("click", () => openSkillPreviewDialog({
+      mode: "inspect",
+      skills: [skill],
+      title: `Workspace skill /${skill.name}`,
+      subtitle: `Loaded from ${skill.file || ".pipkin/skills/"} in ${agentWorkspace?.name || "this folder"}.`,
+      confirmLabel: "Install to library",
+      onConfirm: (selected) => installReviewedSkills(selected),
+    }));
+    row.append(inspect);
+  }
+  if (isCustom) {
+    const edit = el("button", { type: "button", className: "button small", text: "Edit", "aria-label": "Edit /" + skill.name });
+    edit.addEventListener("click", () => openSkillEditor(skill, skill.name));
+    const share = el("button", { type: "button", className: "button small", text: "Export", "aria-label": "Export /" + skill.name });
+    share.addEventListener("click", () => exportSkillFile(skill));
+    row.append(edit, share);
+  }
+  return row;
+}
+
+function openSkills() {
+  const nodes = [];
+  const personalNames = new Set(customSkills.map(({ name }) => name));
+  if (workspaceSkills.length || workspaceSkillWarnings.length) {
+    nodes.push(el("div", {
+      className: "skills-section-head",
+      text: `Workspace pack · ${agentWorkspace?.name || "Folder"} (.pipkin/skills/)`,
+    }));
+    for (const skill of workspaceSkills) {
+      nodes.push(skillRowNode(skill, { isWorkspace: true, shadowed: personalNames.has(skill.name) }));
     }
-    return row;
-  });
-  byId("skills-list").replaceChildren(...rows);
+    if (workspaceSkillWarnings.length) {
+      nodes.push(el("div", {
+        className: "skills-warning-note",
+        text: workspaceSkillWarnings.slice(0, 2).join(" "),
+      }));
+    }
+  }
+  if (customSkills.length) {
+    nodes.push(el("div", { className: "skills-section-head", text: `Your skills (${customSkills.length})` }));
+    for (const skill of customSkills) nodes.push(skillRowNode(skill, { isCustom: true }));
+  }
+  nodes.push(el("div", { className: "skills-section-head", text: "Built-in skills" }));
+  for (const skill of Skills.starters) nodes.push(skillRowNode(skill));
+
+  byId("skills-list").replaceChildren(...nodes);
+  byId("export-skills-pack").hidden = customSkills.length === 0;
   skillsDialog.showModal();
+}
+
+function populateSkillChecksForm(checks = []) {
+  const byType = new Map();
+  for (const check of Array.isArray(checks) ? checks : []) {
+    if (!byType.has(check.type)) byType.set(check.type, check);
+  }
+  const fileCheck = byType.get("file_exists");
+  byId("chk-file-exists").checked = Boolean(fileCheck);
+  byId("chk-file-pattern").value = fileCheck?.pattern && fileCheck.pattern !== "*" ? fileCheck.pattern : "";
+  byId("chk-html-links").checked = byType.has("html_links");
+  const headingCheck = byType.get("contains_heading");
+  byId("chk-heading").checked = Boolean(headingCheck);
+  byId("chk-heading-text").value = headingCheck?.text || "";
+  byId("chk-citations").checked = byType.has("citations");
+  byId("chk-no-placeholders").checked = byType.has("no_placeholders");
+  const wordsCheck = byType.get("min_words");
+  byId("chk-min-words").checked = Boolean(wordsCheck);
+  byId("chk-min-words-count").value = wordsCheck?.count ? String(wordsCheck.count) : "";
+  byId("skill-checks-section").open = (checks || []).length > 0;
+}
+
+function readSkillEditorChecks() {
+  const checks = [];
+  if (byId("chk-file-exists").checked) {
+    checks.push({ type: "file_exists", pattern: byId("chk-file-pattern").value.trim() || "*" });
+  }
+  if (byId("chk-html-links").checked) checks.push({ type: "html_links" });
+  if (byId("chk-heading").checked) {
+    const text = byId("chk-heading-text").value.trim();
+    if (!text) return { error: "Enter the required heading text or uncheck “Require heading”." };
+    checks.push({ type: "contains_heading", text });
+  }
+  if (byId("chk-citations").checked) checks.push({ type: "citations" });
+  if (byId("chk-no-placeholders").checked) checks.push({ type: "no_placeholders" });
+  if (byId("chk-min-words").checked) {
+    const count = Number.parseInt(byId("chk-min-words-count").value, 10);
+    if (!Number.isFinite(count) || count < 10 || count > 20000) {
+      return { error: "Minimum word count must be between 10 and 20,000." };
+    }
+    checks.push({ type: "min_words", count });
+  }
+  return { checks: Skills.normalizeChecks(checks) };
+}
+
+function buildSkillFromEditor() {
+  const checkResult = readSkillEditorChecks();
+  if (checkResult.error) {
+    showSkillError(checkResult.error);
+    return null;
+  }
+  const output = byId("skill-output").value;
+  const skill = Skills.customSkill({
+    name: byId("skill-name").value,
+    author: byId("skill-author").value,
+    description: byId("skill-description").value,
+    output,
+    instructions: byId("skill-instructions").value,
+    checks: checkResult.checks,
+  });
+  if (!skill) {
+    showSkillError("Choose an unused slash name starting with a letter and write the workflow steps.");
+    return null;
+  }
+  return skill;
 }
 
 function openSkillEditor(recipe = {}, name = "", original = recipe.name || null) {
@@ -1369,13 +1538,19 @@ function openSkillEditor(recipe = {}, name = "", original = recipe.name || null)
   editingSkill = original;
   byId("skill-editor-heading").textContent = original ? "Edit skill" : "New skill";
   byId("skill-name").value = name;
+  byId("skill-author").value = recipe.author || "";
   byId("skill-description").value = recipe.description || "";
+  byId("skill-output").value = recipe.output || "";
   byId("skill-instructions").value = recipe.instructions || "";
+  populateSkillChecksForm(recipe.checks || []);
   byId("skill-error").hidden = true;
   const remove = byId("delete-skill");
   remove.hidden = !original;
   remove.textContent = "Delete skill";
   remove.dataset.confirm = "false";
+  const saveWs = byId("save-skill-workspace");
+  saveWs.hidden = !agentWorkspace;
+  saveWs.disabled = false;
   skillEditor.showModal();
 }
 
@@ -1390,9 +1565,134 @@ function saveSkillList(skills) {
     return false;
   }
   customSkills = skills;
-  skillEditor.close();
+  if (skillEditor.open) skillEditor.close();
   renderSkillMenu();
   return true;
+}
+
+function installReviewedSkills(selectedSkills) {
+  if (!selectedSkills.length) return false;
+  const incomingNames = new Set(selectedSkills.map(({ name }) => name));
+  const kept = customSkills.filter(({ name }) => !incomingNames.has(name));
+  const merged = [...kept, ...selectedSkills.map((skill) => Skills.customSkill(skill)).filter(Boolean)];
+  if (merged.length > 100) {
+    byId("skill-import-error").textContent = "Your skill library holds up to 100 skills. Delete older skills first.";
+    byId("skill-import-error").hidden = false;
+    return false;
+  }
+  if (!writeLocal(skillKey, merged)) {
+    byId("skill-import-error").textContent = `Pipkin could not save skills on ${PipkinPlatform.thisDevice}.`;
+    byId("skill-import-error").hidden = false;
+    return false;
+  }
+  customSkills = merged;
+  renderSkillMenu();
+  toast(selectedSkills.length === 1 ? `Installed /${selectedSkills[0].name}` : `Installed ${selectedSkills.length} skills`);
+  return true;
+}
+
+function renderSkillPreviewCard(skill, { selectable = false, existingNames = new Set() } = {}) {
+  const security = skill.security || Skills.inspectSecurity(skill);
+  const perms = Skills.normalizePermissions(skill.permissions, skill.output || "");
+  const card = el("div", { className: "skill-preview-card" });
+  const head = el("div", { className: "skill-preview-head" });
+  let checkbox = null;
+  if (selectable) {
+    checkbox = el("input", { type: "checkbox", checked: true });
+    head.append(el("label", {}, checkbox, el("span", { text: "/" + skill.name })));
+  } else {
+    head.append(el("strong", { text: "/" + skill.name }));
+  }
+  const badges = el("div", { className: "skill-preview-badges" });
+  if (skill.author) badges.append(el("span", { className: "skill-badge", text: "by " + skill.author }));
+  if (existingNames.has(skill.name)) badges.append(el("span", { className: "skill-badge warn", text: "Updates existing" }));
+  if (skill.output && Skills.outputLabels[skill.output]) {
+    badges.append(el("span", { className: "skill-badge", text: Skills.outputLabels[skill.output] }));
+  }
+  if (perms.workspace) badges.append(el("span", { className: "skill-badge", text: "Workspace files" }));
+  if (perms.writes) badges.append(el("span", { className: "skill-badge", text: "May edit files" }));
+  if (perms.web) badges.append(el("span", { className: "skill-badge", text: "Web access" }));
+  head.append(badges);
+  card.append(head);
+
+  if (skill.description) card.append(el("div", { className: "skill-description", text: skill.description }));
+
+  const banner = el("div", { className: "skill-security-banner " + security.level },
+    el("strong", { text: security.level === "review" ? "Review before continuing" : "Safety check passed" }),
+    el("span", { text: security.summary }));
+  if (security.flags?.length) {
+    banner.append(el("ul", {}, ...security.flags.map((flag) => el("li", {},
+      el("span", { text: flag.label + (flag.excerpt ? ": " : "") }),
+      flag.excerpt ? el("code", { text: flag.excerpt }) : null))));
+  }
+  card.append(banner);
+
+  if (skill.checks?.length) {
+    card.append(
+      el("div", { className: "skill-description", text: `Verification checks (${skill.checks.length}):` }),
+      el("ul", { className: "skill-preview-checks" }, ...skill.checks.map((c) => el("li", { text: c.label }))),
+    );
+  }
+  card.append(el("pre", { className: "skill-preview-instructions", text: skill.instructions }));
+  return { card, checkbox };
+}
+
+function openSkillPreviewDialog({ mode = "import", skills = [], title, subtitle = "", confirmLabel, warnings = [], onConfirm }) {
+  if (!skills.length) return;
+  if (skillsDialog.open) skillsDialog.close();
+  byId("skill-import-heading").textContent = title || (skills.length === 1 ? `Review /${skills[0].name}` : `Review ${skills.length} skills`);
+  const subParts = [subtitle, ...warnings].filter(Boolean);
+  byId("skill-import-subtitle").textContent = subParts.join(" ");
+  byId("skill-import-error").hidden = true;
+  const existingNames = mode === "import" ? new Set(customSkills.map(({ name }) => name)) : new Set();
+  const selectable = mode === "import" && skills.length > 1;
+  const rows = skills.map((skill) => ({ skill, ...renderSkillPreviewCard(skill, { selectable, existingNames }) }));
+  byId("skill-import-list").replaceChildren(...rows.map(({ card }) => card));
+  const confirm = byId("confirm-skill-import");
+  confirm.textContent = confirmLabel || (skills.length === 1 ? "Install skill" : `Install ${skills.length} skills`);
+  const syncCount = () => {
+    if (!selectable) return;
+    const count = rows.filter(({ checkbox }) => checkbox?.checked).length;
+    confirm.disabled = count === 0;
+    confirm.textContent = count === 1 ? "Install 1 skill" : `Install ${count} skills`;
+  };
+  for (const { checkbox } of rows) checkbox?.addEventListener("change", syncCount);
+  confirm.disabled = false;
+  pendingSkillPreview = { mode, rows, onConfirm };
+  skillImportDialog.showModal();
+}
+
+async function handleSkillImportFiles(fileList) {
+  const imported = [];
+  const warnings = [];
+  const errors = [];
+  for (const file of fileList) {
+    if (file.size > 512 * 1024) {
+      errors.push(`${file.name}: file is over 512 KB.`);
+      continue;
+    }
+    try {
+      const text = await file.text();
+      const parsed = Skills.parseSkillFile(text, file.name);
+      imported.push(...parsed.skills);
+      warnings.push(...parsed.warnings);
+    } catch (error) {
+      errors.push(`${file.name}: ${error.message || "Could not parse skill file."}`);
+    }
+  }
+  const deduped = [...new Map(imported.map((skill) => [skill.name, skill])).values()];
+  if (!deduped.length) {
+    announce(errors.join(" ") || "No valid skills found in that file.", true);
+    return;
+  }
+  openSkillPreviewDialog({
+    mode: "import",
+    skills: deduped,
+    title: deduped.length === 1 ? `Install /${deduped[0].name}?` : `Install ${deduped.length} skills?`,
+    subtitle: "Inspect the instructions, checks, and safety scan below before adding to your library.",
+    warnings: [...warnings, ...errors],
+    onConfirm: (selected) => installReviewedSkills(selected),
+  });
 }
 
 function renderConversation() {
@@ -2791,6 +3091,15 @@ function addPastedText(text) {
 }
 
 async function addFiles(selected) {
+  const incoming = Array.from(selected || []);
+  const skillFiles = incoming.filter((file) => Skills.isSkillFilename(file?.name));
+  if (skillFiles.length) {
+    fileInput.value = "";
+    await handleSkillImportFiles(skillFiles);
+    const others = incoming.filter((file) => !Skills.isSkillFilename(file?.name));
+    if (!others.length) return;
+    selected = others;
+  }
   if (attachButton.disabled || !selected.length) return;
   processingFiles = true;
   updateControls();
@@ -2852,7 +3161,7 @@ function* documentPassages(text) {
 function modelMessage({ role, content, files: attached = [], skill, sourceChecked }, evidence = null) {
   const command = skill && Skills.parse(content);
   const request = command?.name === skill?.name && typeof skill?.instructions === "string"
-    ? Skills.prompt({ name: skill.name, instructions: skill.instructions.slice(0, 4000) }, command.input)
+    ? Skills.prompt({ ...skill, instructions: skill.instructions.slice(0, 4000) }, command.input)
     : role === "assistant" && sourceChecked ? withoutSourceMarkers(content) : content;
   const images = attached.filter((file) => file.image).map((file) => file.image);
   const documents = attached.filter((file) => file.text);
@@ -3232,13 +3541,52 @@ async function unloadModel() {
 /* Agent workspace                                                         */
 /* ====================================================================== */
 
-function setAgentWorkspace(folder) {
+async function loadWorkspaceSkills(folder, { announceLoaded = false } = {}) {
+  const reqId = ++workspaceSkillsRequest;
+  if (!folder?.key) {
+    workspaceSkills = [];
+    workspaceSkillWarnings = [];
+    renderSkillMenu();
+    return;
+  }
+  try {
+    const response = await fetch("/api/agent/workspace-skills", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: folder.key }),
+    });
+    if (reqId !== workspaceSkillsRequest) return;
+    if (!response.ok) {
+      workspaceSkills = [];
+      workspaceSkillWarnings = [];
+      renderSkillMenu();
+      return;
+    }
+    const data = await response.json();
+    if (reqId !== workspaceSkillsRequest) return;
+    workspaceSkills = Skills.normalize(data.skills || [], { allowWorkspaceMeta: true });
+    workspaceSkillWarnings = Array.isArray(data.warnings) ? data.warnings.filter((w) => typeof w === "string") : [];
+    renderSkillMenu();
+    if (announceLoaded && workspaceSkills.length) {
+      toast(`Loaded ${workspaceSkills.length} workspace ${workspaceSkills.length === 1 ? "skill" : "skills"} from .pipkin/skills/`);
+    }
+  } catch {
+    if (reqId === workspaceSkillsRequest) {
+      workspaceSkills = [];
+      workspaceSkillWarnings = [];
+      renderSkillMenu();
+    }
+  }
+}
+
+function setAgentWorkspace(folder, { announceSkills = false } = {}) {
   agentWorkspace = folder;
   byId("workspace-label").textContent = folder ? folder.name : "No folder";
   workspaceButton.title = folder ? "Change folder" : "Choose a folder for the agent";
   workspaceButton.dataset.active = String(Boolean(folder));
   updateControls();
   if (typeof syncHarnessPanel === "function") syncHarnessPanel();
+  void loadWorkspaceSkills(folder, { announceLoaded: announceSkills });
 }
 
 async function chooseAgentWorkspace() {
@@ -3254,7 +3602,7 @@ async function chooseAgentWorkspace() {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error);
     if (!result.cancelled) {
-      setAgentWorkspace({ key: result.workspace, name: result.name, path: result.path });
+      setAgentWorkspace({ key: result.workspace, name: result.name, path: result.path }, { announceSkills: true });
       toast(`Agent can now work in “${result.name}”`);
     }
     announce();
@@ -3490,7 +3838,10 @@ async function runLocalCommand({ name, input }) {
   } else if (name === "skills") openSkills();
   else if (name === "save-skill") {
     const latest = [...history].reverse().find((message) => message.agentRun?.state === "complete");
-    openSkillEditor({ instructions: Skills.fromRun(latest?.agentRun) }, input.trim());
+    openSkillEditor({
+      instructions: Skills.fromRun(latest?.agentRun),
+      checks: Skills.checksFromRun(latest?.agentRun),
+    }, input.trim());
   } else if (name === "init") {
     agentMode.checked = true;
     showMode();
@@ -3534,12 +3885,30 @@ async function sendMessage(event) {
     return;
   }
   if (!canRunSkill(skill, text)) return;
-  const attachments = files;
-  promptBox.value = "";
-  autoGrow();
-  files = [];
-  updateFiles();
-  await submitTurn(text, attachments, agentMode.checked, { skill, humanize });
+  const proceed = async () => {
+    const attachments = files;
+    promptBox.value = "";
+    autoGrow();
+    files = [];
+    updateFiles();
+    await submitTurn(text, attachments, agentMode.checked, { skill, humanize });
+  };
+  if (skill?.source === "workspace" && skill.security?.level === "review" && !trustedWorkspaceSkills.has(skillTrustKey(skill))) {
+    openSkillPreviewDialog({
+      mode: "run",
+      skills: [skill],
+      title: `Review workspace skill /${skill.name}`,
+      subtitle: `This skill was loaded from ${skill.file || ".pipkin/skills/"} and has flagged patterns. Review its instructions before running.`,
+      confirmLabel: `Run /${skill.name}`,
+      onConfirm: () => {
+        trustedWorkspaceSkills.add(skillTrustKey(skill));
+        void proceed();
+        return true;
+      },
+    });
+    return;
+  }
+  await proceed();
 }
 
 async function resumeWork(checkpointId) {
@@ -3558,12 +3927,22 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
   if (titleJob) await titleJob.done;
   useAgent = useAgent && !humanize;
   const userMessage = { role: "user", content: text };
-  if (skill) userMessage.skill = { name: skill.name, instructions: skill.instructions };
+  if (skill) {
+    userMessage.skill = {
+      name: skill.name,
+      instructions: skill.instructions,
+      ...(skill.output ? { output: skill.output } : {}),
+      ...(skill.inputs?.length ? { inputs: skill.inputs } : {}),
+      ...(skill.checks?.length ? { checks: skill.checks } : {}),
+      ...(skill.permissions ? { permissions: skill.permissions } : {}),
+    };
+  }
   const workflow = useAgent ? turnWorkflow(skill, text) : null;
   const starter = skill && !workflow && Skills.starters.some(({ name }) => name === skill.name);
   const tools = Skills.requestedMentions(text);
   const mode = modeOverride || (starter || (tools.length && !workflow) ? "read" : settings.permission);
-  const web = !workflow && settings.webMode !== "off" && (tools.length ? tools.some(({ name }) => name === "github") : !starter);
+  const skillDisablesWeb = skill?.permissions?.web === false;
+  const web = !workflow && !skillDisablesWeb && settings.webMode !== "off" && (tools.length ? tools.some(({ name }) => name === "github") : !starter);
   if (attachments.length) {
     userMessage.files = attachments;
     if (!text) userMessage.content = "Summarize the attached files.";
@@ -3733,6 +4112,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, skill = 
             attachments: attachments.filter((file) => typeof file.text === "string")
               .map(({ name, text, truncated }) => ({ name, text, truncated: Boolean(truncated) })),
           } } : {}),
+          ...(skill?.checks?.length ? { skillChecks: skill.checks, skillName: skill.name } : {}),
           allowMemory: !workflow && !starter && !tools.length && settings.memoryEnabled, memories: settings.memoryEnabled ? memories.slice(0, 60) : [],
           instructions: settings.instructions.slice(0, 6000), maxSteps: Number(settings.maxSteps) || 24,
           terminal: window.PipkinPanels?.terminalAllowed?.() ? (window.PipkinPanels?.activeTerminalId() || null) : null,
@@ -4531,6 +4911,32 @@ promptBox.addEventListener("keydown", (event) => {
   if (!sendButton.disabled) composer.requestSubmit();
 });
 byId("new-skill").addEventListener("click", () => openSkillEditor());
+byId("import-skill").addEventListener("click", () => byId("skill-import-file").click());
+byId("export-skills-pack").addEventListener("click", () => exportSkillPack());
+byId("skill-import-file").addEventListener("change", (event) => {
+  const picked = Array.from(event.currentTarget.files || []);
+  event.currentTarget.value = "";
+  if (picked.length) void handleSkillImportFiles(picked);
+});
+byId("cancel-skill-import").addEventListener("click", () => {
+  pendingSkillPreview = null;
+  skillImportDialog.close();
+});
+skillImportDialog.addEventListener("close", () => {
+  pendingSkillPreview = null;
+});
+byId("confirm-skill-import").addEventListener("click", () => {
+  if (!pendingSkillPreview) return;
+  const selected = pendingSkillPreview.rows
+    .filter(({ checkbox }) => !checkbox || checkbox.checked)
+    .map(({ skill }) => skill);
+  if (!selected.length) return;
+  const ok = pendingSkillPreview.onConfirm?.(selected);
+  if (ok !== false) {
+    pendingSkillPreview = null;
+    skillImportDialog.close();
+  }
+});
 byId("cancel-skill").addEventListener("click", () => skillEditor.close());
 byId("delete-skill").addEventListener("click", (event) => {
   if (!editingSkill) return;
@@ -4542,17 +4948,35 @@ byId("delete-skill").addEventListener("click", (event) => {
   }
   if (saveSkillList(customSkills.filter(({ name }) => name !== editingSkill))) toast("Skill deleted");
 });
+byId("save-skill-workspace").addEventListener("click", async (event) => {
+  if (!agentWorkspace) return;
+  byId("skill-error").hidden = true;
+  const skill = buildSkillFromEditor();
+  if (!skill) return;
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/agent/workspace-skill-save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: agentWorkspace.key, skill }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Could not save skill to workspace.");
+    skillEditor.close();
+    await loadWorkspaceSkills(agentWorkspace);
+    toast(`Saved ${data.path || ".pipkin/skills/" + skill.name + ".pipkin-skill"}`);
+  } catch (error) {
+    showSkillError(error.message || "Could not save skill to workspace.");
+  } finally {
+    button.disabled = false;
+  }
+});
 byId("skill-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  const skill = Skills.customSkill({
-    name: byId("skill-name").value,
-    description: byId("skill-description").value,
-    instructions: byId("skill-instructions").value,
-  });
-  if (!skill) {
-    showSkillError("Choose an unused slash name starting with a letter and write the workflow steps.");
-    return;
-  }
+  byId("skill-error").hidden = true;
+  const skill = buildSkillFromEditor();
+  if (!skill) return;
   const remaining = customSkills.filter(({ name }) => name !== editingSkill);
   if (remaining.some(({ name }) => name === skill.name)) {
     showSkillError("A skill already uses /" + skill.name + ".");
@@ -4686,7 +5110,15 @@ document.addEventListener("drop", (event) => {
   event.preventDefault();
   fileDragDepth = 0;
   byId("drop-overlay").hidden = true;
-  if (workspace.contains(event.target)) addFiles(Array.from(event.dataTransfer.files));
+  const dropped = Array.from(event.dataTransfer.files || []);
+  const skillFiles = dropped.filter((file) => Skills.isSkillFilename(file?.name));
+  if (skillFiles.length) {
+    void handleSkillImportFiles(skillFiles);
+    const others = dropped.filter((file) => !Skills.isSkillFilename(file?.name));
+    if (others.length && workspace.contains(event.target)) addFiles(others);
+    return;
+  }
+  if (workspace.contains(event.target)) addFiles(dropped);
 });
 
 newChatButton.addEventListener("click", () => selectChat(null));

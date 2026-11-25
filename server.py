@@ -35,6 +35,7 @@ from zipfile import BadZipFile, ZipFile
 import agent as agent_module
 import artifacts
 import platform_os
+import skills as skills_module
 import updater
 from agent import (
     FILE_FLAGS, PERMISSION_MODES, SOURCE_GUIDANCE, WEB_TOOLS, Agent, AgentStopped, ApprovalCancelled, Sources,
@@ -45,7 +46,7 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.0.7"
+APP_VERSION = "2.1.0"
 RELEASE_REPO = "garywu000/pipkin"
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
 RELEASE_URL_PREFIX = f"https://github.com/{RELEASE_REPO}/releases/"
@@ -1656,6 +1657,12 @@ class ChatHandler(BaseHTTPRequestHandler):
         if self.path == "/api/agent/restore":
             self.restore_workspace()
             return
+        if self.path == "/api/agent/workspace-skills":
+            self.list_workspace_skills()
+            return
+        if self.path == "/api/agent/workspace-skill-save":
+            self.save_workspace_skill()
+            return
         if self.path == "/api/agent/open-file":
             self.open_workspace_file()
             return
@@ -2051,6 +2058,45 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         key = grant_workspace(workspace)
         self.send_json(200, {"workspace": key, "name": workspace.path.name, "path": str(workspace.path)})
+
+    def list_workspace_skills(self):
+        try:
+            payload = self.read_json(4096)
+            key = payload.get("workspace")
+            if not valid_workspace_key(key):
+                raise ValueError()
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            self.send_json(400, {"error": "Invalid workspace request."})
+            return
+        workspace = authorized_workspace(key)
+        if workspace is None:
+            self.send_json(403, {"error": "Choose your workspace folder again.", "code": "workspace_required"})
+            return
+        self.send_json(200, skills_module.load_workspace_skills(workspace))
+
+    def save_workspace_skill(self):
+        try:
+            payload = self.read_json(40_960)
+            key = payload.get("workspace")
+            skill_data = payload.get("skill")
+            if not valid_workspace_key(key) or not isinstance(skill_data, dict):
+                raise ValueError("Invalid skill payload.")
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            self.send_json(400, {"error": "Invalid workspace skill request."})
+            return
+        workspace = authorized_workspace(key)
+        if workspace is None:
+            self.send_json(403, {"error": "Choose your workspace folder again.", "code": "workspace_required"})
+            return
+        try:
+            saved = skills_module.save_workspace_skill(workspace, skill_data)
+        except ValueError as error:
+            self.send_json(400, {"error": str(error)})
+            return
+        except OSError:
+            self.send_json(500, {"error": "Could not save the skill into .pipkin/skills/."})
+            return
+        self.send_json(200, saved)
 
     def open_workspace_file(self):
         try:
@@ -2643,6 +2689,14 @@ class ChatHandler(BaseHTTPRequestHandler):
             max_steps = payload.get("maxSteps", 24)
             workflow = payload.get("workflow")
             artifact = artifacts.request_input(payload.get("artifact"))
+            skill_checks_raw = payload.get("skillChecks")
+            skill_name_raw = payload.get("skillName")
+            if skill_checks_raw is not None and not isinstance(skill_checks_raw, list):
+                raise ValueError()
+            skill_checks = skills_module.normalize_checks(skill_checks_raw) if skill_checks_raw else []
+            if skill_name_raw is not None and (not isinstance(skill_name_raw, str) or not skills_module.NAME_RE.fullmatch(skill_name_raw)):
+                raise ValueError()
+            skill_name = skill_name_raw or None
             memories = payload.get("memories", [])
             history = payload.get("history", [])
             terminal_id = payload.get("terminal")
@@ -2892,6 +2946,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                     task = restored["task"]
                     workflow = restored.get("workflow")
                     artifact = restored.get("artifact")
+                    skill_checks = skills_module.normalize_checks(restored.get("skill_checks"))
+                    skill_name = restored.get("skill_name")
                     web = web and restored["web"]
                     if workflow in artifacts.FORMATS:
                         web = has_browser = False
@@ -2902,7 +2958,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                         self.send_json(409, {"error": "This Work run already has a checkpoint. Use Resume Work."})
                         return
                     checkpoint.save(version=1, scope=scope, task=task, mode=mode, web=web, memory=allow_memory,
-                                    workflow=workflow, artifact=artifact)
+                                    workflow=workflow, artifact=artifact, skill_checks=skill_checks, skill_name=skill_name)
                 run["checkpoint"] = checkpoint
 
             notes_name, notes_text = project_notes(workspace, max(2500, current()["num_ctx"] // 3)) if workspace else (None, "")
@@ -2938,9 +2994,11 @@ class ChatHandler(BaseHTTPRequestHandler):
                 emit, check, approve, workspace=workspace, mode=mode, web=web, memory=allow_memory,
                 max_steps=max_steps, num_ctx=settings["num_ctx"], think=think, panels=panels, workflow=workflow,
                 undo=undo_store(self.server.server_port), allow_shell=allow_shell, explore_model=explore_model,
+                skill_checks=skill_checks, skill_name=skill_name,
             )
             system = system_prompt(workspace, mode, web, allow_memory, memories, instructions.strip(), context.strip(),
-                                   notes_text, notes_name, panels=panels, workflow=workflow, allow_shell=allow_shell)
+                                   notes_text, notes_name, panels=panels, workflow=workflow, allow_shell=allow_shell,
+                                   skill_checks=skill_checks)
             if artifact:
                 if workflow != "site" and mode == "read":
                     raise WorkPaused("Choose Ask first or Auto-edit to save a document.")

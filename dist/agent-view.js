@@ -169,6 +169,20 @@
         settleDraft(run);
         run.entries.push({ type: "memory", text: event.text });
         return { memory: event.text };
+      case "skill_checks": {
+        settleDraft(run);
+        const entry = {
+          type: "skill_checks",
+          skill: event.skill || null,
+          results: Array.isArray(event.results) ? event.results : [],
+          passed: Boolean(event.passed),
+          retrying: Boolean(event.retrying),
+        };
+        const previous = run.entries.findLast((item) => item.type === "skill_checks" && item.retrying);
+        if (previous && !entry.retrying) Object.assign(previous, entry);
+        else run.entries.push(entry);
+        break;
+      }
       case "progress":
       case "notice":
         endThinking(run);
@@ -504,6 +518,36 @@
               ? run.state === "working" ? "Queued for next step" : "Queued in Work checkpoint" : "Steered the run";
             if (status.textContent !== text) status.textContent = text;
           };
+          row = { node, update };
+        } else if (entry.type === "skill_checks") {
+          const node = el("li", { className: "step-skill-checks" });
+          const card = el("details", { className: "skill-checks-card" });
+          const title = el("span");
+          const count = el("span", { className: "skill-badge" });
+          const list = el("ul");
+          card.append(el("summary", {}, title, count, icon("chevron-right", "icon chev-sm")), list);
+          let key = "";
+          const update = () => {
+            const nextKey = JSON.stringify([entry.passed, entry.retrying, entry.results]);
+            if (key === nextKey) return;
+            key = nextKey;
+            const total = entry.results.length;
+            const passedCount = entry.results.filter((item) => item.ok).length;
+            const phase = entry.retrying ? "running" : entry.passed ? "ok" : "fail";
+            if (node.firstChild) node.firstChild.replaceWith(statusIcon(phase));
+            else node.prepend(statusIcon(phase));
+            title.textContent = entry.skill ? `Skill checks · /${entry.skill}` : "Skill checks";
+            count.className = "skill-badge " + (entry.passed ? "checks" : "warn");
+            count.textContent = entry.retrying
+              ? `${passedCount}/${total} passed · fixing`
+              : `${passedCount}/${total} passed`;
+            if (!entry.passed) card.open = true;
+            list.replaceChildren(...entry.results.map((item) => el("li", { "data-ok": String(Boolean(item.ok)) },
+              el("span", { className: "skill-check-mark", text: item.ok ? "✓" : "!" }),
+              el("div", {}, el("span", { text: item.label }),
+                item.detail ? el("span", { className: "skill-check-detail", text: item.detail }) : null))));
+          };
+          node.append(statusIcon("running"), card);
           row = { node, update };
         } else if (entry.type === "text" || entry.type === "memory") {
           const info = entry.type === "memory";

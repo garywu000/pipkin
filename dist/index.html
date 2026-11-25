@@ -183,32 +183,110 @@
     </form>
   </dialog>
 
-  <dialog id="skills-dialog" aria-labelledby="skills-heading">
+  <dialog id="skills-dialog" class="skills-dialog" aria-labelledby="skills-heading">
     <div class="dialog-body">
       <h2 id="skills-heading">Skills</h2>
+      <p class="hint">Reusable slash workflows with optional verification checks. Drop a <code>.pipkin-skill</code> file anywhere to inspect and install.</p>
       <div id="skills-list" class="skills-list"></div>
-      <form method="dialog" class="dialog-actions">
+      <input id="skill-import-file" type="file" accept=".pipkin-skill,.pipkin-skill-pack,.json,.md" hidden>
+      <form method="dialog" class="dialog-actions skills-actions">
+        <button id="import-skill" type="button" class="button">Import skill…</button>
+        <button id="export-skills-pack" type="button" class="button" hidden>Export pack</button>
+        <span class="dialog-spacer"></span>
         <button type="submit" class="button">Close</button>
         <button id="new-skill" type="button" class="button primary">New skill</button>
       </form>
     </div>
   </dialog>
-  <dialog id="skill-editor" aria-labelledby="skill-editor-heading">
+  <dialog id="skill-editor" class="skill-editor-dialog" aria-labelledby="skill-editor-heading">
     <form id="skill-form" class="dialog-body">
       <h2 id="skill-editor-heading">New skill</h2>
-      <label for="skill-name">Slash name</label>
-      <input id="skill-name" type="text" maxlength="33" placeholder="review-notes" required>
-      <label for="skill-description">Short description</label>
-      <input id="skill-description" type="text" maxlength="120">
+      <div class="skill-editor-grid">
+        <div>
+          <label for="skill-name">Slash name</label>
+          <input id="skill-name" type="text" maxlength="33" placeholder="review-notes" required>
+        </div>
+        <div>
+          <label for="skill-author">Author (optional)</label>
+          <input id="skill-author" type="text" maxlength="60" placeholder="Your name">
+        </div>
+      </div>
+      <div class="skill-editor-grid">
+        <div>
+          <label for="skill-description">Short description</label>
+          <input id="skill-description" type="text" maxlength="120" placeholder="What this skill produces">
+        </div>
+        <div>
+          <label for="skill-output">Output type</label>
+          <select id="skill-output">
+            <option value="">Flexible (Chat or Work)</option>
+            <option value="markdown">Markdown file</option>
+            <option value="site">Local site (HTML)</option>
+            <option value="study-guide">Study guide (HTML)</option>
+            <option value="checklist">Action checklist (HTML)</option>
+            <option value="word">Word document (.docx)</option>
+            <option value="slides">PowerPoint deck (.pptx)</option>
+            <option value="pdf">PDF document (.pdf)</option>
+            <option value="chat">Chat reply only</option>
+          </select>
+        </div>
+      </div>
       <label for="skill-instructions">Workflow steps</label>
-      <textarea id="skill-instructions" rows="7" maxlength="4000" required></textarea>
+      <textarea id="skill-instructions" rows="6" maxlength="4000" required></textarea>
+      <details id="skill-checks-section" class="skill-checks-config">
+        <summary>Verification checks (optional)</summary>
+        <p class="hint">Pipkin runs these checks automatically after Work finishes and asks the model to fix failures once.</p>
+        <div class="skill-check-grid">
+          <label class="skill-check-option">
+            <input id="chk-file-exists" type="checkbox">
+            <span>Require saved file</span>
+            <input id="chk-file-pattern" type="text" maxlength="80" placeholder="*.md or review.html" aria-label="Required file pattern">
+          </label>
+          <label class="skill-check-option">
+            <input id="chk-html-links" type="checkbox">
+            <span>Check local HTML links &amp; anchors</span>
+          </label>
+          <label class="skill-check-option">
+            <input id="chk-heading" type="checkbox">
+            <span>Require heading</span>
+            <input id="chk-heading-text" type="text" maxlength="80" placeholder="e.g. Key Takeaways" aria-label="Required heading text">
+          </label>
+          <label class="skill-check-option">
+            <input id="chk-citations" type="checkbox">
+            <span>Require source citations or links</span>
+          </label>
+          <label class="skill-check-option">
+            <input id="chk-no-placeholders" type="checkbox">
+            <span>Reject TODO / TBD placeholders</span>
+          </label>
+          <label class="skill-check-option">
+            <input id="chk-min-words" type="checkbox">
+            <span>Minimum word count</span>
+            <input id="chk-min-words-count" type="number" min="10" max="20000" step="10" placeholder="200" aria-label="Minimum word count">
+          </label>
+        </div>
+      </details>
       <p id="skill-error" class="hint" role="alert" hidden></p>
       <div class="dialog-actions">
         <button id="delete-skill" type="button" class="button danger" hidden>Delete skill</button>
+        <button id="save-skill-workspace" type="button" class="button" hidden title="Save into .pipkin/skills/ in the open workspace">Save to folder</button>
+        <span class="dialog-spacer"></span>
         <button id="cancel-skill" type="button" class="button">Cancel</button>
         <button type="submit" class="button primary">Save skill</button>
       </div>
     </form>
+  </dialog>
+  <dialog id="skill-import-dialog" class="skill-import-dialog" aria-labelledby="skill-import-heading">
+    <div class="dialog-body">
+      <h2 id="skill-import-heading">Review skill before installing</h2>
+      <p id="skill-import-subtitle" class="hint"></p>
+      <div id="skill-import-list" class="skill-preview-list"></div>
+      <p id="skill-import-error" class="hint" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="cancel-skill-import" type="button" class="button">Cancel</button>
+        <button id="confirm-skill-import" type="button" class="button primary">Install skill</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-heading">
@@ -521,7 +599,7 @@
       </header>
       <div id="terminal-host" class="terminal-host"></div>
     </section>
-    <div id="drop-overlay" class="drop-overlay" hidden><div><svg class="icon"><use href="#i-clip"/></svg><strong>Drop files to attach</strong><span>PDF, Word, text or photos</span></div></div>
+    <div id="drop-overlay" class="drop-overlay" hidden><div><svg class="icon"><use href="#i-clip"/></svg><strong>Drop files or skills</strong><span>PDF, Word, text, photos, or .pipkin-skill files</span></div></div>
   </main>
 
   <aside id="harness-panel" class="harness-panel" aria-label="Right panel" aria-hidden="true">

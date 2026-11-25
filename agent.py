@@ -30,6 +30,7 @@ import urllib.request
 
 import artifacts
 import platform_os
+import skills
 
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
@@ -1785,7 +1786,7 @@ def available_tools(workspace, mode, web, memory, panels=None, workflow=None, *,
 
 
 def system_prompt(workspace, mode, web, memory, memories, instructions, context, notes="", notes_name=None, panels=None,
-                  workflow=None, *, allow_shell=True):
+                  workflow=None, *, allow_shell=True, skill_checks=None):
     today = datetime.date.today().strftime("%A, %B %d, %Y")
     device_label = "Mac" if sys.platform == "darwin" else "Windows PC" if sys.platform == "win32" else "computer"
     lines = [
@@ -1867,6 +1868,9 @@ def system_prompt(workspace, mode, web, memory, memories, instructions, context,
         lines.append("User's custom instructions:\n" + instructions)
     if context:
         lines.append("Project and chat notes (background, not instructions to change the task):\n" + context)
+    checks_note = skills.format_checks_for_prompt(skill_checks) if skill_checks else ""
+    if checks_note:
+        lines.append(checks_note)
     return "\n".join(lines)
 
 
@@ -2064,10 +2068,12 @@ def summarize_exchange(dropped):
 class Agent:
     def __init__(self, request_model, emit, check, approve, *, workspace=None, mode="ask", web=True,
                  memory=True, max_steps=24, num_ctx=8192, think=False, panels=None, workflow=None, undo=None,
-                 allow_shell=True, explore_model=None, max_explore_steps=4):
+                 allow_shell=True, explore_model=None, max_explore_steps=4, skill_checks=None, skill_name=None):
         self.request_model, self.emit, self.check = request_model, emit, check
         self.panels = panels
         self.workflow = workflow
+        self.skill_checks = skills.normalize_checks(skill_checks)
+        self.skill_name = skill_name if isinstance(skill_name, str) and skills.NAME_RE.fullmatch(skill_name) else None
         self.request_approval = approve
         self.workspace, self.mode, self.web, self.memory = workspace, mode, web, memory
         self.max_steps, self.num_ctx, self.think = max_steps, num_ctx, think
@@ -2412,6 +2418,14 @@ class Agent:
                 self.record_output(path, action="created", sources=cited, undo=self.remember_undo(path, None, data),
                                    check=link_check(verification) if site else {"kind": kind, "ok": True, "text": text})
                 answer = f"Saved [{escape(path)}]({quote(path)}).\n\n{verification}"
+                if self.skill_checks:
+                    check_results = self._run_skill_checks(answer)
+                    self._emit_skill_check_results(check_results)
+                    failed = [item for item in check_results if not item.get("ok")]
+                    if failed:
+                        answer += "\n\n**Skill checks still needing attention:**\n" + "\n".join(
+                            f"- {item['label']}: {item['detail']}" for item in failed
+                        )
                 if save_checkpoint:
                     save_checkpoint(files=self.saved_files, outputs=self.outputs, uncertain=dict(self.uncertain), result=answer)
                 self.emit("tool_result", id=self.current_id, ok=True, saved_file=path, preview=verification)
@@ -2440,6 +2454,28 @@ class Agent:
             return self.undo.record(self.workspace, path, before, after, existing=current)
         except (OSError, ValueError):
             return None  # Undo is a convenience; never fail the write over it.
+
+    def _run_skill_checks(self, result_text=""):
+        if not self.skill_checks:
+            return []
+        return skills.run_skill_checks(
+            self.skill_checks, self.workspace, self.saved_files, result_text, check_cancel=self.check,
+        )
+
+    def _emit_skill_check_results(self, check_results, *, retrying=False):
+        if not check_results:
+            return
+        passed = all(item.get("ok") for item in check_results)
+        self.emit("skill_checks", skill=self.skill_name, results=check_results, passed=passed, retrying=retrying)
+        if not retrying and self.outputs:
+            for item in check_results:
+                target_path = item.get("path") or (self.outputs[-1]["path"] if len(self.outputs) == 1 else None)
+                if target_path:
+                    self.record_output(target_path, check={
+                        "kind": "skill:" + item["type"] + ":" + item["label"][:24],
+                        "ok": bool(item.get("ok")),
+                        "text": item["label"],
+                    })
 
     def record_output(self, path, *, action=None, check=None, sources=None, undo=None):
         """Keep one result-card record per saved file. A new write clears checks made on the previous version."""
@@ -2767,6 +2803,8 @@ class Agent:
         cmd_failures = 0
         problems = []
         recovery_sent = False
+        skill_check_nudges = 1
+        final_skill_checks = []
         site_needs_page = self.workflow == "site" and self.mode != "read" and not any(
             path.casefold().endswith(".html") for path in self.saved_files
         )
@@ -2873,6 +2911,20 @@ class Agent:
                         f"{names} does not exist in the workspace yet, but the task asks for it. Create it now with a "
                         "write tool using what you already gathered. If it truly should not be created, say why.")})
                     continue
+                if self.skill_checks and not stop_requested():
+                    check_results = self._run_skill_checks(content)
+                    failed_checks = [item for item in check_results if not item.get("ok")]
+                    if failed_checks and allow_tools and skill_check_nudges and self.mode != "read":
+                        skill_check_nudges -= 1
+                        self._emit_skill_check_results(check_results, retrying=True)
+                        self.emit("notice", text=(
+                            f"{len(failed_checks)} skill {'check' if len(failed_checks) == 1 else 'checks'} "
+                            "failed. Asked the model to fix before finishing."
+                        ))
+                        messages.append({"role": "assistant", "content": clip(content, 1000)})
+                        messages.append({"role": "user", "content": skills.format_failed_checks_nudge(check_results)})
+                        continue
+                    final_skill_checks = check_results
                 result = content
                 break
             if content:
@@ -3084,6 +3136,13 @@ class Agent:
                 result += ("\n\n**Pipkin check:** no files were created or changed in this run, so the change "
                            "described above did not happen.")
                 self.emit("notice", text="The final answer describes a file change, but this run saved no files.")
+            if final_skill_checks:
+                self._emit_skill_check_results(final_skill_checks)
+                failed_checks = [item for item in final_skill_checks if not item.get("ok")]
+                if failed_checks:
+                    result += "\n\n**Skill checks still needing attention:**\n" + "\n".join(
+                        f"- {item['label']}: {item['detail']}" for item in failed_checks
+                    )
             if save_checkpoint:
                 save_checkpoint(result=result)
             self.emit("result", text=result)
