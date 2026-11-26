@@ -48,9 +48,10 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 RELEASE_REPO = "garywu000/pipkin"
-RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
+# The list includes pre-releases (betas); GitHub's /releases/latest never does.
+RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases?per_page=30"
 RELEASE_URL_PREFIX = f"https://github.com/{RELEASE_REPO}/releases/"
 UPDATE_CACHE_TTL = 6 * 60 * 60
 UPDATE_ERROR_TTL = 5 * 60
@@ -605,14 +606,50 @@ def update_check_enabled():
     return True
 
 
+def beta_updates_enabled():
+    """Off unless the user turned on Settings › General › Beta updates."""
+    try:
+        saved = json.loads(SETTINGS_FILE.read_text())
+        return isinstance(saved, dict) and saved.get("beta_updates") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _release_entry(item):
+    """A published GitHub release as {version, prerelease, url, assets}, or None if it can't be offered."""
+    if not isinstance(item, dict) or item.get("draft"):
+        return None
+    parsed = parse_semver(str(item.get("tag_name") or "").strip())
+    if not parsed:
+        return None
+    version = f"{parsed[0]}.{parsed[1]}.{parsed[2]}"
+    raw_url = str(item.get("html_url") or "")
+    assets = {
+        asset["name"]: asset["browser_download_url"]
+        for asset in item.get("assets") or []
+        if isinstance(asset, dict) and isinstance(asset.get("name"), str)
+        and isinstance(asset.get("browser_download_url"), str)
+        and asset["browser_download_url"].startswith(updater.DOWNLOAD_PREFIX)
+    }
+    return {"version": version, "prerelease": bool(item.get("prerelease")), "assets": assets,
+            "url": raw_url if raw_url.startswith(RELEASE_URL_PREFIX) else f"{RELEASE_URL_PREFIX}tag/v{version}"}
+
+
 def check_latest_release(*, force=False, opener=None):
-    """Check GitHub Releases for a newer stable Pipkin version (privacy-safe, cached)."""
+    """Check GitHub Releases for a newer Pipkin version (privacy-safe, cached).
+
+    Official releases are always considered. Pre-releases count as betas and are offered only when the user turned on
+    beta updates; installing one is always their choice. An update is required (the page blocks until it is
+    installed) when the newest official release is a whole major version ahead, e.g. v3.x while this is v1.x."""
     if not update_check_enabled():
         return {"enabled": False, "current": APP_VERSION, "available": False, "checked": False}
+    beta = beta_updates_enabled()
     now = time.monotonic()
     with _UPDATE_LOCK:
         cached = _UPDATE_CACHE["payload"]
         age = now - _UPDATE_CACHE["checked_at"]
+        if cached is not None and cached.get("beta") != beta:
+            cached = None   # the beta setting changed since this answer was cached
         if cached is not None:
             if not force and age < _UPDATE_CACHE["ttl"]:
                 return dict(cached)
@@ -627,42 +664,35 @@ def check_latest_release(*, force=False, opener=None):
         with fetch(req, timeout=4) as response:
             raw = response.read(512 * 1024)
         data = json.loads(raw.decode("utf-8", "replace"))
+        entries = [entry for entry in map(_release_entry, data if isinstance(data, list) else [data]) if entry]
+        newest = lambda items: max(items, key=lambda entry: parse_semver(entry["version"]), default=None)
+        stable = newest([entry for entry in entries if not entry["prerelease"]])
+        test = newest([entry for entry in entries if entry["prerelease"]]) if beta else None
+        candidate = test if test and (stable is None or is_newer_version(test["version"], stable["version"])) else stable
+        current = parse_semver(APP_VERSION)
+        required = bool(stable and current and parse_semver(stable["version"])[0] > current[0])
+        payload = {"enabled": True, "beta": beta, "current": APP_VERSION, "available": False, "checked": True,
+                   "required": False}
         release = None
-        if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
-            payload = {"enabled": True, "current": APP_VERSION, "available": False, "checked": True}
-        else:
-            tag = str(data.get("tag_name") or "").strip()
-            parsed = parse_semver(tag)
-            if not parsed:
-                payload = {"enabled": True, "current": APP_VERSION, "available": False, "checked": True}
-            else:
-                latest_label = f"{parsed[0]}.{parsed[1]}.{parsed[2]}"
-                raw_url = str(data.get("html_url") or "")
-                url = raw_url if raw_url.startswith(RELEASE_URL_PREFIX) else f"{RELEASE_URL_PREFIX}tag/v{latest_label}"
-                assets = {
-                    item["name"]: item["browser_download_url"]
-                    for item in data.get("assets") or []
-                    if isinstance(item, dict) and isinstance(item.get("name"), str)
-                    and isinstance(item.get("browser_download_url"), str)
-                    and item["browser_download_url"].startswith(updater.DOWNLOAD_PREFIX)
-                }
-                release = {"version": latest_label, "assets": assets}
-                blocker = updater.install_blocker(UPDATER.root)
-                if not blocker and updater.MANIFEST_NAME not in assets:
-                    blocker = "This release can only be installed from GitHub."
-                payload = {
-                    "enabled": True,
-                    "current": APP_VERSION,
-                    "latest": latest_label,
-                    "available": is_newer_version(latest_label, APP_VERSION),
-                    "url": url,
-                    "checked": True,
-                    "installable": blocker is None,
-                    "installBlocker": blocker,
-                }
+        if candidate:
+            release = {"version": candidate["version"], "assets": candidate["assets"]}
+            blocker = updater.install_blocker(UPDATER.root)
+            if not blocker and updater.MANIFEST_NAME not in candidate["assets"]:
+                blocker = "This release can only be installed from GitHub."
+            payload.update({
+                "latest": candidate["version"],
+                "available": is_newer_version(candidate["version"], APP_VERSION),
+                "channel": "beta" if candidate["prerelease"] else "stable",
+                "url": candidate["url"],
+                "installable": blocker is None,
+                "installBlocker": blocker,
+                "required": required,
+                **({"requiredVersion": stable["version"]} if required else {}),
+            })
         ttl = UPDATE_CACHE_TTL
     except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
-        payload = {"enabled": True, "current": APP_VERSION, "available": False, "checked": False}
+        payload = {"enabled": True, "beta": beta, "current": APP_VERSION, "available": False, "checked": False,
+                   "required": False}
         release = None
         ttl = UPDATE_ERROR_TTL
     with _UPDATE_LOCK:
@@ -2834,17 +2864,19 @@ class ChatHandler(BaseHTTPRequestHandler):
             if not 0 < length <= 4096:
                 raise ValueError()
             payload = json.loads(self.rfile.read(length))
-            enabled = payload.get("enabled")
-            if not isinstance(enabled, bool):
+            enabled, beta = payload.get("enabled"), payload.get("beta")
+            if (enabled is None and beta is None) or any(value is not None and not isinstance(value, bool) for value in (enabled, beta)):
                 raise ValueError()
         except (AttributeError, TypeError, ValueError):
             self.send_json(400, {"error": "Invalid update preference request."})
             return
-        update_settings_file(check_updates=enabled)
+        update_settings_file(**({"check_updates": enabled} if enabled is not None else {}),
+                             **({"beta_updates": beta} if beta is not None else {}))
+        enabled = update_check_enabled()
         with _UPDATE_LOCK:
             _UPDATE_CACHE["checked_at"] = 0.0
             _UPDATE_CACHE["payload"] = None
-        self.send_json(200, {"ok": True, "enabled": enabled, "current": APP_VERSION})
+        self.send_json(200, {"ok": True, "enabled": enabled, "beta": beta_updates_enabled(), "current": APP_VERSION})
 
     def select_model(self):
         try:

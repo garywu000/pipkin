@@ -201,6 +201,15 @@
       </form>
     </div>
   </dialog>
+  <dialog id="update-required" class="update-required-dialog" aria-labelledby="update-required-title">
+    <div class="dialog-body">
+      <div class="update-required-icon"><svg class="icon"><use href="#i-download"/></svg></div>
+      <h2 id="update-required-title">Update required</h2>
+      <p id="update-required-message"></p>
+      <div id="update-required-progress"></div>
+      <div id="update-required-actions" class="dialog-actions"></div>
+    </div>
+  </dialog>
   <dialog id="schedule-dialog" class="schedule-dialog" aria-labelledby="schedule-heading">
     <div class="dialog-body">
       <div class="schedule-head">
@@ -400,6 +409,10 @@
                 <button id="check-updates-now" class="button small" type="button">Check now</button>
                 <label class="switch"><input id="setting-check-updates" type="checkbox"><span></span><span class="sr-only">Check for updates</span></label>
               </div>
+            </div>
+            <div class="setting">
+              <div><strong>Beta updates</strong><p>Also offer test versions before they're official. They can have bugs, and installing each one is your choice.</p></div>
+              <label class="switch"><input id="setting-beta-updates" type="checkbox"><span></span><span class="sr-only">Beta updates</span></label>
             </div>
             <div class="setting">
               <div><strong>Welcome setup</strong><p>Replay the first-launch intro and personalization tour.</p></div>

@@ -2264,10 +2264,59 @@ function releaseLink(text, className = "button small accent") {
   return el("a", { className, href, target: "_blank", rel: "noopener noreferrer", text });
 }
 
+/* The update's message, buttons and progress bar for the current job; shared by the banner and the required screen. */
+function updateParts(job, { required = false } = {}) {
+  const beta = updateInfo.channel === "beta";
+  const label = `Pipkin v${updateInfo.latest}${beta ? " beta" : ""}`;
+  const actions = [];
+  // The banner is one short line; the detail is dropped first when the window is narrow.
+  let message = required
+    ? `You're on v${updateInfo.current || ""}, a whole version behind. Update to ${label} to keep using Pipkin.`
+    : beta ? `Pipkin v${updateInfo.latest} is ready to test` : `Pipkin v${updateInfo.latest} is available`;
+  let detail = required ? "" : beta ? "may have bugs" : `You're on v${updateInfo.current || ""}`;
+  let progress = null;
+  let glyph = job.state === "error" ? "alert" : job.state === "ready" ? "check" : "download";
+  if (job.state === "downloading") {
+    const pct = job.total ? Math.min(100, Math.round((job.received / job.total) * 100)) : 0;
+    message = `Downloading ${label}… ${pct}%`;
+    detail = "";
+    progress = el("div", { className: "update-progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct) },
+      el("i", { style: `width:${pct}%` }));
+  } else if (job.state === "verifying") {
+    message = "Checking the download's signature…";
+    detail = "";
+    progress = el("div", { className: "update-progress indeterminate" }, el("i"));
+  } else if (job.state === "ready") {
+    message = `${label} is ready`;
+    detail = "Restart to finish updating";
+    const restart = el("button", { type: "button", className: "button small accent", text: "Restart to update" });
+    restart.addEventListener("click", restartToUpdate);
+    actions.push(restart);
+  } else if (job.state === "restarting") {
+    message = "Restarting Pipkin…";
+    detail = "";
+  } else if (job.state === "error") {
+    message = job.error || "The update could not be installed.";
+    detail = "";
+    const retry = el("button", { type: "button", className: "button small", text: "Try again" });
+    retry.addEventListener("click", startUpdate);
+    actions.push(retry, releaseLink("Download"));
+  } else if (canSelfUpdate()) {
+    const install = el("button", { type: "button", className: "button small accent", text: "Update now" });
+    install.addEventListener("click", startUpdate);
+    actions.push(releaseLink("What's new", "button small update-whats-new"), install);
+  } else {
+    actions.push(releaseLink(required ? "Download the update" : "View release"));
+  }
+  return { message, detail, actions, progress, glyph };
+}
+
 function renderUpdateBanner() {
   const banner = byId("update-banner");
   if (!banner) return;
-  if (settings.checkUpdates === false || !updateInfo?.available || !updateInfo?.latest) {
+  const show = settings.checkUpdates !== false && updateInfo?.available && updateInfo?.latest;
+  renderRequiredUpdate(show && updateInfo.required);
+  if (!show || updateInfo.required) {
     banner.hidden = true;
     return;
   }
@@ -2276,37 +2325,9 @@ function renderUpdateBanner() {
     banner.hidden = true;
     return;
   }
-  const actions = [];
-  let message = `Pipkin v${updateInfo.latest} is available (you're on v${updateInfo.current || ""}).`;
-  let progress = null;
+  const { message, detail, actions, progress, glyph } = updateParts(job);
   banner.dataset.state = job.state;
-  if (job.state === "downloading") {
-    const pct = job.total ? Math.min(100, Math.round((job.received / job.total) * 100)) : 0;
-    message = `Downloading Pipkin v${updateInfo.latest}… ${pct}%`;
-    progress = el("div", { className: "update-progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct) },
-      el("i", { style: `width:${pct}%` }));
-  } else if (job.state === "verifying") {
-    message = "Checking the download's signature…";
-    progress = el("div", { className: "update-progress indeterminate" }, el("i"));
-  } else if (job.state === "ready") {
-    message = `Pipkin v${updateInfo.latest} is ready. Restart to finish updating.`;
-    const restart = el("button", { type: "button", className: "button small accent", text: "Restart to update" });
-    restart.addEventListener("click", restartToUpdate);
-    actions.push(restart);
-  } else if (job.state === "restarting") {
-    message = "Restarting Pipkin…";
-  } else if (job.state === "error") {
-    message = job.error || "The update could not be installed.";
-    const retry = el("button", { type: "button", className: "button small", text: "Try again" });
-    retry.addEventListener("click", startUpdate);
-    actions.push(retry, releaseLink("Download"));
-  } else if (canSelfUpdate()) {
-    const install = el("button", { type: "button", className: "button small accent", text: "Update now" });
-    install.addEventListener("click", startUpdate);
-    actions.push(releaseLink("What's new", "button small"), install);
-  } else {
-    actions.push(releaseLink("View release"));
-  }
+  banner.dataset.channel = updateInfo.channel || "stable";
   if (["idle", "error"].includes(job.state)) {
     const dismiss = el("button", { type: "button", className: "icon-button small", title: "Dismiss", "aria-label": "Dismiss update notice" }, icon("x"));
     dismiss.addEventListener("click", () => {
@@ -2317,13 +2338,39 @@ function renderUpdateBanner() {
     actions.push(dismiss);
   }
   banner.replaceChildren(
-    el("div", { className: "update-banner-copy" },
-      icon(job.state === "error" ? "alert" : job.state === "ready" ? "check" : "download"),
-      el("span", { text: message })),
+    el("div", { className: "update-banner-copy" }, icon(glyph),
+      updateInfo.channel === "beta" ? el("span", { className: "update-beta-badge", text: "Beta" }) : null,
+      el("span", { className: "update-banner-text", title: detail ? `${message} · ${detail}` : message },
+        ...compactUpdateText(message), detail ? el("span", { className: "update-banner-detail", text: ` · ${detail}` }) : null)),
     el("div", { className: "update-banner-actions" }, ...actions),
     ...(progress ? [progress] : []),
   );
   banner.hidden = false;
+}
+
+/* "Pipkin v2.3.1 is ready to test": on a narrow window the banner keeps just "v2.3.1 is ready". */
+function compactUpdateText(message) {
+  const match = /^(Pipkin )(v[\d.]+(?: beta)? is (?:ready|available))( to test)?$/.exec(message);
+  if (!match) return [el("span", { text: message })];
+  return [el("span", { className: "update-banner-extra", text: match[1] }), el("span", { text: match[2] }),
+    match[3] ? el("span", { className: "update-banner-extra", text: match[3] }) : null];
+}
+
+/* A whole major version behind: a screen that can't be dismissed until the update is installed. */
+function renderRequiredUpdate(show) {
+  const dialog = byId("update-required");
+  if (!dialog) return;
+  if (!show) {
+    if (dialog.open) dialog.close();
+    return;
+  }
+  const job = updateJob?.version === updateInfo.latest ? updateJob : { state: "idle" };
+  const { message, actions, progress } = updateParts(job, { required: true });
+  byId("update-required-title").textContent = `Pipkin v${updateInfo.requiredVersion || updateInfo.latest} is required`;
+  byId("update-required-message").textContent = message;
+  byId("update-required-actions").replaceChildren(...actions);
+  byId("update-required-progress").replaceChildren(...(progress ? [progress] : []));
+  if (!dialog.open) dialog.showModal();
 }
 
 async function pollUpdateJob() {
@@ -2381,9 +2428,10 @@ function renderUpdateSettingNote() {
     return;
   }
   if (updateInfo?.available && updateInfo?.latest) {
+    const name = `Pipkin v${updateInfo.latest}${updateInfo.channel === "beta" ? " beta" : ""}`;
     note.textContent = canSelfUpdate()
-      ? `${cur} · Pipkin v${updateInfo.latest} is available. Use Update now above the message box.`
-      : `${cur} · Pipkin v${updateInfo.latest} is available on GitHub Releases.${updateInfo.installBlocker ? " " + updateInfo.installBlocker : ""}`;
+      ? `${cur} · ${name} is available. Use Update now above the message box.`
+      : `${cur} · ${name} is available on GitHub Releases.${updateInfo.installBlocker ? " " + updateInfo.installBlocker : ""}`;
     return;
   }
   if (updateInfo?.checked) {
@@ -2391,6 +2439,29 @@ function renderUpdateSettingNote() {
     return;
   }
   note.textContent = "Check GitHub Releases when Pipkin opens so you don't miss security fixes.";
+}
+
+/* The server keeps the beta setting; the switch follows it. It only matters while update checks are on. */
+function syncBetaToggle() {
+  const box = byId("setting-beta-updates");
+  if (!box) return;
+  if (typeof updateInfo?.beta === "boolean") box.checked = updateInfo.beta;
+  box.disabled = settings.checkUpdates === false;
+}
+
+async function setBetaUpdates(enabled) {
+  const box = byId("setting-beta-updates");
+  try {
+    const response = await fetch("/api/update/preference", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ beta: enabled }),
+    });
+    if (!response.ok) throw new Error();
+    writeLocal(UPDATE_DISMISS_KEY, "");
+    await checkForUpdates(true, true);
+  } catch {
+    if (box) box.checked = !enabled;
+    toast("Could not change the beta setting. Try again.");
+  }
 }
 
 async function checkForUpdates(force = false, announceResult = false) {
@@ -2405,11 +2476,12 @@ async function checkForUpdates(force = false, announceResult = false) {
     const response = await fetch(force ? "/api/update?force=1" : "/api/update");
     if (!response.ok) return;
     updateInfo = await response.json();
+    syncBetaToggle();
     if (force && updateInfo.available) writeLocal(UPDATE_DISMISS_KEY, "");
     renderUpdateBanner();
     renderUpdateSettingNote();
     if (announceResult) {
-      if (updateInfo.available) toast(`Pipkin v${updateInfo.latest} is available`);
+      if (updateInfo.available) toast(`Pipkin v${updateInfo.latest}${updateInfo.channel === "beta" ? " beta" : ""} is available`);
       else if (updateInfo.checked) toast(`Pipkin v${updateInfo.current} is up to date`);
       else toast("Could not reach GitHub Releases right now");
     }
@@ -4932,6 +5004,7 @@ function openSettings(tabId = "tab-general") {
   const updateBox = byId("setting-check-updates");
   if (updateBox) updateBox.checked = settings.checkUpdates !== false;
   if (typeof renderUpdateSettingNote === "function") renderUpdateSettingNote();
+  if (typeof syncBetaToggle === "function") syncBetaToggle();
   const protectBox = byId("setting-protect-memory");
   if (protectBox) protectBox.checked = settings.protectMemory !== false;
   const shellBox = byId("setting-allow-shell");
@@ -5721,11 +5794,15 @@ byId("setting-check-updates")?.addEventListener("change", (event) => {
       renderUpdateBanner();
       renderUpdateSettingNote();
     }
+    syncBetaToggle();
   }).catch(() => {});
   renderUpdateBanner();
   renderUpdateSettingNote();
 });
 byId("check-updates-now")?.addEventListener("click", () => void checkForUpdates(true, true));
+byId("setting-beta-updates")?.addEventListener("change", (event) => void setBetaUpdates(event.target.checked));
+// A required update can't be waved away: Esc does nothing on that screen.
+byId("update-required")?.addEventListener("cancel", (event) => event.preventDefault());
 byId("replay-welcome").addEventListener("click", () => {
   settingsDialog.close();
   window.PipkinOnboarding?.open({ preview: true });

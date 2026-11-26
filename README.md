@@ -167,6 +167,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.3.1 beta](https://github.com/garywu000/pipkin/releases/tag/v2.3.1) | Beta updates: turn them on in Settings › General to get test versions early, each one optional. Pipkin now requires an update only when it is a whole major version behind. Shorter one-line update notice. |
 | [v2.3.0](https://github.com/garywu000/pipkin/releases/tag/v2.3.0) | Ask for a scheduled task in your own words, in Chat or Agent mode ("check my notes every Wednesday at 6pm"). Pipkin shows a confirmation card and creates the task only when you click Create task. |
 | [v2.2.1](https://github.com/garywu000/pipkin/releases/tag/v2.2.1) | macOS updates keep your pinned Dock icon, and opening Pipkin while it's running brings up the existing window instead of a second copy. |
 | [v2.2.0](https://github.com/garywu000/pipkin/releases/tag/v2.2.0) | Scheduled background tasks with a Waiting-for-you inbox, optional skill checks, and read-only or new-files-only runs. |

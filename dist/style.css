@@ -777,7 +777,15 @@ body:not([data-sidebar-collapsed]) #history-toggle, body:not([data-sidebar-colla
 .update-banner-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .update-banner-actions a.button { text-decoration: none; }
 .update-setting-controls { display: flex; align-items: center; gap: 10px; flex: none; }
-.update-banner { flex-wrap: wrap; }
+/* One compact row; only the progress bar takes a line of its own. */
+.update-banner { flex-wrap: nowrap; container-type: inline-size; }
+.update-banner:has(.update-progress) { flex-wrap: wrap; }
+.update-banner-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 560; }
+.update-banner-detail { font-weight: 400; color: var(--muted); }
+.update-banner-actions .button.small { min-height: 26px; padding: 2px 10px; }
+@container (max-width: 480px) {
+  .update-banner-detail, .update-whats-new, .update-banner-extra { display: none; }
+}
 .update-banner[data-state="error"] { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 34%, transparent); }
 .update-banner[data-state="error"] .update-banner-copy .icon { color: var(--warn); }
 .update-progress { flex: 1 0 100%; height: 4px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--accent) 16%, transparent); }
@@ -2722,3 +2730,22 @@ html.theme-swap { view-transition-name: root; }
 .chat-schedule-slot { margin: 10px 0 2px; }
 .chat-schedule-folder .chat-schedule-pick { margin-left: 4px; min-height: 24px; padding: 1px 8px; }
 .chat-schedule-folder.missing strong { color: var(--warn); }
+
+/* ---------- Beta updates and required updates ---------- */
+.update-beta-badge {
+  flex: none; padding: 1px 7px; border-radius: 999px; font-size: .72rem; font-weight: 650; letter-spacing: .02em;
+  background: var(--warn-soft); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+}
+.update-required-dialog { width: min(440px, calc(100vw - 32px)); text-align: center; }
+.update-required-dialog .dialog-body { justify-items: center; gap: 12px; padding: 28px 26px 22px; }
+.update-required-icon {
+  display: grid; place-items: center; width: 52px; height: 52px; border-radius: 16px;
+  background: var(--accent-soft); color: var(--accent-text);
+}
+.update-required-icon .icon { width: 24px; height: 24px; }
+#update-required-message { max-width: 36ch; line-height: 1.5; }
+#update-required-progress { width: 100%; }
+#update-required-progress:empty { display: none; }
+.update-required-dialog .dialog-actions { justify-content: center; flex-wrap: wrap; }
+
+a.button { text-decoration: none; }

@@ -99,6 +99,66 @@ class UpdateCheckTest(unittest.TestCase):
         self.assertFalse(offline["available"])
         self.assertFalse(offline["checked"])
 
+    def releases(self, *items):
+        def release(tag, prerelease=False, draft=False):
+            return {"tag_name": tag, "prerelease": prerelease, "draft": draft,
+                    "html_url": f"https://github.com/garywu000/pipkin/releases/tag/{tag}", "assets": []}
+        return Mock(return_value=_FakeResponse([release(*item) if isinstance(item, tuple) else release(item) for item in items]))
+
+    def fresh(self):
+        with server._UPDATE_LOCK:
+            server._UPDATE_CACHE["checked_at"] = 0.0
+            server._UPDATE_CACHE["payload"] = None
+
+    def test_betas_are_offered_only_when_turned_on(self):
+        listing = ("v2.3.0", ("v2.3.1", True), ("v2.4.0", False, True))   # official, beta, draft
+        with patch.object(server, "APP_VERSION", "2.3.0"):
+            result = server.check_latest_release(opener=self.releases(*listing))
+            self.assertFalse(result["available"], "betas and drafts are ignored by default")
+            self.assertFalse(result["beta"])
+            server.update_settings_file(beta_updates=True)
+            result = server.check_latest_release(opener=self.releases(*listing))   # cache is ignored: setting changed
+            self.assertTrue(result["available"])
+            self.assertEqual((result["latest"], result["channel"]), ("2.3.1", "beta"))
+            self.assertFalse(result["required"])
+            self.fresh()
+            newer_official = server.check_latest_release(opener=self.releases("v2.4.0", ("v2.3.1", True)))
+            self.assertEqual((newer_official["latest"], newer_official["channel"]), ("2.4.0", "stable"))
+        with patch.object(server, "APP_VERSION", "2.3.1"):
+            server.update_settings_file(beta_updates=False)
+            self.fresh()
+            on_beta = server.check_latest_release(opener=self.releases("v2.3.0", ("v2.3.1", True)))
+            self.assertFalse(on_beta["available"], "turning betas off never offers an older version")
+
+    def test_a_whole_major_version_behind_is_required(self):
+        with patch.object(server, "APP_VERSION", "1.4.0"):
+            result = server.check_latest_release(opener=self.releases("v3.0.0", "v2.9.0"))
+            self.assertTrue(result["required"])
+            self.assertEqual((result["latest"], result["requiredVersion"]), ("3.0.0", "3.0.0"))
+        with patch.object(server, "APP_VERSION", "2.3.0"):
+            self.fresh()
+            minor = server.check_latest_release(opener=self.releases("v2.9.0"))
+            self.assertTrue(minor["available"])
+            self.assertFalse(minor["required"], "a newer minor version is offered, not forced")
+            server.update_settings_file(beta_updates=True)
+            self.fresh()
+            beta_major = server.check_latest_release(opener=self.releases("v2.3.0", ("v3.0.0", True)))
+            self.assertTrue(beta_major["available"])
+            self.assertFalse(beta_major["required"], "a beta is never forced")
+
+    def test_preference_endpoint_saves_the_beta_setting(self):
+        body = json.dumps({"beta": True}).encode("utf-8")
+        handler = SimpleNamespace(headers={"Content-Length": str(len(body))}, rfile=BytesIO(body), send_json=Mock())
+        server.ChatHandler.set_update_preference(handler)
+        status, reply = handler.send_json.call_args.args
+        self.assertEqual((status, reply["beta"], reply["enabled"]), (200, True, True))
+        self.assertTrue(server.beta_updates_enabled())
+        for bad in ({}, {"beta": "yes"}):
+            body = json.dumps(bad).encode("utf-8")
+            handler = SimpleNamespace(headers={"Content-Length": str(len(body))}, rfile=BytesIO(body), send_json=Mock())
+            server.ChatHandler.set_update_preference(handler)
+            self.assertEqual(handler.send_json.call_args.args[0], 400)
+
     def test_preference_endpoint_persists_setting(self):
         body = json.dumps({"enabled": False}).encode("utf-8")
         handler = SimpleNamespace(
