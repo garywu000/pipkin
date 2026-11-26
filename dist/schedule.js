@@ -377,8 +377,12 @@
     byId("schedule-days-field").hidden = kind !== "weekly";
   }
 
+  // Set while the editor reviews a task Pipkin proposed in a Work run: Save hands the task back instead of saving it.
+  let draft = null;
+
   function showFolder() {
-    const name = editorWorkspace?.name || editing?.folderName || "";
+    byId("schedule-folder-pick").hidden = Boolean(draft);
+    const name = draft?.folderName || editorWorkspace?.name || editing?.folderName || "";
     byId("schedule-folder-name").textContent = name || "No folder chosen";
     byId("schedule-folder-name").dataset.empty = String(!name);
     byId("schedule-folder-pick").textContent = name ? "Change…" : "Choose…";
@@ -431,24 +435,29 @@
     prompt.placeholder = `Optional input for /${skill.name} (leave blank to run as-is).`;
   }
 
-  function openEditor(task) {
+  /* task: an existing task to edit. prefill: field values for a new task. review: {folderName, onSave} to review a
+     proposed task, where Save passes the task to onSave instead of creating it here. */
+  function openEditor(task, { prefill = null, review = null } = {}) {
     editing = task;
+    draft = review;
     deleteArmed = false;
     const workspace = options.getWorkspace?.();
-    editorWorkspace = task ? null : workspace ? { key: workspace.key, name: workspace.name } : null;
+    editorWorkspace = task || review ? null : workspace ? { key: workspace.key, name: workspace.name } : null;
+    const source = task || prefill;
     const today = new Date();
     const pad = (n) => String(n).padStart(2, "0");
-    const schedule = task?.schedule || { kind: "weekly", time: "17:00", days: [(today.getDay() + 6) % 7] };
-    byId("schedule-editor-heading").textContent = task ? "Edit scheduled task" : "New scheduled task";
-    populateSkillPicker(task?.skill || null);
-    byId("schedule-prompt").value = task?.prompt || "";
-    byId("schedule-title").value = task?.title || "";
+    const schedule = source?.schedule || { kind: "weekly", time: "17:00", days: [(today.getDay() + 6) % 7] };
+    byId("schedule-editor-heading").textContent = review ? "Review scheduled task" : task ? "Edit scheduled task" : "New scheduled task";
+    byId("schedule-save").textContent = review ? "Create task" : "Save task";
+    populateSkillPicker(source?.skill || null);
+    byId("schedule-prompt").value = source?.prompt || "";
+    byId("schedule-title").value = source?.title || "";
     byId("schedule-kind").value = schedule.kind;
     byId("schedule-time").value = schedule.time;
     byId("schedule-date").value = schedule.date || `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
     renderDays(schedule.days || [(today.getDay() + 6) % 7]);
-    for (const radio of document.querySelectorAll('input[name="schedule-access"]')) radio.checked = radio.value === (task?.access || "read");
-    byId("schedule-web").checked = Boolean(task?.web);
+    for (const radio of document.querySelectorAll('input[name="schedule-access"]')) radio.checked = radio.value === (source?.access || "read");
+    byId("schedule-web").checked = Boolean(source?.web);
     byId("schedule-delete").hidden = !task;
     byId("schedule-delete").textContent = "Delete task";
     syncWhen();
@@ -472,7 +481,7 @@
       showError("Describe what the task should do, or choose a skill.");
       return;
     }
-    if (!editing && !editorWorkspace) {
+    if (!editing && !editorWorkspace && !draft) {
       showError("Choose the folder this task works in.");
       return;
     }
@@ -489,6 +498,28 @@
       // Saving a task means you want it to run, so it is switched on again if it was off.
       web: byId("schedule-web").checked, enabled: true,
     };
+    if (draft) {
+      if (kind === "weekly" && !schedule.days.length) {
+        showError("Choose at least one day of the week.");
+        return;
+      }
+      if (kind === "once") {
+        if (!schedule.date) {
+          showError("Choose a date for the one-time run.");
+          return;
+        }
+        const chosen = new Date(`${schedule.date}T${schedule.time || "00:00"}`);
+        if (Number.isNaN(chosen.getTime()) || chosen.getTime() <= Date.now()) {
+          showError("That time has already passed. Choose a time in the future.");
+          return;
+        }
+      }
+      const { onSave } = draft;
+      draft = null;
+      editor().close();
+      onSave(task);
+      return;
+    }
     const save = byId("schedule-save");
     save.disabled = true;
     pendingActions++;
@@ -557,6 +588,7 @@
     }
     byId("schedule-form").addEventListener("submit", saveTask);
     byId("schedule-cancel").addEventListener("click", () => editor().close());
+    editor().addEventListener("close", () => { draft = null; });
     byId("schedule-delete").addEventListener("click", () => void deleteTask());
     byId("schedule-folder-pick").addEventListener("click", () => void pickFolder());
     byId("schedule-kind").addEventListener("change", syncWhen);
@@ -568,5 +600,129 @@
     void refresh();
   }
 
-  window.PipkinSchedule = { init, open, refresh, runningTitle };
+  function openDraft(task, review) {
+    openEditor(null, { prefill: task, review });
+  }
+
+  async function runTask(taskId, title = "") {
+    if (!taskId) return false;
+    const ok = await act("/api/schedules/run", { id: taskId });
+    if (ok) toast(title ? `Starting “${title}”` : "Starting scheduled task");
+    return ok;
+  }
+
+  /* ---------- Chat: a proposed task, created only when the user confirms ----------
+     record = { proposal: {task, nextRun, needsClarification}, state: "pending" | "creating" | "created" | "dismissed",
+     confirmationId, folder?: {key, name}, taskId?, nextRun? }. The record is saved with the chat message, and the
+     confirmation id makes a retried Create return the task it already made instead of a second one. */
+  function renderChatCard(container, record, { onChange } = {}) {
+    const proposal = record.proposal || {};
+    const task = record.task || proposal.task || {};
+    if (!record.folder) {
+      const workspace = options.getWorkspace?.();
+      if (workspace) record.folder = { key: workspace.key, name: workspace.name };
+    }
+    const draw = () => renderChatCard(container, record, { onChange });
+    const changed = () => {
+      onChange?.();
+      draw();
+    };
+    const card = el("div", { className: "approval-card schedule-proposal chat-schedule-card",
+      dataset: { decision: record.state === "created" ? "approved" : record.state === "dismissed" ? "denied" : "pending" } });
+    if (record.state === "created" || record.state === "dismissed") {
+      const created = record.state === "created";
+      card.append(el("header", {}, icon(created ? "check" : "x"),
+        el("span", { text: `${created ? "Scheduled" : "Not scheduled"} · ${record.title || task.title || "Scheduled task"}` })));
+      if (created) {
+        const view = el("button", { type: "button", className: "button small", text: "View in Scheduled" });
+        view.addEventListener("click", () => open("tasks"));
+        card.append(el("footer", {}, el("span", { className: "decision",
+          text: record.nextRun ? `Next run: ${moment(record.nextRun)}` : "Saved in Scheduled." }), view));
+      }
+      container.replaceChildren(card);
+      return;
+    }
+    // Same layout as the Work run's schedule card (agent-view.js), plus a folder chooser: Chat has no run folder.
+    const flagged = new Set(record.task ? [] : proposal.needsClarification || []);
+    const whenGuessed = ["kind", "days", "time", "date"].some((field) => flagged.has(field));
+    const chip = (glyph, label, value, extra) => el("div", { className: "schedule-proposal-chip" },
+      icon(glyph), el("span", { className: "chip-label", text: label }), el("strong", { text: value }), extra || null);
+    const pick = el("button", { type: "button", className: "button small chat-schedule-pick", text: record.folder ? "Change…" : "Choose…" });
+    pick.addEventListener("click", async () => {
+      const folder = await options.chooseWorkspace?.();
+      if (folder) {
+        record.folder = { key: folder.key, name: folder.name };
+        record.error = "";
+        changed();
+      }
+    });
+    card.append(
+      el("header", {}, icon("clock"), el("span", { text: "Create this scheduled task?" }),
+        el("span", { className: "schedule-proposal-perm", text: (task.access === "create" ? "Creates new files" : "Read only") + (task.web ? " · Web" : "") })),
+      el("div", { className: "schedule-proposal-hero" },
+        el("div", { className: "schedule-proposal-title", text: task.title || "Scheduled task" }),
+        el("div", { className: "schedule-proposal-when" + (whenGuessed ? " guessed" : "") }, icon("clock"),
+          el("span", { text: task.schedule ? describe(task.schedule) : "Not set" }),
+          whenGuessed ? el("span", { className: "schedule-guessed-pill", text: "Guessed" }) : null)),
+      el("div", { className: "schedule-proposal-meta" },
+        chip("clock", "Next run", !record.task && proposal.nextRun ? moment(proposal.nextRun) : "After you create it"),
+        el("div", { className: "schedule-proposal-chip chat-schedule-folder" + (record.folder ? "" : " missing") },
+          icon("folder"), el("span", { className: "chip-label", text: "Folder" }),
+          el("strong", { text: record.folder?.name || "Choose a folder" }), pick),
+        chip("shield", "Safeguards", task.access === "create" ? "Never edits existing files or runs commands" : "Read-only · never runs commands")),
+      el("div", { className: "schedule-proposal-prompt" }, el("span", { text: "What Pipkin will do each run" }), el("p", { text: task.prompt || "" })));
+    if (flagged.size) {
+      const names = { kind: "how often", days: "which days", time: "the time", date: "the date" };
+      const list = [...flagged].map((field) => names[field]).filter(Boolean).join(", ");
+      card.append(el("div", { className: "schedule-proposal-note" }, icon("alert"),
+        el("span", { text: `Pipkin guessed ${list}. Double-check the schedule above, or use Edit details.` })));
+    }
+    if (record.error) card.append(el("div", { className: "schedule-proposal-note", role: "alert" }, icon("alert"), el("span", { text: record.error })));
+    const busy = record.state === "creating" && record.busy;
+    const create = async (edited) => {
+      if (!record.folder) {
+        record.error = "Choose the folder this task works in first.";
+        draw();
+        return;
+      }
+      if (edited) record.task = edited;
+      record.state = "creating";
+      record.busy = true;
+      record.error = "";
+      changed();   // saved before the request, so a reload retries with the same confirmation id
+      try {
+        const next = await api("/api/schedules/save", { task: record.task || proposal.task, workspace: record.folder.key,
+          confirmationId: record.confirmationId });
+        apply(next);
+        Object.assign(record, { state: "created", taskId: next.task.id, title: next.task.title, nextRun: next.task.nextRun });
+        toast(`Scheduled “${next.task.title}” · ${moment(next.task.nextRun)}`);
+      } catch (error) {
+        record.state = "pending";
+        if (error.code === "workspace_required") {
+          record.folder = null;
+          record.error = "Pipkin lost access to that folder. Choose it again.";
+        } else {
+          record.error = error.message || "Pipkin couldn't create the task.";
+        }
+      } finally {
+        delete record.busy;
+        changed();
+      }
+    };
+    const notNow = el("button", { type: "button", className: "button small", text: "Not now", disabled: busy });
+    const edit = el("button", { type: "button", className: "button small", text: "Edit details…", disabled: busy });
+    const confirm = el("button", { type: "button", className: "button small accent", text: busy ? "Creating…" : "Create task", disabled: busy });
+    notNow.addEventListener("click", () => {
+      record.state = "dismissed";
+      changed();
+    });
+    edit.addEventListener("click", () => openDraft(record.task || proposal.task, {
+      folderName: record.folder?.name || "Choose on the card", onSave: (edited) => void create(edited),
+    }));
+    confirm.addEventListener("click", () => void create());
+    card.append(el("footer", {}, el("span", { className: "decision", text: "Runs automatically while Pipkin is open." }), notNow, edit, confirm));
+    container.replaceChildren(card);
+  }
+
+  window.PipkinSchedule = { init, open, refresh, runningTitle, describe, moment, openDraft, runTask, renderChatCard };
 })();

@@ -30,6 +30,7 @@ import urllib.request
 
 import artifacts
 import platform_os
+import scheduler
 import skills
 
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -760,6 +761,9 @@ def make_diff(path, before, after):
 # ---------------------------------------------------------------- web tools
 
 LINKS_OK = "No missing local assets, page anchors, or duplicate IDs found."
+SCHEDULE_NOTE = ("\n\n(Work note: this request says when it should happen: {}. If the user wants it done then, call "
+                 "schedule_task now. The user confirms it on a card. This turn only proposes the schedule; ask the "
+                 "user to request any immediate execution separately.)")
 PLAN_NOTE = ("\n\n(Work note: if this takes more than one action, begin your first reply with update_plan: 3 to 6 concrete "
              "steps for this request, the first one in_progress, sent together with your first action.)")
 PLAN_REMINDER = ("\n\n(Before your next action, call update_plan with 3 to 6 concrete steps for this task, marking the "
@@ -1796,6 +1800,24 @@ BROWSER_TOOLS = [
 MEMORY_TOOL = schema("remember", "Save a durable fact about the user or their preferences for future conversations.", [
     ("fact", "string", "One short sentence"),
 ])
+SCHEDULE_TOOL = schema(
+    "schedule_task",
+    "Propose a scheduled background task when the user asks for something to happen later or on a repeating "
+    "schedule (for example 'every Wednesday at 6pm', 'each weekday morning', 'tomorrow at 9am'). The user sees a "
+    "confirmation card and decides; nothing runs now. Supported: once, daily, weekdays, weekly on chosen days, at "
+    "one time of day. Do not do the task now as well unless the user asked for that too.", [
+        ("title", "string", "Short name for the task, 2 to 6 words"),
+        ("prompt", "string", "What Pipkin should do each time it runs, in the user's words, without the timing"),
+        ("repeat", "string", "once, daily, weekdays, or weekly"),
+        ("days", "array", "For weekly: day names such as [\"Mon\", \"Thu\"]"),
+        ("date", "string", "For once: YYYY-MM-DD, or today / tomorrow"),
+        ("time", "string", "Time of day as the user said it, e.g. 18:00 or 6pm. Leave empty if they gave none"),
+        ("create_files", "boolean", "True only if the user asked for new files to be saved"),
+        ("web", "boolean", "True only if the user asked for web search"),
+    ], optional=("days", "date", "time", "create_files", "web"))
+SCHEDULE_TOOL["function"]["parameters"]["properties"]["days"]["items"] = {"type": "string"}
+SCHEDULE_TOOL["function"]["parameters"]["properties"]["repeat"]["enum"] = list(scheduler.KINDS)
+
 NOTE_TOOL = schema("save_note", "Save a brief working note for this run (key facts, findings, decisions, or file locations). "
                    "Notes survive context trimming so you never need to re-read files you already inspected.", [
     ("note", "string", "One concise fact or finding (under 240 characters)"),
@@ -1855,7 +1877,7 @@ def available_tools(workspace, mode, web, memory, panels=None, workflow=None, *,
 
 
 def system_prompt(workspace, mode, web, memory, memories, instructions, context, notes="", notes_name=None, panels=None,
-                  workflow=None, *, allow_shell=True, skill_checks=None):
+                  workflow=None, *, allow_shell=True, skill_checks=None, scheduling=False):
     today = datetime.date.today().strftime("%A, %B %d, %Y")
     device_label = "Mac" if sys.platform == "darwin" else "Windows PC" if sys.platform == "win32" else "computer"
     lines = [
@@ -1877,6 +1899,13 @@ def system_prompt(workspace, mode, web, memory, memories, instructions, context,
                        "for example by adding today's date."),
         }[mode]
         lines.append(f"Workspace folder: {workspace.path.name} (all paths are relative to it). {permission}")
+        if scheduling:
+            lines.append("Scheduling: when the user asks for something to happen later or on a repeating schedule "
+                         "(\"every Wednesday at 6pm\", \"each weekday morning\", \"tomorrow at 9am\"), call schedule_task "
+                         "instead of doing the work now. Pass the time as the user wrote it, or leave it empty if they "
+                         "gave none. The user confirms on a card, so don't ask for confirmation in text. If they ask for "
+                         "something Pipkin can't schedule (monthly, hourly, every other week, several times a day), "
+                         "say so instead of calling it.")
     else:
         lines.append("No workspace folder is selected, so you cannot read or change the user's files.")
     lines += [
@@ -1977,6 +2006,8 @@ def describe(name, args):
         return "Save a memory"
     if name == "save_note":
         return "Save working note"
+    if name == "schedule_task":
+        return "Propose scheduled task “" + str(args.get("title") or "task")[:60] + "”"
     if name == "terminal_read":
         return "Read your terminal"
     if name == "terminal_run":
@@ -2176,6 +2207,75 @@ def landing_page(args):
 """
 
 
+_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL | re.IGNORECASE)
+
+
+def _normalize_text_tool_item(item, allowed_names):
+    """Convert a parsed JSON object into an Ollama-shaped tool_call if its name is strictly allowed."""
+    if not isinstance(item, dict):
+        return None
+    if isinstance(item.get("function"), dict):
+        item = item["function"]
+    name = item.get("name")
+    if not isinstance(name, str) or name not in allowed_names:
+        return None
+    raw_args = None
+    for key in ("arguments", "parameters", "args"):
+        if key in item:
+            raw_args = item[key]
+            break
+    if raw_args is None:
+        raw_args = {}
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args)
+        except ValueError:
+            return None
+    if not isinstance(raw_args, dict):
+        return None
+    return {"function": {"name": name, "arguments": raw_args}}
+
+
+def _decode_tool_payload(raw, allowed_names):
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return []
+    items = parsed if isinstance(parsed, list) else [parsed]
+    calls = []
+    for item in items:
+        normalized = _normalize_text_tool_item(item, allowed_names)
+        if normalized:
+            calls.append(normalized)
+    return calls
+
+
+def extract_text_tool_calls(content, allowed_names):
+    """Recover a standalone, machine-shaped reply for low-risk tools only."""
+    if not content or not allowed_names:
+        return [], content or ""
+    allowed_names = set(allowed_names) & (WORKSPACE_READS | {"update_plan", "schedule_task"})
+    raw = content.strip()
+    match = _TOOL_CALL_TAG.fullmatch(raw)
+    if match:
+        raw = match.group(1).strip()
+    elif raw.startswith("```"):
+        # A fenced block is ordinary example/documentation content.
+        return [], content
+    else:
+        # Some small models produce "list_files {...}" instead of a JSON envelope.
+        named = re.fullmatch(r"([a-z_]+)\s+(\{.*\})", raw, re.DOTALL)
+        if named and named.group(1) in allowed_names:
+            try:
+                raw = json.dumps({"name": named.group(1), "arguments": json.loads(named.group(2))})
+            except ValueError:
+                return [], content
+    calls = _decode_tool_payload(raw, allowed_names)
+    if not calls:
+        return [], content
+    return calls[:4], ""
+
+
 def summarize_exchange(dropped):
     """One line for a compacted step: what the model said, what it called, and how that went."""
     assistant, results = dropped[0], dropped[1:]
@@ -2202,7 +2302,8 @@ def summarize_exchange(dropped):
 class Agent:
     def __init__(self, request_model, emit, check, approve, *, workspace=None, mode="ask", web=True,
                  memory=True, max_steps=24, num_ctx=8192, think=False, panels=None, workflow=None, undo=None,
-                 allow_shell=True, explore_model=None, max_explore_steps=4, skill_checks=None, skill_name=None):
+                 allow_shell=True, explore_model=None, max_explore_steps=4, skill_checks=None, skill_name=None,
+                 schedule=None):
         self.request_model, self.emit, self.check = request_model, emit, check
         self.panels = panels
         self.workflow = workflow
@@ -2215,7 +2316,12 @@ class Agent:
         self.explore_model = str(explore_model).strip() if explore_model else None
         self.max_explore_steps = max(1, int(max_explore_steps))
         self.tools = available_tools(workspace, mode, web, memory, panels, workflow, allow_shell=self.allow_shell)
-        self.explore_tools = [t for t in self.tools if t["function"]["name"] not in WRITE_TOOL_NAMES | {"run_command", "terminal_run"}]
+        # Scheduling needs the user's confirmation, so it is never offered to an unattended (scheduled) run.
+        self.schedule = schedule if workspace is not None and mode != "create" and callable(schedule) else None
+        if self.schedule:
+            self.tools.append(SCHEDULE_TOOL)
+        self.explore_tools = [t for t in self.tools if t["function"]["name"] not in
+                              WRITE_TOOL_NAMES | {"run_command", "terminal_run", "schedule_task"}]
         self.tool_names = {tool["function"]["name"] for tool in self.tools}
         self.seen = set()
         self.counter = 0
@@ -2237,6 +2343,9 @@ class Agent:
         self.document_hint_sent = False
         self.loss_warned = set()
         self.task = ""
+        self.request_text = ""
+        self.schedule_status = None
+        self.scheduled_task = None
         self.approval_seconds = 0.0
         self.plan = []
         self.uncertain = {}
@@ -2395,6 +2504,52 @@ class Agent:
             return self.request_approval(kind, title, detail)
         finally:
             self.approval_seconds += time.monotonic() - started
+
+    def propose_schedule(self, args):
+        """Show a confirmation card for a scheduled task and create it only if the user confirms."""
+        if scheduler.is_question(self.request_text) and not self.steering_texts:
+            return ("Not scheduled: the user asked a question, not for a task to run later. Answer the question instead.")
+        self.schedule_status = "rejected"
+        self.scheduled_task = None
+        proposal = scheduler.proposal_from_tool(
+            args, self.schedule_now, self.request_text, steering=self.steering_texts,
+        )
+        if "unsupported" in proposal:
+            return (f"I can't repeat a task {proposal['unsupported']} yet — Pipkin supports "
+                    f"{scheduler.SUPPORTED_SCHEDULES}. Let me know which of those you'd like instead.")
+        if proposal["problem"]:
+            return f"{proposal['problem']} Tell me another date or time and I'll set it up."
+        task = proposal["task"]
+        detail = {"task": task, "nextRun": proposal["nextRun"], "needsClarification": proposal["needsClarification"],
+                  "folder": self.workspace.path.name}
+        decision = self.approve("schedule", task["title"], detail)
+        if not decision:
+            self.schedule_status = "declined"
+            return ("Okay — you chose not to create that scheduled task. "
+                    "Let me know if you want to adjust the details or run it right now instead.")
+        try:
+            saved = self.schedule(decision if isinstance(decision, dict) else task)
+        except (ValueError, OSError) as error:
+            self.schedule_status = "failed"
+            reason = str(error) if isinstance(error, ValueError) else "Pipkin could not save the task. Check the disk and try again."
+            return f"Not scheduled: {reason}"
+        self.schedule_status = "saved"
+        self.scheduled_task = {
+            "id": saved.get("id"),
+            "title": saved["title"],
+            "schedule": saved["schedule"],
+            "nextRun": saved.get("nextRun"),
+            "access": saved.get("access", "read"),
+            "web": bool(saved.get("web")),
+            "folder": self.workspace.path.name,
+        }
+        when = scheduler.describe_schedule_human(saved["schedule"])
+        next_at = scheduler.format_moment_human(saved.get("nextRun"))
+        access = "can read files and create new ones" if saved.get("access") == "create" else "read-only"
+        web_note = " with web search" if saved.get("web") else ""
+        next_clause = f" Its next run is {next_at}." if next_at else ""
+        return (f"Scheduled \u201c{saved['title']}\u201d to run {when} in {self.workspace.path.name} ({access}{web_note})."
+                f"{next_clause} Results will appear in your Scheduled inbox while Pipkin is open.")
 
     def begin_effect(self, label):
         self.check()
@@ -2667,6 +2822,8 @@ class Agent:
             fact = require_str(args, "fact", 300).strip()
             self.emit("memory", text=fact)
             return "Saved to the user's memory."
+        if name == "schedule_task":
+            return self.propose_schedule(args)
         if name == "save_note":
             note = require_str(args, "note", 240).strip()
             file_ref = str(args.get("file") or "").strip()[:160]
@@ -2926,7 +3083,7 @@ class Agent:
         return repeated
 
     def run(self, system, history, task, *, stop_requested=lambda: False, take_steering=tuple,
-            steering_pending=lambda: False, saved=None, save_checkpoint=None):
+            steering_pending=lambda: False, saved=None, save_checkpoint=None, request_text=None):
         saved = saved or {}
         self.save_checkpoint = save_checkpoint
         self.plan = saved.get("plan", [])
@@ -2941,7 +3098,46 @@ class Agent:
         self.working_notes = list(saved.get("working_notes", []))
         self.read_ledger = dict(saved.get("read_ledger", {}))
         self.task = task
+        self.request_text = scheduler.user_request(task, request_text)
+        self.schedule_now = datetime.datetime.now()
         activity = list(saved.get("activity", []))
+        schedule_hint = scheduler.schedule_hint(self.request_text, self.schedule_now) if self.schedule else None
+        schedule_only = bool(schedule_hint)
+        schedule_disabled = scheduler.cancels_schedule(self.request_text)
+        schedule_only = schedule_only and not schedule_disabled
+        schedule_retry = True
+        # A completed proposal may have been saved just before a disconnect.
+        # Only short-circuit when the task was actually saved; rejected/declined/failed attempts can be retried with steering.
+        previous_schedule = next((item for item in reversed(activity)
+                                  if item.get("name") == "schedule_task" and item.get("scheduleStatus") == "saved"), None)
+        if previous_schedule and not previous_schedule.get("cancelled"):
+            result = previous_schedule["preview"]
+            if save_checkpoint:
+                save_checkpoint(result=result)
+            self.emit("result", text=result)
+            return
+        # Short-circuit deterministically unsupported or invalid schedules before wasting an LLM inference call.
+        if schedule_only and not saved and not steering_pending():
+            precheck = scheduler.resolve_timing(self.request_text, self.schedule_now, self.steering_texts)
+            if precheck["unsupported"] or precheck["problem"]:
+                if precheck["unsupported"]:
+                    result = (f"I can't repeat a task {precheck['unsupported']} yet — Pipkin supports "
+                              f"{scheduler.SUPPORTED_SCHEDULES}. Let me know which of those you'd like instead.")
+                else:
+                    result = f"{precheck['problem']} Tell me another date or time and I'll set it up."
+                self.counter += 1
+                self.current_id = f"t{self.counter}"
+                self.emit("tool", id=self.current_id, name="schedule_task", label="Propose scheduled task", args={})
+                self.emit("tool_result", id=self.current_id, ok=False, cancelled=False,
+                          preview=result, scheduleStatus="rejected")
+                if save_checkpoint:
+                    activity.append({"name": "schedule_task", "label": "Propose scheduled task", "id": self.current_id,
+                                     "ok": False, "cancelled": False, "preview": result, "scheduleStatus": "rejected"})
+                    save_checkpoint(result=result, activity=activity, counter=self.counter)
+                self.emit("result", text=result)
+                self.emit("usage", tokens=0, seconds=0.0, steps=0, compactions=0,
+                          timings={"load": 0.0, "prompt": 0.0, "generate": 0.0, "tools": 0.0, "approval": 0.0})
+                return
         last_action = next((item for item in reversed(activity) if item.get("name")), {})
         canceled_path = saved.get("pending_edit_path") if self.mode != "read" else None
         if (self.mode != "read" and "pending_edit_path" not in saved
@@ -2953,7 +3149,12 @@ class Agent:
         retry_canceled_edit = True
         unfinished_nudges = 2
         deliverable_nudges = 1
-        if self.workflow == "site" and self.workspace is not None:
+        if schedule_disabled and not scheduler.runs_now(self.request_text) and not steering_pending():
+            self.emit("result", text="Scheduling canceled. No scheduled task was created.")
+            if save_checkpoint:
+                save_checkpoint(result="Scheduling canceled. No scheduled task was created.")
+            return
+        if not schedule_only and self.workflow == "site" and self.workspace is not None:
             source_map = saved.get("site_source_map") if saved else self.prepare_site_source(task)
             if source_map:
                 self.task += "\n\nWorkspace source map (reference data)\n" + source_map
@@ -2975,10 +3176,13 @@ class Agent:
                            "call its tool again to request fresh approval. Continue to honor any action the user declined.")
         if self.uncertain:
             system += "\nAn edit or command was interrupted. Inspect the current state and report what the user should review."
-        plan_nudge = not saved and not self.plan and "update_plan" in self.tool_names
+        plan_nudge = not schedule_only and not saved and not self.plan and "update_plan" in self.tool_names
         if plan_nudge:
             # Small models follow a note at the end of the request far better than a guideline in the system prompt.
             self.task += PLAN_NOTE
+        schedule_note_text = SCHEDULE_NOTE.format(schedule_hint) if schedule_only else ""
+        if schedule_only:
+            self.task += schedule_note_text
         messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": self.task},
                     *saved.get("evidence", [])]
         self.history_len = len(history)
@@ -2997,13 +3201,13 @@ class Agent:
         recovery_sent = False
         skill_check_nudges = 1
         final_skill_checks = []
-        site_needs_page = self.workflow == "site" and self.mode != "read" and not any(
+        site_needs_page = not schedule_only and self.workflow == "site" and self.mode != "read" and not any(
             path.casefold().endswith(".html") for path in self.saved_files
         )
         # Updating an existing page means reading it first and editing in place, which takes a few more steps.
         existing_pages = site_needs_page and self.workspace is not None and self.workspace.has_root_pages()
         site_limit = 7 if existing_pages else 5
-        exploring_phase = bool(self.explore_model and self.workspace is not None and self.mode != "read" and not self.saved_files)
+        exploring_phase = not schedule_only and bool(self.explore_model and self.workspace is not None and self.mode != "read" and not self.saved_files)
         explore_turns = 0
         steering_texts = self.steering_texts
         if self.summary or self.working_notes or self.read_ledger:
@@ -3020,7 +3224,27 @@ class Agent:
                 for note in notes:
                     steering_texts.append(note["text"])
                     self.emit("steering", **note)
+                    if scheduler.cancels_schedule(note["text"]):
+                        schedule_disabled = True
+                        schedule_only = False
+                        if schedule_note_text and schedule_note_text in self.task:
+                            self.task = self.task.replace(schedule_note_text, "")
+                        schedule_note_text = ""
+                    elif self.schedule and scheduler.schedule_hint(note["text"], self.schedule_now):
+                        schedule_disabled = False
+                        schedule_only = True
+                        schedule_retry = True
+                        if schedule_note_text and schedule_note_text in self.task:
+                            self.task = self.task.replace(schedule_note_text, "")
+                        schedule_note_text = SCHEDULE_NOTE.format("the updated timing")
+                        self.task += schedule_note_text
                 self.write_task(messages)
+                if schedule_disabled:
+                    cancellation = next((note for note in reversed(steering_texts)
+                                         if scheduler.cancels_schedule(note)), "")
+                    if not scheduler.runs_now(cancellation):
+                        result = "Scheduling canceled. No scheduled task was created."
+                        break
             allow_tools = step < self.max_steps
             convo = self.fit(messages)
             if canceled_path and step == 0:
@@ -3031,9 +3255,14 @@ class Agent:
             if not allow_tools:
                 convo[0] = dict(convo[0], content=convo[0]["content"] + "\nThe step limit was reached. Give your final answer now without tools.")
             model_steps += 1
-            thinking = self.think and step == 0 and not self.plan
-            use_explorer = exploring_phase and allow_tools and explore_turns < self.max_explore_steps
+            # Single-tool schedule proposals have deterministic timing/permission checks; skip slow thinking tokens.
+            thinking = self.think and step == 0 and not self.plan and not schedule_only
+            use_explorer = exploring_phase and not schedule_only and allow_tools and explore_turns < self.max_explore_steps
             step_tools = (self.explore_tools if use_explorer else self.tools) if allow_tools else []
+            if schedule_only:
+                step_tools = [tool for tool in step_tools if tool["function"]["name"] == "schedule_task"]
+            if schedule_disabled:
+                step_tools = [tool for tool in step_tools if tool["function"]["name"] != "schedule_task"]
             self.emit("model_step", number=model_steps, planning=thinking, phase="explore" if use_explorer else "write")
             if use_explorer:
                 explore_turns += 1
@@ -3056,6 +3285,58 @@ class Agent:
                 continue
             calls = reply.get("tool_calls") or []
             content = (reply.get("content") or "").strip()
+            step_tool_names = {tool["function"]["name"] for tool in step_tools}
+            if not calls and allow_tools and content and step_tools:
+                recovery_names = step_tool_names if schedule_only else step_tool_names - {"schedule_task"}
+                recovered_calls, cleaned_content = extract_text_tool_calls(content, recovery_names)
+                if recovered_calls:
+                    calls = recovered_calls
+                    content = cleaned_content
+            had_calls = bool(calls)
+            rejected_schedule = any(isinstance(call, dict) and isinstance(call.get("function"), dict)
+                                    and call["function"].get("name") == "schedule_task" for call in calls)
+            calls = [call for call in calls if isinstance(call, dict)
+                     and isinstance(call.get("function"), dict)
+                     and isinstance(call["function"].get("name"), str)
+                     and call["function"]["name"] in step_tool_names]
+            schedule_calls = [call for call in calls if call["function"]["name"] == "schedule_task"]
+            if schedule_only or (schedule_calls and self.schedule and not schedule_disabled
+                                 and not scheduler.is_question(self.request_text)):
+                # Scheduling is a proposal-only turn. Even a mixed tool batch cannot run the job immediately.
+                calls = schedule_calls[:1]
+                schedule_only = True
+                if not calls or not allow_tools:
+                    if schedule_retry and allow_tools and step + 1 < self.max_steps and not stop_requested():
+                        schedule_retry = False
+                        messages.append({"role": "user", "content": (
+                            "Use the schedule_task tool to propose the schedule. Do not run the task now."
+                        )})
+                        continue
+                    timing = scheduler.resolve_timing(self.request_text, self.schedule_now, self.steering_texts)
+                    if timing["unsupported"]:
+                        result = f"Not scheduled: Pipkin can't repeat a task {timing['unsupported']} yet. Choose a supported schedule."
+                    elif timing["problem"]:
+                        result = "Not scheduled: " + timing["problem"]
+                    else:
+                        result = "No task was scheduled. Try specifying when it should run, or use Scheduled to create it."
+                    break
+            if not schedule_only:
+                calls = [call for call in calls if call["function"]["name"] != "schedule_task"]
+            if had_calls and not calls and not schedule_only and allow_tools:
+                reason = "That tool is unavailable in this step."
+                if rejected_schedule and scheduler.is_question(self.request_text):
+                    reason = "The user asked a question. Answer it without creating a schedule."
+                elif rejected_schedule and schedule_disabled:
+                    reason = "The user canceled scheduling. Follow the updated request."
+                elif rejected_schedule:
+                    reason = "Scheduling is unavailable in this run."
+                self.counter += 1
+                action_id = f"t{self.counter}"
+                self.emit("tool", id=action_id, name="schedule_task" if rejected_schedule else "unavailable",
+                          label="Unavailable tool", args={})
+                self.emit("tool_result", id=action_id, ok=False, cancelled=False, preview=reason)
+                messages.append({"role": "user", "content": reason})
+                continue
             if not calls and use_explorer and allow_tools:
                 exploring_phase = False
                 if content:
@@ -3068,6 +3349,9 @@ class Agent:
                 self.emit("notice", text="Explorer finished gathering context — switching to primary model to write…")
                 continue
             if not calls or not allow_tools:
+                if had_calls and not content and not allow_tools:
+                    result = "The requested action could not be completed with the available tools."
+                    break
                 if canceled_path and not stop_requested():
                     if allow_tools and retry_canceled_edit:
                         retry_canceled_edit = False
@@ -3119,7 +3403,7 @@ class Agent:
                     final_skill_checks = check_results
                 result = content
                 break
-            if content:
+            if content and not schedule_only:
                 progress = clip(content, 1000)
                 self.emit("progress", text=progress)
                 activity = [*activity[-39:], {"type": "text", "text": progress}]
@@ -3152,6 +3436,8 @@ class Agent:
                 accepted_calls.append(recorded)
                 self.counter += 1
                 self.current_id = f"t{self.counter}"
+                self.schedule_status = None
+                self.scheduled_task = None
                 label = describe(name, args)
                 preview = {key: (value if not isinstance(value, str) else clip(value, 400)) for key, value in args.items()} if isinstance(args, dict) else {}
                 self.emit("tool", id=self.current_id, name=str(name), label=label, args=preview)
@@ -3205,7 +3491,9 @@ class Agent:
                                                "file changes since, so it adds nothing new. Use the result you have and move "
                                                "on to the next unfinished plan step instead of rerunning variations.)")
                                     self.emit("notice", text="A command returned the same result as an earlier one. Asked the model to move on.")
-                    if output.startswith("The user declined"):
+                    if name == "schedule_task" and self.schedule_status:
+                        ok = True if self.schedule_status == "saved" else None if self.schedule_status == "declined" else False
+                    elif output.startswith("The user declined"):
                         ok = None
                 except (AgentStopped, BrokenPipeError, ConnectionResetError):
                     raise
@@ -3216,11 +3504,17 @@ class Agent:
                     output = "Action canceled while awaiting approval."
                 except (ValueError, OSError) as error:
                     ok = False
+                    if name == "schedule_task" and schedule_only:
+                        self.schedule_status = "failed"
                     detail = str(error) if isinstance(error, ValueError) else (
                         "No such file or folder." if isinstance(error, FileNotFoundError) else "The file or folder could not be opened.")
                     output = "Tool error: " + detail
                 tool_seconds += time.monotonic() - tool_started
                 outcome = {"id": self.current_id, "ok": ok, "cancelled": cancelled, "preview": clip(output, 1800)}
+                if name == "schedule_task" and (self.schedule_status or schedule_only):
+                    outcome["scheduleStatus"] = "cancelled" if cancelled else self.schedule_status or "failed"
+                    if self.schedule_status == "saved" and self.scheduled_task:
+                        outcome["scheduledTask"] = self.scheduled_task
                 if name in WRITE_TOOL_NAMES:
                     if cancelled:
                         canceled_path = args["path"].strip()
@@ -3281,7 +3575,7 @@ class Agent:
                     cmd_failures += 1
                 elif (name == "run_command" and not failed) or self.saved_file:
                     cmd_failures = 0
-                if failed:
+                if failed and name != "schedule_task":
                     signature = failure_signature(name, output)
                     failures[signature] = failures.get(signature, 0) + 1
                     problems = [*problems[-2:], clip(f"{label}: {signature[1]}", 200)]
@@ -3297,7 +3591,7 @@ class Agent:
                         self.emit("notice", text=f"{cmd_failures} commands failed in a row. Asked the model to switch approach.")
                     if hint:
                         output += "\n\n(Recovery: " + hint + ")"
-                if (plan_nudge and not plan_reminded and not self.plan and name != "update_plan"
+                if (not schedule_only and plan_nudge and not plan_reminded and not self.plan and name != "update_plan"
                         and not any((item.get("function") or {}).get("name") == "update_plan"
                                     for item in calls if isinstance(item, dict))):
                     output += PLAN_REMINDER
@@ -3330,6 +3624,11 @@ class Agent:
                                     read_ledger=self.read_ledger, files=self.saved_files,
                                     outputs=self.outputs, pending_edit_path=canceled_path)
                 self.emit("tool_result", **outcome)
+                if name == "schedule_task" and schedule_only and not cancelled:
+                    result = output
+                    break
+            if result:
+                break
             if not accepted_calls:
                 messages.pop()
                 continue

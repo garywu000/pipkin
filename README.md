@@ -5,11 +5,11 @@
 <p align="center"><strong>Local AI chat and a workspace agent for Mac and Windows.</strong><br>
 Chat with an Ollama model on your computer, or give Agent a folder and turn your files into a website, document, or presentation.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/download/v2.1.2/Pipkin-macos-arm64.zip"><img src="docs/download-macos.svg" alt="Download Pipkin for Mac, Apple Silicon ZIP" width="264" height="76"></a>
-  <a href="https://github.com/garywu000/pipkin/releases/download/v2.1.2/Pipkin-windows-x64.zip"><img src="docs/download-windows.svg" alt="Download Pipkin for Windows, x64 ZIP" width="264" height="76"></a>
+  <a href="https://github.com/garywu000/pipkin/releases/download/v2.3.0/Pipkin-macos-arm64.zip"><img src="docs/download-macos.svg" alt="Download Pipkin for Mac, Apple Silicon ZIP" width="264" height="76"></a>
+  <a href="https://github.com/garywu000/pipkin/releases/download/v2.3.0/Pipkin-windows-x64.zip"><img src="docs/download-windows.svg" alt="Download Pipkin for Windows, x64 ZIP" width="264" height="76"></a>
 </p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.1.2"><strong>v2.1.2 release notes</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.3.0"><strong>v2.3.0 release notes</strong></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#choosing-a-model-for-agent">Choose a model</a> ·
   <a href="#shareable-skills">Shareable skills</a> ·
@@ -167,6 +167,9 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.3.0](https://github.com/garywu000/pipkin/releases/tag/v2.3.0) | Ask for a scheduled task in your own words, in Chat or Agent mode ("check my notes every Wednesday at 6pm"). Pipkin shows a confirmation card and creates the task only when you click Create task. |
+| [v2.2.1](https://github.com/garywu000/pipkin/releases/tag/v2.2.1) | macOS updates keep your pinned Dock icon, and opening Pipkin while it's running brings up the existing window instead of a second copy. |
+| [v2.2.0](https://github.com/garywu000/pipkin/releases/tag/v2.2.0) | Scheduled background tasks with a Waiting-for-you inbox, optional skill checks, and read-only or new-files-only runs. |
 | [v2.1.2](https://github.com/garywu000/pipkin/releases/tag/v2.1.2) | Queue messages while a reply or Work run is going, or steer the run, chosen in Settings. Chats name themselves more reliably, edits keep the file's indentation, and the welcome card and dialogs animate smoothly. |
 | [v2.1.1](https://github.com/garywu000/pipkin/releases/tag/v2.1.1) | Agent runs loop less and edit more reliably: repeated commands are caught, edits tolerate indentation slips, rewrites can't silently drop content, and PDFs are read directly. Type a correction after stopping a run to continue it. |
 | [v2.1.0](https://github.com/garywu000/pipkin/releases/tag/v2.1.0) | Shareable skills and packs, workspace skills, import previews, and automatic Work output checks. Improved Stop and approval recovery. |

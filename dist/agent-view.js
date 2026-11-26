@@ -8,7 +8,7 @@
     list_files: "folder", search_text: "search", read_file: "file", read_files: "file", outline_file: "file", write_file: "edit", edit_file: "edit",
     run_command: "terminal", write_page: "edit", write_artifact: "file", web_search: "globe", web_fetch: "globe", remember: "brain", update_plan: "list",
     terminal_run: "terminal", terminal_read: "terminal", browser_open: "globe", browser_read: "globe",
-    map_document: "file", check_page: "check",
+    map_document: "file", check_page: "check", schedule_task: "clock",
   };
   const MODE_LABELS = { read: "Read only", ask: "Ask first", auto: "Auto-edit", create: "New files only" };
 
@@ -89,6 +89,7 @@
           }
           run.entries.push({ type: "tool", id: action.id, name: action.name, label: action.label, output: action.preview,
             state: action.cancelled ? "cancelled" : action.ok === true ? "ok" : action.ok === null ? "declined" : "fail" });
+          if (action.scheduleStatus === "saved" && action.scheduledTask) run.scheduledTask = action.scheduledTask;
         }
         for (const label of event.uncertain) {
           run.entries.push({ type: "text", text: "Interrupted action to review: " + label });
@@ -138,7 +139,20 @@
           entry.state = event.cancelled ? "cancelled" : event.ok === true ? "ok" : event.ok === null ? "declined" : "fail";
           entry.output = event.preview || "";
         }
+        let scheduleSaved = false;
+        if (event.scheduleStatus) {
+          const card = run.entries.find((item) => item.type === "approval" && item.kind === "schedule" && item.toolId === event.id);
+          if (card && card.decision === "approved") {
+            card.saveStatus = event.scheduleStatus;
+            card.saveMessage = event.preview || "";
+          }
+          if (event.scheduleStatus === "saved" && event.scheduledTask) {
+            run.scheduledTask = event.scheduledTask;
+            scheduleSaved = true;
+          }
+        }
         if (event.saved_file) showSavedFiles(run, [event.saved_file]);
+        if (scheduleSaved) return { scheduleSaved: true };
         break;
       }
       case "diff": {
@@ -148,7 +162,7 @@
       }
       case "approval":
         settleDraft(run);
-        run.entries.push({ type: "approval", id: event.id, kind: event.kind, title: event.title, detail: event.detail, decision: null });
+        run.entries.push({ type: "approval", id: event.id, kind: event.kind, title: event.title, detail: event.detail, decision: null, toolId: event.kind === "schedule" ? [...run.entries].reverse().find((item) => item.type === "tool" && item.name === "schedule_task")?.id : null });
         return { approval: true };
       case "approval_result": {
         const entry = run.entries.find((item) => item.type === "approval" && item.id === event.id);
@@ -213,6 +227,7 @@
         run.draft = "";
         run.state = "complete";
         run.endedAt = Date.now();
+        settleScheduleSaves(run);
         return { final: event.text };
       case "stopped":
         if (event.text) run.draft = "";
@@ -229,6 +244,16 @@
     return {};
   }
 
+  function settleScheduleSaves(run) {
+    for (const entry of run.entries) {
+      if (entry.type === "approval" && entry.kind === "schedule" && entry.decision === "approved" && !entry.saveStatus) {
+        entry.saveStatus = "unknown";
+        entry.saveMessage = "Pipkin did not receive the save result. Check Scheduled before trying again.";
+        run.scheduledTask ||= { unknown: true, title: entry.title || entry.detail?.task?.title || "Scheduled task" };
+      }
+    }
+  }
+
   function finish(run, state, message) {
     run.state = state;
     run.endedAt = Date.now();
@@ -242,6 +267,7 @@
         entry.reason = "ended";
       }
     }
+    settleScheduleSaves(run);
     if (message) run.answer = message;
   }
 
@@ -365,7 +391,81 @@
     return { node, update };
   }
 
+  /* A schedule_task proposal: what will run, when, and where. Nothing is created until the user confirms. */
+  function scheduleCard(entry, onApprove) {
+    const schedule = window.PipkinSchedule;
+    const detail = entry.detail && typeof entry.detail === "object" ? entry.detail : {};
+    const task = detail.task || {};
+    const flagged = new Set(detail.needsClarification || []);
+    const EXPIRED = { steering: "Skipped (you steered the run)", stop: "Canceled (the run is stopping)", ended: "Canceled when the run stopped" };
+    const heading = entry.decision === "approved" ? (entry.saveStatus === "saved" ? "Scheduled" : entry.saveStatus === "unknown" ? "Save unconfirmed" : entry.saveStatus ? "Not scheduled" : "Saving task…") : entry.decision === "denied" ? "Not scheduled"
+      : entry.decision === "expired" ? EXPIRED[entry.reason] || "Not answered" : "Create this scheduled task?";
+    const card = el("div", { className: "approval-card schedule-proposal", dataset: { decision: entry.decision === "approved" && entry.saveStatus !== "saved" ? (entry.saveStatus && entry.saveStatus !== "unknown" ? "denied" : "pending") : entry.decision || "pending" } });
+    const permBadge = !entry.decision
+      ? el("span", { className: "schedule-proposal-perm", text: (task.access === "create" ? "Creates new files" : "Read only") + (task.web ? " · Web" : "") })
+      : null;
+    card.append(el("header", {}, icon(entry.saveStatus === "saved" ? "check" : entry.decision === "approved" && (!entry.saveStatus || entry.saveStatus === "unknown") ? "clock" : entry.decision ? "x" : "clock"),
+      el("span", { text: entry.decision ? `${heading} · ${entry.title}` : heading }), permBadge));
+    if (entry.decision) {
+      if (entry.saveStatus && entry.saveStatus !== "saved" && entry.saveMessage) card.append(el("p", { className: "schedule-proposal-status-note", text: entry.saveMessage }));
+      if (entry.decision === "approved" && (entry.saveStatus === "saved" || entry.saveStatus === "unknown") && schedule?.open) {
+        const openBtn = el("button", {
+          type: "button", className: "button small",
+          text: entry.saveStatus === "saved" ? "Open Scheduled" : "Check Scheduled",
+        });
+        openBtn.addEventListener("click", () => schedule.open("tasks"));
+        card.append(el("footer", {}, el("span", { className: "decision", text: entry.saveStatus === "saved" ? "Saved to your Scheduled tasks." : "" }), openBtn));
+      }
+      return card;
+    }
+    const when = task.schedule ? (schedule?.describe(task.schedule) || "") : "";
+    const whenGuessed = ["kind", "days", "time", "date"].some((field) => flagged.has(field));
+    const nextRunText = detail.nextRun ? (schedule?.moment(detail.nextRun) || detail.nextRun) : "Not set";
+    const safetyText = task.access === "create"
+      ? "Never edits existing files or runs commands"
+      : "Read-only · never runs commands";
+    const hero = el("div", { className: "schedule-proposal-hero" },
+      el("div", { className: "schedule-proposal-title", text: task.title || entry.title || "Scheduled task" }),
+      el("div", { className: "schedule-proposal-when" + (whenGuessed ? " guessed" : "") },
+        icon("clock"),
+        el("span", { text: when || "Not set" }),
+        whenGuessed ? el("span", { className: "schedule-guessed-pill", text: "Guessed" }) : null));
+    const metaChip = (glyph, labelText, valueText) => el("div", { className: "schedule-proposal-chip" },
+      icon(glyph),
+      el("span", { className: "chip-label", text: labelText }),
+      el("strong", { text: valueText }));
+    const meta = el("div", { className: "schedule-proposal-meta" },
+      metaChip("clock", "Next run", nextRunText),
+      detail.folder ? metaChip("folder", "Folder", detail.folder) : null,
+      metaChip("shield", "Safeguards", safetyText));
+    card.append(hero, meta);
+    card.append(el("div", { className: "schedule-proposal-prompt" },
+      el("span", { text: "What Pipkin will do each run" }),
+      el("p", { text: task.prompt || "" })));
+    if (flagged.size) {
+      const names = { kind: "how often", days: "which days", time: "the time", date: "the date" };
+      const list = [...flagged].map((field) => names[field]).filter(Boolean).join(", ");
+      card.append(el("div", { className: "schedule-proposal-note" },
+        icon("alert"),
+        el("span", { text: `Pipkin guessed ${list}. Double-check the schedule above, or use Edit details.` })));
+    }
+    const footer = el("footer");
+    const busy = Boolean(entry.submitting);
+    const notNow = el("button", { type: "button", className: "button small", text: "Not now", disabled: busy });
+    const edit = el("button", { type: "button", className: "button small", text: "Edit details…", disabled: busy || !schedule?.openDraft });
+    const create = el("button", { type: "button", className: "button small accent", text: busy ? "Creating…" : "Create task", disabled: busy });
+    notNow.addEventListener("click", () => onApprove?.(entry, false));
+    create.addEventListener("click", () => onApprove?.(entry, true));
+    edit.addEventListener("click", () => schedule.openDraft(task, {
+      folderName: detail.folder, onSave: (edited) => onApprove?.(entry, true, edited),
+    }));
+    footer.append(el("span", { className: "decision", text: "Runs automatically while Pipkin is open." }), notNow, edit, create);
+    card.append(footer);
+    return card;
+  }
+
   function approvalCard(entry, onApprove) {
+    if (entry.kind === "schedule") return scheduleCard(entry, onApprove);
     const card = el("div", { className: "approval-card", dataset: { decision: entry.decision || "pending" } });
     const EXPIRED = { steering: "Skipped (you steered the run)", stop: "Canceled (the run is stopping)", ended: "Canceled when the run stopped" };
     const heading = entry.decision === "approved" ? "Approved" : entry.decision === "denied" ? "Declined"
@@ -426,7 +526,19 @@
     return el("li", {}, statusIcon(entry.kind === "blocked" ? "fail" : "ok"), el("div", { className: "legacy-entry" }, el("b", { text: entry.kind }), entry.text));
   }
 
+  function isScheduleOnlyRun(run) {
+    const tools = run.entries.filter((entry) => entry.type === "tool");
+    const hasSchedule = tools.some((entry) => entry.name === "schedule_task")
+      || run.entries.some((entry) => entry.type === "approval" && entry.kind === "schedule");
+    return hasSchedule && tools.every((entry) => entry.name === "schedule_task");
+  }
+
   function currentActivity(run) {
+    const pendingSchedule = run.entries.find((entry) => entry.type === "approval" && entry.kind === "schedule" && !entry.decision);
+    if (pendingSchedule) return "Review scheduled task";
+    if (run.entries.some((entry) => entry.type === "approval" && entry.kind === "schedule" && entry.decision === "approved" && !entry.saveStatus)) {
+      return "Saving scheduled task";
+    }
     if (run.entries.some((entry) => entry.type === "approval" && !entry.decision)) return "Waiting for your approval";
     if (lastLiveThinking(run)) return "Thinking";
     if (run.entries.findLast((entry) => entry.type === "tool")?.state === "running") return "Running an action";
@@ -439,9 +551,17 @@
     const tools = run.entries.filter((entry) => entry.type === "tool").length;
     const elapsed = formatDuration((run.endedAt || now) - run.startedAt, run.state !== "working");
     const steps = tools ? ` · ${tools} ${tools === 1 ? "action" : "actions"}` : "";
-    if (run.state === "working") return `${currentActivity(run)} · ${elapsed}${steps}`;
+    if (run.state === "working") {
+      if (run.entries.some((entry) => entry.type === "approval" && entry.kind === "schedule" && !entry.decision)) {
+        return "Review scheduled task";
+      }
+      return `${currentActivity(run)} · ${elapsed}${steps}`;
+    }
     if (run.state === "stopped") return `Stopped after ${elapsed}${steps}`;
     if (run.state === "error") return `Stopped with an error · ${elapsed}${steps}`;
+    if (isScheduleOnlyRun(run)) {
+      return run.scheduledTask && !run.scheduledTask.unknown ? `Scheduled task · ${elapsed}` : `Schedule check · ${elapsed}`;
+    }
     return `Worked for ${elapsed}${steps}`;
   }
 
@@ -473,7 +593,7 @@
       root.append(legacy);
       return { element: root, render() {}, collapse() { legacy.open = false; } };
     }
-    let open = true;
+    let open = !(run.state === "complete" && isScheduleOnlyRun(run));
     let timer = 0;
     let state, badgesKey, planKey, planState, notesKey;
     const rows = new WeakMap();
@@ -501,11 +621,14 @@
           const card = el("div");
           let decision = "";
           const update = () => {
-            const next = entry.decision || (entry.submitting ? "submitting" : null);
+            const next = [entry.decision || (entry.submitting ? "submitting" : ""), entry.saveStatus || "", entry.title || ""].join("|");
             if (decision === next) return;
             decision = next;
             card.replaceChildren(approvalCard(entry, onApprove));
-            if (card.parentNode === node) node.firstChild.replaceWith(statusIcon(entry.decision === "approved" ? "ok" : entry.decision ? "declined" : "running"));
+            const iconState = entry.kind === "schedule" && entry.decision === "approved"
+              ? (entry.saveStatus === "saved" ? "ok" : !entry.saveStatus ? "running" : "declined")
+              : (entry.decision === "approved" ? "ok" : entry.decision ? "declined" : "running");
+            if (card.parentNode === node) node.firstChild.replaceWith(statusIcon(iconState));
           };
           node.append(statusIcon("running"), card);
           row = { node, card, update };

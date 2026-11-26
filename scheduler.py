@@ -29,119 +29,626 @@ TITLE_LIMIT = 80
 PROMPT_LIMIT = 4000
 
 DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-CLARIFICATION_FIELDS = ("time", "date", "days", "kind", "prompt", "skill_name", "access", "web")
-PROPOSAL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "is_schedule_request": {"type": "boolean"},
-        "title": {"type": "string"},
-        "prompt": {"type": "string"},
-        "kind": {"type": "string", "enum": list(KINDS)},
-        "days": {"type": "array", "items": {"type": "string", "enum": list(DAY_NAMES)}},
-        "date": {"type": ["string", "null"]},
-        "time": {"type": ["string", "null"]},
-        "access": {"type": "string", "enum": list(ACCESS)},
-        "web": {"type": "boolean"},
-        "skill_name": {"type": ["string", "null"]},
-        "needs_clarification": {"type": "array", "items": {"type": "string", "enum": list(CLARIFICATION_FIELDS)}},
-    },
-    "additionalProperties": False,
-}
-PROPOSAL_SCHEMA["required"] = list(PROPOSAL_SCHEMA["properties"])
+FULL_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
-_DAY = r"(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
-_CADENCE = re.compile(
-    rf"\b(?:(?:every|each)\s+(?:{_DAY}|days?|weekdays?|weekends?|weeks?|mornings?|afternoons?|evenings?|nights?)"
-    rf"|daily|weekly|nightly|weekdays|weekends|tomorrow|tonight|next\s+{_DAY}|on\s+{_DAY}s?"
-    r"|\d{4}-\d{2}-\d{2})\b", re.I)
-_CLOCK = re.compile(r"\b(?:\d{1,2}:\d{2}(?:\s*[ap]\.?m\.?)?|\d{1,2}\s*[ap]\.?m\.?|at\s+\d{1,2}(?!\d)|noon|midnight)\b", re.I)
-_AMBIGUOUS_CLOCK = re.compile(r"\bat\s+(?:[1-9]|1[0-2])\b(?!\s*(?::\d{2}|[ap]\.?m))", re.I)
-_ACTION = (r"(?:read|review|check|summari[sz]e|condense|monitor|scan|collect|find|search|look|research|write|save|"
-           r"create|generate|prepare|compile|send|remind|notify|report|run|organize|update|backup|back\s+up|"
-           r"download|list|analy[sz]e|compare|translate|make|draft|schedule|track|give|tell|fetch|open|extract|"
-           r"calculate|convert|clean|process|email|produce|export|deliver|audit|verify|log|repeat)")
-_REQUEST = re.compile(
-    rf"^(?:(?:please|kindly)\s+)?{_ACTION}\b|"
-    rf"\b(?:i (?:want|need|would like) you to|i['’]d like you to|(?:can|could|would|will) you(?: please)?|please|kindly)\s+{_ACTION}\b", re.I)
-_ABOUT = re.compile(r"^(?:why|what|when|where|who|how|is|are|do|does|did|was|were|should|has|have)\b|"
-                    r"^(?:please\s+)?(?:explain|define|describe|tell me (?:about|why|how|what))\b|"
-                    r"^(?:please\s+)?translate\s+(?:this\s+)?(?:['\"“‘]|every\b|each\b|daily\b|weekly\b)", re.I)
-_FILE_NOUN = r"(?:files?|documents?|spreadsheets?|pdfs?|csvs?|workbooks?)"
-_FILE_MODIFIERS = r"(?:(?:a|an|the|new|another|separate|dated|daily|weekly|summary|text|markdown|word|pdf|csv|excel|output)\s+)*"
-_CREATE_FILE = re.compile(
-    rf"\b(?:write|save|create|generate|export|make|produce|draft)\s+{_FILE_MODIFIERS}{_FILE_NOUN}\b|"
-    rf"\b(?:write|save|create|generate|export|produce)\b[^.!?\n]{{0,100}}\b(?:to|as|into)\s+{_FILE_MODIFIERS}{_FILE_NOUN}\b|"
-    r"\b(?:save|export|write)\b[^.!?\n]{0,100}\b(?:in|to|into)\s+(?:(?:a|the|my|this)\s+)?folder\b", re.I)
-_WEB = re.compile(r"\b(?:search|browse|check|look up|research|fetch|read|monitor|visit|use)\b[^.!?\n]{0,80}"
-                  r"(?:\b(?:the web|the internet|online|websites?|web pages?)\b|https?://)", re.I)
-_NO_CREATE = re.compile(r"\b(?:read[- ]only|(?:do not|don't|never|without)\s+"
-                        r"(?:[^.!?\n]{0,100}\b(?:or|and)\s+)?(?:write|save|create|generate|modify|edit|change))\b", re.I)
-_NO_WEB = re.compile(r"\b(?:offline|no (?:web|internet)|(?:do not|don't|never|without)\s+"
-                     r"(?:[^.!?\n]{0,100}\b(?:or|and)\s+)?(?:browse|search|use)\s+(?:the )?(?:web|internet))\b", re.I)
+# ---------------------------------------------------------------------------------------------------------------
+# Reading a schedule the user asked for in their own words
+#
+# The model proposes a task with the schedule_task tool. Small models often get the details wrong ("6pm" as 06:00,
+# "Monday and Thursday" as Monday only, "next Friday" as today), so whatever the user literally typed overrides the
+# model's arguments. Anything Pipkin had to guess is listed in needsClarification for the confirmation card.
+# ---------------------------------------------------------------------------------------------------------------
+_DAY_INDEX = {"monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1, "wednesday": 2, "wed": 2, "thursday": 3,
+              "thu": 3, "thur": 3, "thurs": 3, "friday": 4, "fri": 4, "saturday": 5, "sat": 5, "sunday": 6, "sun": 6}
+_DAY_ALT = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)"
+_DAY_WORD = re.compile(rf"\b(?P<day>{_DAY_ALT})(?P<plural>s)?\b", re.I)
+# Short forms ("sun", "sat", "wed") are ordinary words too, so they count only next to list or schedule words.
+_ABBR_CONTEXT = re.compile(r"(?:\b(?:every|each|on|next|this|and|or|to|through|thru)\s+|[,/&-]\s*)$", re.I)
+_RECURRING_DAY = re.compile(r"\b(?:every|each)\s+(?:single\s+)?$", re.I)
+_ONE_DAY = re.compile(r"\b(?:next|this|coming|on)\s+$", re.I)
+_WEEKDAYS = re.compile(r"\b(?:every|each|on)\s+weekdays?\b|\bweekdays\b|\b(?:every|each)\s+work\s*day\b", re.I)
+_WEEKENDS = re.compile(r"\b(?:every|each|on)\s+weekends?\b|\bweekends\b", re.I)
+_THIS_WEEKEND = re.compile(r"\b(?:this|the|next)\s+weekend\b", re.I)
+_DAILY = re.compile(r"\b(?:every|each)\s+(?:single\s+)?(?:day|morning|afternoon|evening|night)\b|\bnightly\b", re.I)
+# "daily"/"weekly" describe a recurring deliverable ("a daily summary", "check my notes daily"), but not an existing
+# thing ("the daily log", "my weekly report").
+_CADENCE_ADJ = re.compile(r"\b(?P<word>daily|weekly)\b", re.I)
+_OWNED_BEFORE = re.compile(r"\b(?:the|my|your|our|his|her|their|its|this|that|today'?s|yesterday'?s)\s+$", re.I)
+_EVERY_WEEK = re.compile(r"\b(?:every|each|once\s+a)\s+week\b", re.I)
+_UNSUPPORTED = (
+    (re.compile(r"\bevery\s+(?:other|second|2nd|third|3rd)\b|\b(?:bi-?weekly|fortnightly)\b|\bevery\s+\d+\s+(?:days|weeks)\b", re.I),
+     "every other day or week"),
+    (re.compile(r"\b(?:every|each)\s+(?:\d+\s+)?(?:hours?|minutes?|mins?)\b|\b(?:hourly|half-hourly)\b", re.I), "every hour or minute"),
+    (re.compile(r"\b(?:every|each|once\s+a)\s+(?:month|year)\b|\b(?:monthly|yearly|annually)\b|"
+                r"\b(?:first|last|1st|15th)\s+(?:\w+\s+)?of\s+(?:the|every|each)\s+month\b|\bend\s+of\s+(?:the|every|each)\s+month\b", re.I),
+     "monthly or yearly"),
+    (re.compile(r"\b(?:twice|three\s+times|\d+\s+times)\s+(?:a|per|each)\s+(?:day|week)\b", re.I), "several times a day or week"),
+)
+_TIME = re.compile(
+    r"(?<![\d:.-])(?:(?P<h>\d{1,2})(?::(?P<m>[0-5]\d))?\s*(?P<ap>a\.?m\.?|p\.?m\.?)(?![a-z])"
+    r"|(?P<h24>[01]?\d|2[0-3]):(?P<m24>[0-5]\d)(?![\d:])"
+    r"|\b(?P<noon>noon|midday)\b|\b(?P<midnight>midnight)\b"
+    r"|\b(?:at|around|by)\s+(?P<bare>\d{1,2})(?![\d:]|\s*(?:%|am|pm|a\.m|p\.m|th|st|nd|rd|days?|weeks?|hours?|minutes?|mins?|files?|items?|pages?)))",
+    re.I)
+_PM_WORDS = re.compile(r"\b(?:afternoon|evening|night|tonight|after\s+school|after\s+work|dinner)\b", re.I)
+_AM_WORDS = re.compile(r"\b(?:morning|breakfast|before\s+school|before\s+work|sunrise)\b", re.I)
+_PART_OF_DAY = (("morning", "08:00"), ("afternoon", "14:00"), ("evening", "18:00"), ("tonight", "20:00"), ("night", "20:00"))
+_TOMORROW = re.compile(r"\btomorrow\b(?!['’]s)", re.I)
+_DAY_AFTER_TOMORROW = re.compile(r"\bday\s+after\s+tomorrow\b", re.I)
+_TODAY = re.compile(r"\b(?:today|tonight|this\s+(?:morning|afternoon|evening))\b(?!['’]s)", re.I)
+_ISO_DATE = re.compile(r"\b(20\d\d)-(\d\d)-(\d\d)\b")
+_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
+           "oct": 10, "nov": 11, "dec": 12}
+_MONTH = r"(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+_MONTH_DAY = re.compile(rf"\b{_MONTH}\.?\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(?P<year>20\d\d))?\b|"
+                        rf"\b(?P<day2>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?(?P<month2>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|"
+                        r"apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b", re.I)
+_IN_OFFSET = re.compile(r"\bin\s+(?:(?P<one>an?|one)\s+|(?P<num>\d{1,3})\s+)(?P<unit>minutes?|mins?|hours?|hrs?|days?)\b", re.I)
+_EXPLICIT_ONCE = re.compile(r"\b(?:once|one[- ]time|just\s+once|tomorrow|today|tonight|next\s+weekend|this\s+weekend)\b|"
+                            rf"\bnext\s+{_DAY_ALT}\b|\b20\d\d-\d\d-\d\d\b", re.I)
+_IMPERATIVE_ACTION = re.compile(
+    r"\b(?:please|remind\s+me|schedule|summarize|condense|check|read|write|save|create|send|run|generate|"
+    r"prepare|review|update|draft|build|compile|collect|make|turn|convert|email|notify|alert|scan|monitor|track)\b",
+    re.I,
+)
 
 
-def looks_like_schedule_request(text):
-    """Cheap, conservative gate. The model still decides whether a candidate is a request."""
+def _day_mentions(text):
+    """(weekday, recurring, one_time) for each day name the user wrote."""
+    found = []
+    for match in _DAY_WORD.finditer(text):
+        if re.match(r"['’]s\b", text[match.end():], re.I):
+            continue
+        word = match.group("day").lower()
+        before = text[max(0, match.start() - 24):match.start()]
+        if not word.endswith("day"):
+            after = text[match.end():match.end() + 6]
+            if not (_ABBR_CONTEXT.search(before) or re.match(r"\s*(?:[,/&-]|and\b|or\b)", after, re.I)):
+                continue
+        found.append((_DAY_INDEX[word], bool(match.group("plural")) or bool(_RECURRING_DAY.search(before)),
+                      bool(_ONE_DAY.search(before))))
+    return found
+
+
+def _clock_times(text):
+    """Every time of day the user wrote: (hour, minute, exact). exact=False means an hour without am/pm."""
+    times = []
+    for match in _TIME.finditer(text):
+        if match.group("noon"):
+            times.append((12, 0, True))
+        elif match.group("midnight"):
+            times.append((0, 0, True))
+        elif match.group("h") is not None:
+            hour, minute = int(match.group("h")), int(match.group("m") or 0)
+            if not 1 <= hour <= 12:
+                continue
+            pm = match.group("ap").lower().startswith("p")
+            times.append(((hour % 12) + (12 if pm else 0), minute, True))
+        elif match.group("h24") is not None:
+            raw_h = match.group("h24")
+            hour, minute = int(raw_h), int(match.group("m24"))
+            # Leading zero ("08:00", "06:30") or hour > 12 is unambiguous 24-hour notation.
+            times.append((hour, minute, hour == 0 or hour > 12 or (len(raw_h) == 2 and raw_h.startswith("0"))))
+        else:
+            hour = int(match.group("bare"))
+            if 1 <= hour <= 23:
+                times.append((hour, 0, hour > 12))
+    unique = []
+    for item in times:
+        if item[:2] not in [seen[:2] for seen in unique]:
+            unique.append(item)
+    return unique
+
+
+def _resolve_hour(hour, text, model_hour=None):
+    """Pick am or pm for an hour written without it. Returns (hour, sure)."""
+    if _PM_WORDS.search(text):
+        return (hour % 12) + 12 if hour != 12 else 12, True
+    if _AM_WORDS.search(text):
+        return hour % 12, True
+    if model_hour is not None and model_hour % 12 == hour % 12:
+        return model_hour, False
+    # Without a clue, follow ordinary habits: 7-11 is morning, 12 is noon, 1-6 is afternoon or evening.
+    return (hour if 7 <= hour <= 12 else (hour % 12) + 12), False
+
+
+def _next_weekday(today, weekday, *, skip_today=False):
+    ahead = (weekday - today.weekday()) % 7
+    if ahead == 0 and skip_today:
+        ahead = 7
+    return today + datetime.timedelta(days=ahead)
+
+
+# An explicitly described event is reference material, even when its name includes a date or clock time.
+_EVENT_REFERENCE = re.compile(
+    rf"\b(?:(?:the|my|your|our|their|his|her)\s+(?:(?:{_DAY_ALT}|today|tomorrow)(?:['’]s)?\s+)?|"
+    rf"(?:{_DAY_ALT}|today|tomorrow)['’]s\s+)"
+    r"(?:\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m\.?)|\d{1,2}:\d{2}|morning|afternoon|evening)\s+"
+    r"(?:meeting|appointment|class|lecture|event|flight|train|session|deadline|webinar|call)\b", re.I)
+_REFERENCE_RANGE = re.compile(r"\b(?:from|between|since|during|about|for)\s+$", re.I)
+
+
+def _timing_text(text):
+    return _EVENT_REFERENCE.sub(" ", text or "")
+
+
+def read_timing(text, now):
+    """What the user's own words say about when a task runs. Every key is None when the text doesn't say."""
+    text = _timing_text(text)
+    result = {"kind": None, "days": None, "date": None, "time": None, "unsupported": None, "problem": None, "flags": set(),
+              "ambiguous_hour": None}
+    for pattern, label in _UNSUPPORTED:
+        if pattern.search(text):
+            result["unsupported"] = label
+            return result
+    today = now.date()
+    days = _day_mentions(text)
+    recurring_days = any(recurring for _, recurring, _ in days)
+    # A recurring day list is a contiguous timing expression, not every day name in the instructions.
+    day_range = re.search(rf"\b({_DAY_ALT})s?\s*(?:-|–|to|through|thru)\s*({_DAY_ALT})s?\b", text, re.I)
+    day_list = re.search(rf"\b(?:every|each)\s+(?:single\s+)?({_DAY_ALT}s?(?:\s*(?:,\s*(?:and\s+)?|and\s+|&\s+|/\s*){_DAY_ALT}s?)*)", text, re.I)
+    recurring_list = _day_mentions("every " + day_list.group(1)) if day_list else []
+    if day_range and (_REFERENCE_RANGE.search(text[:day_range.start()])
+                      or (day_list and day_range.start() != day_list.start(1))
+                      or (_DAILY.search(text) and not day_list)):
+        day_range = None
+    if day_range:
+        first, last = (_DAY_INDEX[part.lower()] for part in day_range.groups())
+        range_days = sorted((first + offset) % 7 for offset in range((last - first) % 7 + 1))
+    else:
+        range_days = []
+    cadence_words = [match for match in _CADENCE_ADJ.finditer(text) if not _OWNED_BEFORE.search(text[:match.start()])]
+    if range_days == list(range(5)) or _WEEKDAYS.search(text):
+        result["kind"] = "weekdays"
+    elif range_days:
+        result["kind"], result["days"] = "weekly", range_days
+    elif _WEEKENDS.search(text) and not _THIS_WEEKEND.search(text):
+        result["kind"], result["days"] = "weekly", [5, 6]
+    elif recurring_days or (days and (_EVERY_WEEK.search(text) or any(m.group("word").lower() == "weekly" for m in cadence_words))):
+        result["kind"] = "weekly"
+        result["days"] = sorted({day for day, _, _ in recurring_list} or {day for day, _, one_time in days if not one_time} or {day for day, _, _ in days})
+    elif _DAILY.search(text) or any(m.group("word").lower() == "daily" for m in cadence_words):
+        result["kind"] = "daily"
+    elif _EVERY_WEEK.search(text) or any(m.group("word").lower() == "weekly" for m in cadence_words):
+        result["kind"] = "weekly"   # the day is left for the model, and flagged
+    elif len({day for day, _, _ in days}) >= 2 and not _REFERENCE_RANGE.search(text):
+        # Multiple distinct weekdays ("on Monday and Thursday at 5pm"): treat as weekly and flag kind for review.
+        result["kind"] = "weekly"
+        result["days"] = sorted({day for day, _, _ in days})
+        result["flags"].add("kind")
+    else:
+        date = None
+        offset_time = None
+        iso_match = _ISO_DATE.search(text)
+        month_match = _MONTH_DAY.search(text)
+        in_match = _IN_OFFSET.search(text)
+        if _DAY_AFTER_TOMORROW.search(text):
+            date = today + datetime.timedelta(days=2)
+        elif _TOMORROW.search(text):
+            date = today + datetime.timedelta(days=1)
+        elif in_match:
+            amount = 1 if in_match.group("one") else int(in_match.group("num"))
+            unit = in_match.group("unit").lower()
+            if unit.startswith("min") and 1 <= amount <= 999:
+                target = (now + datetime.timedelta(minutes=amount)).replace(second=0, microsecond=0)
+                date, offset_time = target.date(), target.strftime("%H:%M")
+            elif unit.startswith(("hour", "hr")) and 1 <= amount <= 24 * 365:
+                target = (now + datetime.timedelta(hours=amount)).replace(second=0, microsecond=0)
+                date, offset_time = target.date(), target.strftime("%H:%M")
+            elif unit.startswith("day") and 1 <= amount <= 365:
+                date = today + datetime.timedelta(days=amount)
+            else:
+                result["problem"] = "Choose a positive delay within the supported scheduling range."
+                return result
+        elif iso_match:
+            try:
+                date = datetime.date(*(int(part) for part in iso_match.groups()))
+            except ValueError:
+                result["problem"] = "That calendar date is invalid."
+                return result
+        elif month_match:
+            month = _MONTHS[(month_match.group("month") or month_match.group("month2")).lower()[:3]]
+            day = int(month_match.group("day") or month_match.group("day2"))
+            year = int(month_match.group("year")) if month_match.group("year") else today.year
+            try:
+                date = datetime.date(year, month, day)
+                if date < today and not month_match.group("year"):
+                    date = datetime.date(year + 1, month, day)
+            except ValueError:
+                result["problem"] = "That calendar date is invalid."
+                return result
+        elif _THIS_WEEKEND.search(text):
+            date = _next_weekday(today, 5)
+            if re.search(r"\bnext\s+weekend\b", text, re.I):
+                date += datetime.timedelta(days=7)
+            result["flags"].add("date")
+        elif days:
+            weekday = days[0][0]
+            is_next = bool(re.search(rf"\bnext\s+{_DAY_ALT}\b", text, re.I))
+            date = _next_weekday(today, weekday, skip_today=is_next)
+            if is_next:
+                result["flags"].add("date")   # "next Friday" can mean this Friday or the one after
+        elif _TODAY.search(text):
+            date = today
+        if date is not None:
+            result["kind"], result["date"] = "once", date.isoformat()
+            if offset_time is not None:
+                result["time"] = offset_time
+    for clock in re.finditer(r"\b(?:at|around|by)\s+(\d{1,2})(?::(\d{2}))?(?:\s*([ap]\.?m\.?))?(?![\d:]|[a-z])", text, re.I):
+        hour, minute, meridiem = int(clock.group(1)), int(clock.group(2) or 0), clock.group(3)
+        if minute > 59 or not (1 <= hour <= 12 if meridiem else 0 <= hour <= 23):
+            result["problem"] = "That clock time is invalid."
+            return result
+    times = _clock_times(text)
+    if len(times) > 1:
+        if result["kind"] in ("daily", "weekdays", "weekly"):
+            result["unsupported"] = "several times a day"
+            return result
+        result["flags"].add("time")
+    if times:
+        if result["kind"] == "once" and result["time"] and _IN_OFFSET.search(text):
+            result["problem"] = "Choose either a relative delay or a specific clock time."
+            return result
+        hour, minute, exact = times[0]
+        if exact or hour > 12:
+            result["time"] = f"{hour:02d}:{minute:02d}"
+        else:
+            result["ambiguous_hour"] = (hour, minute)
+    elif not result["time"]:
+        lowered = text.lower()
+        for word, default in _PART_OF_DAY:
+            if re.search(rf"\b{word}\b", lowered):
+                result["time"] = default
+                result["flags"].add("time")
+                break
+    return result
+
+
+def _model_time(value):
+    """Accept the time formats small models produce: "18:00", "6:00", "18:00:00", "6pm", "6:30 PM"."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d:00", value):
+        value = value.rsplit(":", 1)[0]
+    if not re.fullmatch(r"(?:\d{1,2}(?::[0-5]\d)?\s*(?:[ap]\.?m\.?)?|noon|midday|midnight)", value, re.I):
+        return None
+    times = _clock_times(value) or _clock_times("at " + value)
+    if len(times) != 1:
+        return None
+    return times[0][0], times[0][1]
+
+
+def _model_days(value):
+    if not isinstance(value, list):
+        return []
+    days = set()
+    for item in value:
+        if isinstance(item, str) and item.strip().lower() in _DAY_INDEX:
+            days.add(_DAY_INDEX[item.strip().lower()])
+    return sorted(days)
+
+
+def _model_date(value, today):
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    if value == "today":
+        return today
+    if value == "tomorrow":
+        return today + datetime.timedelta(days=1)
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _strip_timing(text):
+    """The user's request without its timing words, for when the model leaves the instructions empty."""
+    stripped = re.sub(rf"\b(?:every|each|on|next|this|at|around|by)\s+(?:{_DAY_ALT}s?|weekdays?|weekends?|"
+                      r"day|week|morning|afternoon|evening|night)\b", " ", text, flags=re.I)
+    stripped = re.sub(rf"(?:,|\b(?:and|or|through|to)\b)\s*\b{_DAY_ALT}s?\b", " ", stripped, flags=re.I)
+    stripped = _TIME.sub(" ", stripped)
+    stripped = re.sub(r"\b(?:daily|weekly|nightly|tomorrow|tonight|today)\b", " ", stripped, flags=re.I)
+    # Drop connecting words left stranded where a time or day was removed ("notes at" / "at , summarize").
+    stripped = re.sub(r"\b(?:at|around|by|on|every|each|and)\b(?=\s*(?:[,.;:!?]|$))", " ", stripped, flags=re.I)
+    stripped = re.sub(r"^\s*(?:at|on|every|each|and|or)\b", " ", stripped, flags=re.I)
+    stripped = re.sub(r"\s+([,.!?])", r"\1", re.sub(r"\s{2,}", " ", stripped)).strip(" ,;:")
+    return stripped[:1].upper() + stripped[1:] if stripped else ""
+
+
+_QUESTION = re.compile(r"^\s*(?:why|what|when|where|who|whom|whose|which|how|is|are|am|do|does|did|was|were|has|have|had|"
+                       r"should|shall|isn't|aren't|don't|doesn't)\b|^\s*(?:please\s+)?(?:explain|describe|define|"
+                       r"tell\s+me\s+(?:why|what|how|when|about|if|whether))\b", re.I)
+
+
+def is_question(text):
+    """True for a question about something ("Why do we have lab every Wednesday?"), not a polite request
+    ("Can you check my notes every Friday?")."""
+    text = (text or "").strip()
+    if not text:
+        return False
+    text = re.sub(r"^\s*(?:please\s+)?(?:can|could|would|will)\s+you\s+|^\s*please\s+", "", text, flags=re.I)
+    return bool(_QUESTION.search(text))
+
+
+def user_request(task, explicit=None):
+    """Keep appended document context out of scheduling and permission inference.
+
+    Older clients and checkpoints only carry the assembled prompt. Their document
+    headers are JSON-quoted filenames followed by an optional excerpt marker.
+    """
+    if explicit is not None:
+        return explicit
+    return re.split(r'\n\nAttached document "(?:[^"\\\n]|\\.)*"(?: \(excerpt\))?\n', task, maxsplit=1)[0]
+
+
+def schedule_hint(text, now):
+    """A short phrase for the timing in a request that reads like "do this later or on a schedule", else None.
+    Used to remind the model to propose a scheduled task instead of starting the work now."""
+    if not isinstance(text, str) or not text.strip() or text.lstrip().startswith("/") or is_question(text):
+        return None
+    # Statements, quoted text, and dates describing an existing item are weak evidence of scheduling.
+    # Allow context-prefixed requests like "I keep my notes here. Summarize them every Monday at 7pm."
+    if re.match(r"^\s*(?:I|we|they|he|she|it)\s+(?!want\b|need\b|would\s+like\b|['’]d\s+like\b)", text, re.I):
+        clauses = [part.strip() for part in re.split(r"[.!?;—–\n]+", text) if part.strip()]
+        has_request_clause = any(
+            not re.match(r"^(?:I|we|they|he|she|it)\s+(?!want\b|need\b|would\s+like\b|['’]d\s+like\b)", clause, re.I)
+            and _IMPERATIVE_ACTION.search(clause)
+            for clause in clauses[1:]
+        )
+        if not has_request_clause:
+            return None
+    if re.match(r"^\s*(?:translate|rewrite|proofread|quote)\b", text, re.I) and not re.match(r"^\s*schedule\b", text, re.I):
+        return None
+    if re.search(r"\b(?:from|between|since|until|during|about|created|written|held|sent|received)\s+(?:on\s+)?"
+                 rf"(?:{_DAY_ALT}|today|tomorrow|\d{{4}}-\d{{2}}-\d{{2}})\b", text, re.I) and not re.search(
+                     r"\b(?:every|each|schedule|remind|nightly|daily|weekly)\b", text, re.I):
+        return None
+    timing = read_timing(text, now)
+    # A lookup for a particular day's material is commonly an immediate request.
+    # Leave these ambiguous cases to the model unless the user supplies a clock time or recurrence.
+    if timing["kind"] == "once" and not timing["time"] and not timing["ambiguous_hour"] and re.search(
+            rf"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:show|list|get|find|display)\b[^.!?\n]*"
+            rf"(?:\bfor\s+|\b(?:calendar|agenda|appointments?|meetings?|events?)\s+)"
+            rf"(?:today|tomorrow|(?:next\s+|this\s+)?{_DAY_ALT})\b", text, re.I):
+        return None
+    if timing["unsupported"]:
+        return timing["unsupported"]
+    if timing["problem"]:
+        return timing["problem"]
+    kind = timing["kind"]
+    if kind is None:
+        # A leading or explicit clock instruction can mean a one-time task.
+        if (timing["time"] or timing["ambiguous_hour"]) and re.search(r"\b(?:schedule|remind|at|around)\b", text, re.I):
+            return "at the requested time"
+        return None
+    if kind == "weekly":
+        phrase = "every " + ", ".join(DAY_NAMES[day] for day in timing["days"]) if timing["days"] else "every week"
+    elif kind == "weekdays":
+        phrase = "on weekdays"
+    elif kind == "daily":
+        phrase = "every day"
+    else:
+        date = datetime.date.fromisoformat(timing["date"])
+        phrase = ("today" if date == now.date() else "tomorrow" if date == now.date() + datetime.timedelta(days=1)
+                  else date.strftime("%a %b ") + str(date.day))
+    if timing["time"]:
+        phrase += " at " + timing["time"]
+    elif timing["ambiguous_hour"]:
+        phrase += " at " + str(timing["ambiguous_hour"][0])
+    return phrase
+
+
+_CANCEL_SCHEDULE = re.compile(
+    r"\b(?:cancel|skip|forget|drop|never\s*mind)\s+(?:the\s+|that\s+)?schedul\w*|"
+    r"\b(?:don'?t|do\s+not)\s+schedule\b|"
+    r"\b(?:just\s+)?(?:do|run)\s+(?:it|this)\s+(?:right\s+)?now(?:\s+instead)?\b",
+    re.I,
+)
+
+
+def cancels_schedule(text):
+    """True when a user explicitly cancels scheduling or asks to run now."""
     if not isinstance(text, str):
         return False
-    text = text.strip()
-    if not text or text.startswith("/") or _ABOUT.search(text):
-        return False
-    if not (_CADENCE.search(text) or _CLOCK.search(text)):
-        return False
-    if _REQUEST.search(text):
-        return True
-    # Accept timing-first imperatives, e.g. "Every Wednesday at 6pm, summarize my notes."
-    return bool(_CADENCE.match(text) and re.search(rf"[,;:]\s*(?:please\s+)?{_ACTION}\b", text, re.I))
+    # Treat direct instructions as cancellation, never questions or quoted examples.
+    direct = re.sub(r"^\s*(?:(?:please|actually|okay|ok|instead)\s*[,.:]?\s*)+", "", text, flags=re.I)
+    direct = re.sub(r"^(?:can|could|would|will)\s+you\s+", "", direct, flags=re.I)
+    return bool(_CANCEL_SCHEDULE.match(direct.lstrip()))
 
 
-def normalize_proposal(raw, now, request=""):
-    """Return a validated draft, without creating a task or trusting model-granted permissions."""
-    if not isinstance(raw, dict) or type(raw.get("is_schedule_request")) is not bool:
-        raise ValueError("Invalid schedule proposal.")
-    if not raw["is_schedule_request"]:
-        return None
-    clarification = raw.get("needs_clarification", [])
-    if not isinstance(clarification, list) or not all(isinstance(field, str) for field in clarification):
-        raise ValueError("Invalid schedule clarification.")
-    clarification = [field for field in CLARIFICATION_FIELDS if field in clarification]
-    schedule = {"kind": raw.get("kind"), "time": raw.get("time")}
-    if schedule["time"] in (None, "") or (request and not _CLOCK.search(request)):
-        schedule["time"] = "09:00"
-        if "time" not in clarification:
-            clarification.append("time")
-    elif _AMBIGUOUS_CLOCK.search(request) and "time" not in clarification:
-        clarification.append("time")
-    if schedule["kind"] == "weekly":
-        days = raw.get("days")
-        if not isinstance(days, list) or not days or not all(isinstance(day, str) and day in DAY_NAMES for day in days):
-            raise ValueError("Choose the days for the weekly task.")
-        schedule["days"] = [DAY_NAMES.index(day) for day in days]
-    elif schedule["kind"] == "once":
-        date = raw.get("date")
-        if date == "tomorrow" or re.search(r"\btomorrow\s+(?:at\b|noon\b|midnight\b|\d)", request, re.I):
-            date = (now.date() + datetime.timedelta(days=1)).isoformat()
-        elif date == "today":
-            date = now.date().isoformat()
-        schedule["date"] = date
-    skill_name = raw.get("skill_name")
-    if skill_name is not None:
-        if not isinstance(skill_name, str) or not skills_module.NAME_RE.fullmatch(skill_name.strip().lstrip("/").lower()):
-            skill_name = None
-        else:
-            skill_name = skill_name.strip().lstrip("/").lower()
+def runs_now(text):
+    """Cancellation alone never authorizes immediate execution."""
+    return isinstance(text, str) and bool(re.search(
+        r"\b(?:just\s+)?(?:do|run)\s+(?:it|this)\s+(?:right\s+)?now\b", text, re.I
+    )) and not re.search(r"\b(?:don'?t|do\s+not|never)\s+(?:just\s+)?(?:do|run)\s+(?:it|this)\s+(?:right\s+)?now\b", text, re.I)
+
+
+def describe_schedule(schedule):
+    """Plain words for a schedule, e.g. "every Wed at 6:00 PM"."""
+    hour, minute = parse_clock(schedule["time"])
+    at = datetime.time(hour, minute).strftime("%I:%M %p").lstrip("0")
+    if schedule["kind"] == "once":
+        return datetime.date.fromisoformat(schedule["date"]).strftime("once on %a %b ") + \
+            str(datetime.date.fromisoformat(schedule["date"]).day) + f" at {at}"
+    if schedule["kind"] == "daily":
+        return f"every day at {at}"
+    if schedule["kind"] == "weekdays":
+        return f"on weekdays at {at}"
+    return "every " + ", ".join(DAY_NAMES[day] for day in schedule.get("days") or []) + f" at {at}"
+
+
+SUPPORTED_SCHEDULES = "once, every day, weekdays, or weekly on chosen days, at one time of day"
+
+
+def resolve_timing(request, now, steering=()):
+    """Resolve timing across the original request and any later steering updates (newer updates override earlier ones)."""
+    base = read_timing(request, now)
+    base["time_context"] = _timing_text(request)
+    for note in steering or ():
+        if not isinstance(note, str) or not note.strip():
+            continue
+        patch = read_timing(note, now)
+        if patch["unsupported"]:
+            base["unsupported"] = patch["unsupported"]
+            base["problem"] = None
+            continue
+        if patch["problem"]:
+            base["problem"] = patch["problem"]
+            continue
+        has_cadence = bool(patch["kind"] or patch["days"] or patch["date"])
+        has_time = bool(patch["time"] or patch["ambiguous_hour"])
+        if not has_cadence and not has_time:
+            continue
+        # A valid steered update supersedes an earlier unsupported/problematic timing.
+        if has_cadence:
+            base["unsupported"] = None
+        if has_cadence or (has_time and base["kind"] and not base["unsupported"]):
+            base["problem"] = None
+        if has_cadence:
+            # Steering a weekly schedule with a bare day name ("change it to Friday instead") keeps it weekly.
+            patch_days = _day_mentions(_timing_text(note))
+            if (base["kind"] == "weekly" and patch["kind"] == "once" and patch_days
+                    and not _EXPLICIT_ONCE.search(note) and not _MONTH_DAY.search(note) and not _IN_OFFSET.search(note)):
+                base["days"] = sorted({day for day, _, _ in patch_days})
+                base["date"] = None
+                base["flags"].difference_update({"kind", "days", "date"})
+            else:
+                base["kind"] = patch["kind"]
+                base["days"] = patch["days"]
+                base["date"] = patch["date"]
+                base["flags"].difference_update({"kind", "days", "date"})
+                base["flags"].update(patch["flags"] & {"kind", "days", "date"})
+        if has_time:
+            base["time"] = patch["time"]
+            base["ambiguous_hour"] = patch["ambiguous_hour"]
+            base["time_context"] = _timing_text(note)
+            base["flags"].discard("time")
+            if "time" in patch["flags"]:
+                base["flags"].add("time")
+    return base
+
+
+def resolve_permissions(request, steering=()):
+    """Resolve create-files and web permissions chronologically so steering can turn either on or off."""
+    create = False
+    web = False
+    for text in [request, *(steering or ())]:
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if _NO_CREATE.search(text):
+            create = False
+        elif _CREATE_FILE.search(text):
+            create = True
+        if _NO_WEB.search(text):
+            web = False
+        elif _WEB.search(text):
+            web = True
+    return ("create" if create else "read"), web
+
+
+def proposal_from_tool(args, now, request="", steering=()):
+    """Turn schedule_task arguments into a validated draft task for the confirmation card. Nothing is saved here.
+
+    Returns {"task", "nextRun", "needsClarification", "problem"} or {"unsupported": reason}. Raises ValueError when
+    the arguments can't describe a task at all."""
+    if not isinstance(args, dict):
+        raise ValueError("schedule_task needs its arguments as an object.")
+    request = request if isinstance(request, str) else ""
+    steering_list = [str(item) for item in (steering or ()) if isinstance(item, str) and item.strip()]
+    timing = resolve_timing(request, now, steering_list)
+    if timing["unsupported"]:
+        return {"unsupported": timing["unsupported"]}
+    if timing["problem"]:
+        return {"problem": timing["problem"]}
+    flags = set(timing["flags"])
+    today = now.date()
+    kind = timing["kind"]
+    if kind is None and (timing["time"] or timing["ambiguous_hour"]):
+        kind = "once"
+    if kind is None:
+        kind = args.get("repeat") if args.get("repeat") in KINDS else None
+    if kind is None:
+        raise ValueError(f"Say how often it runs: {SUPPORTED_SCHEDULES}.")
+    if timing["kind"] is None:
+        flags.add("kind")
+    schedule = {"kind": kind}
+    if kind == "weekly":
+        days = timing["days"] or _model_days(args.get("days"))
+        if not timing["days"]:
+            flags.add("days")
+        schedule["days"] = days or [today.weekday()]
+    if kind == "once":
+        date = (datetime.date.fromisoformat(timing["date"]) if timing["date"] else None) or _model_date(args.get("date"), today)
+        if not timing["date"]:
+            flags.add("date")
+        schedule["date"] = (date or today).isoformat()
+    model_time = _model_time(args.get("time"))
+    if timing["time"]:
+        schedule["time"] = timing["time"]
+    elif timing["ambiguous_hour"]:
+        hour, minute = timing["ambiguous_hour"]
+        time_ctx = timing.get("time_context") or _timing_text(request)
+        hour, sure = _resolve_hour(hour, time_ctx, model_time[0] if model_time else None)
+        if not sure and steering_list:
+            # Fall back to original request's morning/evening cue if steering only changed the hour.
+            hour2, sure2 = _resolve_hour(timing["ambiguous_hour"][0], _timing_text(request), model_time[0] if model_time else None)
+            if sure2:
+                hour, sure = hour2, True
+        schedule["time"] = f"{hour:02d}:{minute:02d}"
+        if not sure:
+            flags.add("time")
+    elif model_time and not request and not steering_list:
+        schedule["time"] = f"{model_time[0]:02d}:{model_time[1]:02d}"
+    else:
+        # The user didn't say a time in this message: a time from the model is a guess (or from earlier in the chat).
+        schedule["time"] = f"{model_time[0]:02d}:{model_time[1]:02d}" if model_time else "09:00"
+        flags.add("time")
+    prompt = args.get("prompt") if isinstance(args.get("prompt"), str) and args.get("prompt").strip() else _strip_timing(request)
+    access, web = resolve_permissions(request, steering_list)
     task = clean_task({
-        "title": raw.get("title"), "prompt": raw.get("prompt"), "schedule": schedule,
-        "access": "create" if raw.get("access") == "create" and _CREATE_FILE.search(request) and not _NO_CREATE.search(request) else "read",
-        "web": raw.get("web") is True and bool(_WEB.search(request)) and not _NO_WEB.search(request),
+        "title": args.get("title") if isinstance(args.get("title"), str) else "",
+        "prompt": prompt or request,
+        "schedule": schedule,
+        # The user's own words (with later steering overriding earlier) decide new files and web search.
+        "access": access,
+        "web": web,
         "enabled": True,
     })
+    task.pop("id", None)
+    task.pop("created", None)
+    problem = None
     upcoming = next_run(task["schedule"], now)
-    if upcoming is None:
-        raise ValueError("That time has already passed. Choose a future time.")
-    task.pop("id")
-    task.pop("created")
-    return {"task": task, "nextRun": iso(upcoming), "needsClarification": clarification, "skillName": skill_name}
+    if upcoming is None and kind == "once":
+        if not timing["date"] and "date" in flags:
+            # "at 9am" said after 9am: the next 9am is tomorrow.
+            task["schedule"]["date"] = (today + datetime.timedelta(days=1)).isoformat()
+            upcoming = next_run(task["schedule"], now)
+        elif task["schedule"]["date"] < today.isoformat():
+            problem = "That date has already passed."
+        else:
+            problem = "That time has already passed today."
+    if upcoming and upcoming.date() > today + datetime.timedelta(days=366):
+        problem, upcoming = "That date is more than a year away.", None
+    order = ("kind", "days", "date", "time")
+    return {"task": task, "nextRun": iso(upcoming), "problem": problem,
+            "needsClarification": [field for field in order if field in flags]}
+
+
+_FILE_NOUN = r"(?:files?|documents?|spreadsheets?|pdfs?|csvs?|workbooks?)"
+_FILE_EXT = r"[\w./-]+\.(?:md|txt|html?|docx|pptx|pdf|csv|json)\b"
+_FILE_MODIFIERS = r"(?:(?:a|an|the|new|another|separate|dated|daily|weekly|summary|text|markdown|word|pdf|csv|excel|output)\s+)*"
+_CREATE_FILE = re.compile(
+    rf"\b(?:write|save|create|generate|export|make|produce|draft)\s+{_FILE_MODIFIERS}(?:{_FILE_NOUN}|{_FILE_EXT})|"
+    rf"\b(?:write|save|create|generate|export|produce)\b(?:[^.!?\n]|\.(?=\w)){{0,100}}\b(?:to|as|into)\s+{_FILE_MODIFIERS}(?:{_FILE_NOUN}|{_FILE_EXT})|"
+    r"\b(?:save|export|write)\b(?:[^.!?\n]|\.(?=\w)){0,100}\b(?:in|to|into)\s+(?:(?:a|the|my|this)\s+)?folder\b", re.I)
+_WEB = re.compile(r"\b(?:search|browse|check|look up|research|fetch|read|monitor|visit|use)\b(?:[^.!?\n]|\.(?=\w)){0,80}"
+                  r"(?:\b(?:the web|the internet|online|websites?|web pages?)\b|https?://)", re.I)
+_NO_CREATE = re.compile(r"\b(?:read[- ]only|(?:do not|don't|never|without)\s+"
+                        r"(?:(?:[^.!?\n]|\.(?=\w)){0,100}\b(?:or|and)\s+)?(?:write|save|create|generate|modify|edit|change))\b", re.I)
+_NO_WEB = re.compile(r"\b(?:offline|no (?:web|internet)|(?:do not|don't|never|without)\s+"
+                     r"(?:(?:[^.!?\n]|\.(?=\w)){0,100}\b(?:or|and)\s+)?(?:browse|search|use)\s+(?:the )?(?:web|internet))\b", re.I)
 
 
 def iso(moment):
@@ -153,6 +660,59 @@ def parse_iso(text):
         return datetime.datetime.fromisoformat(text) if text else None
     except (TypeError, ValueError):
         return None
+
+
+def format_clock_human(hhmm):
+    """Turn '18:30' into '6:30 PM' without platform-specific strftime flags."""
+    hour, minute = parse_clock(hhmm)
+    ampm = "AM" if hour < 12 else "PM"
+    hour12 = hour % 12 or 12
+    return f"{hour12}:{minute:02d} {ampm}"
+
+
+def describe_schedule_human(schedule):
+    """Plain-English schedule phrase for conversational chat replies."""
+    if not isinstance(schedule, dict) or not schedule.get("time"):
+        return ""
+    at = format_clock_human(schedule["time"])
+    kind = schedule.get("kind")
+    if kind == "daily":
+        return f"every day at {at}"
+    if kind == "weekdays":
+        return f"on weekdays at {at}"
+    if kind == "weekly":
+        days = [FULL_DAY_NAMES[day] for day in (schedule.get("days") or []) if isinstance(day, int) and 0 <= day <= 6]
+        if not days:
+            return f"every week at {at}"
+        if len(days) == 1:
+            day_phrase = days[0]
+        elif len(days) == 2:
+            day_phrase = f"{days[0]} and {days[1]}"
+        else:
+            day_phrase = ", ".join(days[:-1]) + f", and {days[-1]}"
+        return f"every {day_phrase} at {at}"
+    if kind == "once":
+        try:
+            date = datetime.date.fromisoformat(schedule.get("date") or "")
+        except ValueError:
+            return f"once at {at}"
+        return f"once on {date.strftime('%a, %b')} {date.day} at {at}"
+    return at
+
+
+def format_moment_human(iso_text, now=None):
+    """Turn an ISO local timestamp into 'today at 6:30 PM', 'tomorrow at 9:00 AM', or 'Wed, Dec 2 at 6:30 PM'."""
+    moment = parse_iso(iso_text)
+    if moment is None:
+        return ""
+    ref = now or datetime.datetime.now()
+    at = format_clock_human(f"{moment.hour:02d}:{moment.minute:02d}")
+    if moment.date() == ref.date():
+        return f"today at {at}"
+    if moment.date() == ref.date() + datetime.timedelta(days=1):
+        return f"tomorrow at {at}"
+    year_part = f", {moment.year}" if moment.year != ref.year else ""
+    return f"{moment.strftime('%a, %b')} {moment.day}{year_part} at {at}"
 
 
 def parse_clock(text):

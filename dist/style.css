@@ -410,7 +410,7 @@ input[type="text"]:focus, input[type="time"]:focus, input[type="date"]:focus, in
 }
 .select-wrap { position: relative; display: flex; align-items: center; width: 100%; }
 .select-wrap select {
-  appearance: none; -webkit-appearance: none; min-height: 41px; padding: 9px 38px 9px 13px;
+  appearance: none; -webkit-appearance: none; -moz-appearance: none; min-height: 41px; padding: 9px 38px 9px 13px;
   border-radius: 12px; font-size: .92rem; font-weight: 530; letter-spacing: -.01em; cursor: pointer;
   background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface-2) 45%, var(--surface)));
   text-overflow: ellipsis;
@@ -2625,3 +2625,100 @@ html.theme-swap { view-transition-name: root; }
 .inbox-summary h1, .inbox-summary h2, .inbox-summary h3, .inbox-summary h4 { font-size: .95rem; margin: .5em 0 .25em; letter-spacing: 0; }
 .schedule-skill-note { font-size: .78rem; color: var(--muted); }
 .inbox-checks { margin-top: 2px; }
+
+/* ---------- Schedule confirmation card (schedule_task in a Work run) ---------- */
+.schedule-proposal[data-decision="pending"] {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--rule));
+  box-shadow: inset 0 1px 0 var(--specular), 0 10px 26px color-mix(in srgb, var(--accent) 9%, rgb(0 0 0 / .1)), var(--shadow-sm);
+  border-radius: 16px;
+}
+.schedule-proposal header { background: var(--accent-soft); color: var(--accent-text); }
+.schedule-proposal[data-decision="approved"] {
+  border-radius: 13px; width: 100%;
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--rule));
+}
+.schedule-proposal[data-decision="approved"] header { background: var(--accent-soft); color: var(--accent-text); }
+.schedule-proposal-perm {
+  margin-left: auto; flex: none; padding: 2px 9px; border-radius: 999px;
+  font-size: .74rem; font-weight: 600; background: var(--surface); color: var(--ink-2);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--rule));
+}
+.schedule-proposal-hero {
+  display: grid; gap: 5px; padding: 13px 14px 10px; background: var(--surface);
+}
+.schedule-proposal-title {
+  font-size: .98rem; font-weight: 650; color: var(--ink); letter-spacing: -.01em; overflow-wrap: anywhere;
+}
+.schedule-proposal-when {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  font-size: .88rem; font-weight: 560; color: var(--accent-text);
+}
+.schedule-proposal-when .icon { width: 14px; height: 14px; flex: none; }
+.schedule-proposal-when.guessed { color: var(--warn); }
+.schedule-guessed-pill {
+  display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px;
+  background: var(--warn-soft); color: var(--warn); font-size: .72rem; font-weight: 620;
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+}
+.schedule-proposal-meta {
+  display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 10px; background: var(--surface);
+}
+.schedule-proposal-chip {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%;
+  padding: 5px 10px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--rule);
+  font-size: .8rem; color: var(--ink-2);
+}
+.schedule-proposal-chip .icon { width: 13px; height: 13px; flex: none; color: var(--muted); }
+.schedule-proposal-chip .chip-label { color: var(--muted); }
+.schedule-proposal-chip strong { font-weight: 580; color: var(--ink); overflow-wrap: anywhere; }
+.schedule-proposal-prompt { display: grid; gap: 5px; padding: 2px 14px 13px; background: var(--surface); }
+.schedule-proposal-prompt span { font-size: .76rem; font-weight: 560; color: var(--muted); }
+.schedule-proposal-prompt p {
+  margin: 0; padding: 9px 12px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--rule);
+  font-size: .86rem; color: var(--ink); line-height: 1.48; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9em; overflow-y: auto;
+}
+.schedule-proposal-note {
+  display: flex; align-items: flex-start; gap: 7px; margin: 0 14px 12px; padding: 8px 11px;
+  border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: .82rem; line-height: 1.4;
+  border: 1px solid color-mix(in srgb, var(--warn) 26%, transparent);
+}
+.schedule-proposal-note .icon { width: 15px; height: 15px; flex: none; margin-top: 1px; }
+.schedule-proposal-status-note {
+  margin: 0; padding: 8px 13px; background: var(--surface); color: var(--ink-2); font-size: .84rem;
+}
+
+/* ---------- Persistent in-chat Scheduled Receipt Card ---------- */
+.schedule-receipt-slot { margin: 8px 0 4px; }
+.schedule-receipt {
+  display: grid; gap: 10px; padding: 13px 15px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--rule));
+  border-radius: 16px; background: var(--glass);
+  box-shadow: inset 0 1px 0 var(--specular), var(--shadow-sm);
+  animation: message-in .26s var(--ease-out);
+}
+.schedule-receipt[data-state="unknown"] {
+  border-color: color-mix(in srgb, var(--warn) 36%, var(--rule));
+}
+.schedule-receipt-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 7px;
+  padding-bottom: 9px; border-bottom: 1px solid var(--rule);
+  font-size: .84rem; font-weight: 630; color: var(--accent-text);
+}
+.schedule-receipt-head[data-state="unknown"] { color: var(--warn); }
+.schedule-receipt-head .icon { width: 15px; height: 15px; flex: none; }
+.schedule-receipt-perm {
+  margin-left: auto; padding: 2px 9px; border-radius: 999px;
+  font-size: .73rem; font-weight: 560; background: var(--surface-2); color: var(--ink-2);
+  border: 1px solid var(--rule);
+}
+.schedule-receipt-body {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 14px;
+}
+.schedule-receipt-main { display: grid; gap: 3px; min-width: 0; flex: 1 1 220px; }
+.schedule-receipt-title { font-size: .95rem; font-weight: 640; color: var(--ink); overflow-wrap: anywhere; }
+.schedule-receipt-when { font-size: .85rem; font-weight: 540; color: var(--ink-2); }
+.schedule-receipt-meta { font-size: .79rem; color: var(--muted); }
+.schedule-receipt-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; flex: none; }
+.chat-schedule-slot { margin: 10px 0 2px; }
+.chat-schedule-folder .chat-schedule-pick { margin-left: 4px; min-height: 24px; padding: 1px 8px; }
+.chat-schedule-folder.missing strong { color: var(--warn); }
