@@ -4041,6 +4041,7 @@ async function runLocalCommand({ name, input }) {
     if (nativeShell) notifyShell({ type: "toggle-pet" });
     else announce("Sprig is available in the native Pipkin app.");
   } else if (name === "skills") openSkills();
+  else if (name === "schedule") window.PipkinSchedule?.open();
   else if (name === "save-skill") {
     const latest = [...history].reverse().find((message) => message.agentRun?.state === "complete");
     openSkillEditor({
@@ -4379,10 +4380,14 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
       for (let attempt = 0; response.status === 409 && attempt < 8; attempt += 1) {
         const problem = await response.clone().json().catch(() => ({}));
         if (problem.code !== "busy") break;
-        announce("Waiting for the model to finish the previous step…");
+        const scheduled = window.PipkinSchedule?.runningTitle();
+        announce(scheduled ? `Waiting for the scheduled task “${scheduled}” to finish…` : "Waiting for the model to finish the previous step…");
         await new Promise((resolve) => setTimeout(resolve, 1500));
         if (streamAbort.signal.aborted) throw new DOMException("Aborted", "AbortError");
         response = await sendRun();
+      }
+      if (response.status === 409 && window.PipkinSchedule?.runningTitle()) {
+        throw new Error(`The scheduled task “${window.PipkinSchedule.runningTitle()}” is using the model. Stop it in Scheduled, or send this again when it finishes.`);
       }
       if (response.status === 403) {
         const problem = await response.json().catch(() => ({}));
@@ -5630,7 +5635,7 @@ byId("setting-busy-send").addEventListener("change", (event) => {
   saveSettings({ busySend: event.target.value === "queue" ? "queue" : "steer" });
   updateControls();
 });
-for (const key of document.querySelectorAll(".alt-key")) key.textContent = altKeyLabel();
+for (const hint of document.querySelectorAll(".alt-combo")) hint.textContent = PipkinPlatform.isMac ? "Option+Return" : "Alt+Enter";
 byId("setting-steps").addEventListener("change", (event) => saveSettings({ maxSteps: Number(event.target.value) }));
 byId("permission-choice").addEventListener("change", (event) => {
   saveSettings({ permission: event.target.value });
@@ -6728,3 +6733,26 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("pageshow", watchSession);
 narrow.addEventListener("change", () => showHistory(false));
 watchSession();
+window.PipkinSchedule?.init({
+  getWorkspace: () => agentWorkspace,
+  chooseWorkspace: async () => {
+    try {
+      const response = await fetch("/api/agent/workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ remember: false }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not open the folder picker.");
+      return result.cancelled ? null : { key: result.workspace, name: result.name, path: result.path };
+    } catch (error) {
+      toast(error.message || "Could not open the folder picker.");
+      return null;
+    }
+  },
+  getSkills: () => [
+    ...Skills.mergeCustomAndWorkspace(customSkills, workspaceSkills),
+    ...Skills.starters.filter(({ name }) => !["humanize", "humanize-paper"].includes(name)),
+  ],
+  notifyShell,
+});

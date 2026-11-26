@@ -41,7 +41,7 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 RESERVED_NAMES = frozenset({
     # Built-in commands
-    "compact", "goal", "model", "init", "pin", "delete-chat", "pet", "skills", "save-skill",
+    "compact", "goal", "model", "init", "pin", "delete-chat", "pet", "skills", "save-skill", "schedule",
     # Built-in starter recipes
     "summarize", "extract-actions", "plan", "review-changes", "draft-email",
     "site", "study-guide", "checklist", "word", "powerpoint", "pdf",
@@ -49,7 +49,7 @@ RESERVED_NAMES = frozenset({
 })
 
 ALLOWED_ICONS = frozenset({
-    "sparkle", "book", "list", "file", "note", "globe", "bot", "pin", "folder", "shield",
+    "sparkle", "book", "list", "file", "note", "globe", "bot", "pin", "folder", "shield", "clock",
 })
 
 ALLOWED_OUTPUTS = frozenset({

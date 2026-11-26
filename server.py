@@ -35,6 +35,7 @@ from zipfile import BadZipFile, ZipFile
 import agent as agent_module
 import artifacts
 import platform_os
+import scheduler as scheduler_module
 import skills as skills_module
 import updater
 from agent import (
@@ -46,7 +47,7 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.2.0"
 RELEASE_REPO = "garywu000/pipkin"
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
 RELEASE_URL_PREFIX = f"https://github.com/{RELEASE_REPO}/releases/"
@@ -436,6 +437,7 @@ STATIC_FILES = {
     "/ui.js": ("ui.js", "text/javascript; charset=utf-8"),
     "/skills.js": ("skills.js", "text/javascript; charset=utf-8"),
     "/agent-view.js": ("agent-view.js", "text/javascript; charset=utf-8"),
+    "/schedule.js": ("schedule.js", "text/javascript; charset=utf-8"),
     "/chat.js": ("chat.js", "text/javascript; charset=utf-8"),
     "/onboarding.js": ("onboarding.js", "text/javascript; charset=utf-8"),
     "/panels.js": ("panels.js", "text/javascript; charset=utf-8"),
@@ -965,6 +967,167 @@ def system_telemetry():
 def undo_store(port):
     """Undo history for this server's port, kept next to the settings file and capped in size."""
     return UndoStore(SETTINGS_FILE.parent / "undo" / str(port))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Scheduled tasks
+# ---------------------------------------------------------------------------------------------------------------
+SCHEDULED_MAX_STEPS = 16
+SCHEDULED_TIME_LIMIT = 15 * 60
+SCHEDULED_READ_TIMEOUT = 6 * 60   # longer than the five-minute limit on one model step
+SCHEDULER = None
+SCHEDULED_NOTE = (
+    "This task runs on a schedule while the user is away. Nobody can answer questions or approve actions, so do not "
+    "ask for anything: work with the tools you have, then finish with a short summary for the user's inbox. Say what "
+    "you found or made, and anything they should check. "
+)
+SCHEDULED_ACCESS_NOTE = {
+    "read": "You can only read files. Put everything the user needs in your final summary.",
+    "create": "You can create new files but not change existing ones. Give each new file a new name, for example with "
+              "today's date, and list the files you made in your summary.",
+}
+
+
+def schedule_store():
+    return scheduler_module.Store(SETTINGS_FILE.parent)
+
+
+def schedule_state():
+    data = schedule_store().load()
+    for task in data["tasks"]:
+        task["folderName"] = Path(task.get("folder") or "").name
+    for item in data["inbox"]:
+        item["folderName"] = Path(item.get("folder") or "").name
+    state = SCHEDULER.state() if SCHEDULER else {"running": None, "queued": [], "active": False}
+    return {"paused": data["paused"], "tasks": data["tasks"], "inbox": data["inbox"],
+            "unread": sum(1 for item in data["inbox"] if not item.get("read")), **state}
+
+
+def run_scheduled_task(task, stop_event, port):
+    """Run one scheduled task through this server's own Work endpoint, exactly as the page would, but unattended.
+
+    Returns {"status", "summary", "outputs"} for the inbox, or {"status": "busy"} when the model is in use."""
+    try:
+        workspace = Workspace(task["folder"])
+    except (KeyError, OSError, TypeError, ValueError):
+        return {"status": "error", "summary": "The folder for this task is missing or can't be opened. Edit the task "
+                                              "and choose its folder again.", "outputs": []}
+    key = grant_workspace(workspace)
+    access = task.get("access") if task.get("access") in scheduler_module.ACCESS else "read"
+    skill = task.get("skill") if isinstance(task.get("skill"), dict) else None
+    skill_checks = skills_module.normalize_checks(skill.get("checks")) if skill else []
+    task_text = task.get("prompt") or ""
+    if skill and skill.get("name") and skill.get("instructions"):
+        parts = [f"Run the /{skill['name']} skill.", skill["instructions"]]
+        if skill_checks:
+            parts.append("Verification checks for this skill:\n" + "\n".join("- " + c["label"] for c in skill_checks))
+        if task_text:
+            parts.append("Input for this run\n" + task_text)
+        task_text = "\n\n".join(parts)
+    payload = {
+        "task": task_text, "workspace": key, "mode": access, "web": bool(task.get("web")), "think": False,
+        "allowMemory": False, "maxSteps": SCHEDULED_MAX_STEPS, "memories": [], "history": [], "browser": False,
+        "allowTerminal": False, "allowShell": False, "protectMemory": True,
+        "instructions": SCHEDULED_NOTE + SCHEDULED_ACCESS_NOTE[access],
+    }
+    if skill and skill_checks:
+        payload["skillChecks"] = skill_checks
+        payload["skillName"] = skill["name"]
+    outputs, notices = {}, []
+    skill_checks_result = None
+    answer = stop_text = error_text = None
+    reason = None
+    finished = Event()
+    connection = http.client.HTTPConnection(HOST, port, timeout=SCHEDULED_READ_TIMEOUT)
+
+    def watch():
+        deadline = time.monotonic() + SCHEDULED_TIME_LIMIT
+        nonlocal reason
+        while not finished.wait(0.5):
+            if stop_event.is_set() or time.monotonic() >= deadline:
+                reason = "Stopped by you." if stop_event.is_set() else \
+                    f"Stopped after the {SCHEDULED_TIME_LIMIT // 60}-minute limit for background tasks."
+                try:
+                    connection.sock.shutdown(SHUT_RDWR)
+                except (AttributeError, OSError):
+                    pass
+                return
+
+    try:
+        connection.request("POST", "/api/agent/run", body=json.dumps(payload).encode(), headers={
+            "Content-Type": "application/json", "Origin": f"http://{HOST}:{port}"})
+        Thread(target=watch, daemon=True).start()
+        response = connection.getresponse()
+        if response.status != 200:
+            problem = json.loads(response.read() or b"{}")
+            if response.status == 409 and problem.get("code") == "busy":
+                return {"status": "busy"}
+            return {"status": "error", "summary": problem.get("error") or "The task could not start.", "outputs": []}
+        while True:
+            line = response.readline()
+            if not line:
+                break
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            kind = event.get("event")
+            if kind == "output" and event.get("path"):
+                outputs[event["path"].casefold()] = {key_name: event[key_name] for key_name in ("path", "action", "undo")
+                                                     if event.get(key_name)}
+            elif kind == "result":
+                answer = event.get("text") or ""
+            elif kind == "stopped":
+                stop_text = event.get("text") or "Work stopped before finishing."
+                for record in event.get("outputs") or []:
+                    if isinstance(record, dict) and record.get("path"):
+                        outputs.setdefault(record["path"].casefold(), {key_name: record[key_name] for key_name in
+                                                                       ("path", "action", "undo") if record.get(key_name)})
+            elif kind == "error":
+                error_text = event.get("text") or "The task failed."
+            elif kind == "notice" and event.get("text"):
+                notices.append(event["text"])
+            elif kind == "skill_checks" and isinstance(event.get("results"), list) and not event.get("retrying"):
+                skill_checks_result = {
+                    "skill": event.get("skill"),
+                    "passed": bool(event.get("passed")),
+                    "results": event["results"],
+                }
+            elif kind == "approval":
+                # Unattended runs never get an answer, so end the run rather than leave it waiting.
+                reason = "Stopped because the task asked for an approval, which background tasks can't give."
+                break
+    except (OSError, ValueError, http.client.HTTPException):
+        if reason is None and answer is None:
+            error_text = error_text or "Pipkin lost the connection to this task."
+    finally:
+        finished.set()
+        connection.close()
+        with WORKSPACE_LOCK:
+            WORKSPACES.pop(key, None)
+    files = list(outputs.values())
+    extra = {"undoPort": port}
+    if skill_checks_result:
+        extra["skillChecks"] = skill_checks_result
+    if answer is not None and reason is None:
+        return {"status": "complete", "summary": answer or (notices[-1] if notices else ""), "outputs": files, **extra}
+    if error_text and reason is None:
+        return {"status": "error", "summary": error_text, "outputs": files, **extra}
+    text = reason or (stop_text or (notices[-1] if notices else "Work stopped before finishing.")).replace(" Resume Work to continue.", "") \
+        .replace(" Resume Work to continue from the saved checkpoint.", "")
+    return {"status": "stopped", "summary": text, "outputs": files, **extra}
+
+
+def start_scheduler(port):
+    global SCHEDULER
+    folder = SETTINGS_FILE.parent
+    SCHEDULER = scheduler_module.Scheduler(
+        schedule_store(), lambda task, stop_event: run_scheduled_task(task, stop_event, port),
+        pressure=memory_pressure, busy=GENERATION.locked,
+        lock=scheduler_module.ProcessLock(folder / "scheduler.lock"))
+    SCHEDULER.start()
+    return SCHEDULER
+
 
 
 def log_unexpected(where, error):
@@ -1586,6 +1749,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(200, UPDATER.status())
         elif self.path in ("/api/update", "/api/update?force=1"):
             self.send_json(200, check_latest_release(force=self.path.endswith("force=1")))
+        elif self.path == "/api/schedules":
+            self.send_json(200, schedule_state())
         elif self.path == "/api/usage":
             try:
                 usage = token_usage()
@@ -1668,6 +1833,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/agent/undo":
             self.undo_file()
+            return
+        if self.path.startswith("/api/schedules/"):
+            self.schedule_action(self.path.removeprefix("/api/schedules/"))
             return
         if self.path == "/api/agent/undo-run":
             self.undo_run()
@@ -1752,7 +1920,14 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
 
         if not GENERATION.acquire(blocking=False):
-            self.send_json(409, {"error": "The model is already replying in another tab."})
+            running = (SCHEDULER.state().get("running") if SCHEDULER else None)
+            if running:
+                self.send_json(409, {
+                    "error": f"The scheduled task “{running.get('title', 'Scheduled task')}” is using the model. Stop it in Scheduled, or send this again when it finishes.",
+                    "code": "busy",
+                })
+            else:
+                self.send_json(409, {"error": "The model is already replying in another tab.", "code": "busy"})
             return
         try:
             SESSIONS.ensure_loaded()
@@ -1774,6 +1949,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ValueError()
             payload = json.loads(self.rfile.read(length)) if length else {}
             previous = payload.get("previous")
+            remember = payload.get("remember", True)
+            if not isinstance(remember, bool):
+                raise ValueError()
             if previous is not None and not valid_workspace_key(previous):
                 raise ValueError()
         except (AttributeError, OSError, ValueError):
@@ -1806,8 +1984,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             if not Path(folder).is_absolute():
                 raise ValueError("The folder picker returned an invalid folder.")
             workspace = Workspace(folder)
-            key = grant_workspace(workspace, previous)
-            update_settings_file(workspace=str(workspace.path))
+            key = grant_workspace(workspace, previous if remember else None)
+            if remember:
+                update_settings_file(workspace=str(workspace.path))
             self.send_json(200, {"workspace": key, "name": workspace.path.name or "Selected folder", "path": str(workspace.path)})
         except ValueError as error:
             self.send_json(400, {"error": str(error)})
@@ -2111,6 +2290,10 @@ class ChatHandler(BaseHTTPRequestHandler):
         if workspace is None or str(workspace.path) != root:
             self.send_json(403, {"error": "Select this file’s workspace to open it."})
             return
+        ChatHandler.open_in_workspace(self, workspace, path)
+
+    def open_in_workspace(self, workspace, path):
+        """Open a file inside the workspace in a fixed viewer, or reveal anything else in the file manager."""
         try:
             requested = Path(path)
             if requested.is_absolute():
@@ -2190,6 +2373,153 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": str(error)})
         except OSError:
             self.send_json(503, {"error": "Pipkin could not change that file. Check that it is not open elsewhere."})
+
+    def schedule_action(self, action):
+        """Create, change, run, and review scheduled tasks and their inbox."""
+        try:
+            payload = self.read_json(40_000)
+            if not isinstance(payload, dict):
+                raise ValueError()
+        except (OSError, TypeError, ValueError):
+            self.send_json(400, {"error": "Invalid request."})
+            return
+        store = schedule_store()
+        item_id = payload.get("id")
+        if item_id is not None and (not isinstance(item_id, str) or len(item_id) > 64):
+            self.send_json(400, {"error": "Invalid request."})
+            return
+        try:
+            if action == "save":
+                key = payload.get("workspace")
+                folder = None
+                if key is not None:
+                    workspace = authorized_workspace(key) if valid_workspace_key(key) else None
+                    if workspace is None:
+                        self.send_json(403, {"error": "Choose the task's folder again.", "code": "workspace_required"})
+                        return
+                    folder = str(workspace.path)
+
+                def save(data):
+                    existing = scheduler_module.find(data["tasks"], item_id) if item_id else None
+                    if item_id and existing is None:
+                        raise LookupError()
+                    if existing is None and len(data["tasks"]) >= scheduler_module.TASK_LIMIT:
+                        raise ValueError(f"Pipkin keeps up to {scheduler_module.TASK_LIMIT} scheduled tasks.")
+                    task = scheduler_module.clean_task(payload.get("task"), existing)
+                    if folder:
+                        task["folder"] = folder
+                    if not task.get("folder"):
+                        raise ValueError("Choose a folder in Agent mode first. Scheduled tasks work in a folder.")
+                    upcoming = scheduler_module.next_run(task["schedule"], datetime.datetime.now())
+                    if upcoming is None and task["enabled"]:
+                        raise ValueError("That time has already passed. Choose a time in the future.")
+                    task["nextRun"] = scheduler_module.iso(upcoming) if task["enabled"] else None
+                    task["revision"] = (existing or {}).get("revision", 0) + 1
+                    task.pop("missed", None)
+                    task.pop("waitReason", None)
+                    if existing is None:
+                        data["tasks"].append(task)
+                    else:
+                        existing.clear()
+                        existing.update(task)
+                    return task
+                task = store.update(save)
+                if SCHEDULER:
+                    SCHEDULER.poke()
+                self.send_json(200, {"task": task, **schedule_state()})
+                return
+            if action in ("delete", "skip", "enable", "disable"):
+                def change(data):
+                    task = scheduler_module.find(data["tasks"], item_id)
+                    if task is None:
+                        raise LookupError()
+                    if action == "delete":
+                        data["tasks"].remove(task)
+                    elif action == "skip":
+                        task.pop("missed", None)
+                    else:
+                        task["enabled"] = action == "enable"
+                        upcoming = scheduler_module.next_run(task["schedule"], datetime.datetime.now()) if task["enabled"] else None
+                        if task["enabled"] and upcoming is None:
+                            raise ValueError("That one-time task's time has passed. Edit it to choose a new time.")
+                        task["nextRun"] = scheduler_module.iso(upcoming)
+                        task["revision"] = task.get("revision", 0) + 1
+                        task.pop("waitReason", None)
+                store.update(change)
+                if SCHEDULER:
+                    SCHEDULER.poke()
+            elif action == "run":
+                if scheduler_module.find(store.load()["tasks"], item_id) is None:
+                    raise LookupError()
+                if not SCHEDULER or not SCHEDULER.state()["active"]:
+                    raise ValueError("Scheduled tasks aren't running in this window. Use the active Pipkin window.")
+                SCHEDULER.run_now(item_id)
+            elif action == "stop":
+                if not SCHEDULER or not SCHEDULER.stop_current():
+                    raise ValueError("No scheduled task is running.")
+            elif action == "pause":
+                paused = payload.get("paused")
+                if not isinstance(paused, bool):
+                    raise ValueError("Invalid request.")
+                store.update(lambda data: data.update(paused=paused))
+                if SCHEDULER:
+                    SCHEDULER.poke()
+            elif action == "read":
+                def mark(data):
+                    for item in data["inbox"]:
+                        if payload.get("all") or item["id"] == item_id:
+                            item["read"] = True
+                store.update(mark)
+            elif action == "dismiss":
+                store.update(lambda data: data.update(inbox=[item for item in data["inbox"] if item["id"] != item_id]))
+            elif action in ("undo", "open"):
+                item = scheduler_module.find(store.load()["inbox"], item_id)
+                if item is None:
+                    raise LookupError()
+                try:
+                    workspace = Workspace(item["folder"])
+                except (KeyError, OSError, TypeError, ValueError):
+                    raise ValueError("This task's folder is missing or can't be opened.") from None
+                if action == "open":
+                    path = payload.get("path")
+                    if not any(isinstance(path, str) and record.get("path") == path for record in item.get("outputs", [])):
+                        raise ValueError("That file isn't part of this run.")
+                    self.open_in_workspace(workspace, path)
+                    return
+                ids = [record["undo"] for record in item.get("outputs", []) if record.get("undo") and not record.get("undone")]
+                if not ids:
+                    raise ValueError("There's nothing left to undo for this run.")
+                undo_port = item.get("undoPort")
+                if not isinstance(undo_port, int) or not 1 <= undo_port <= 65535:
+                    undo_port = self.server.server_port
+                try:
+                    result = undo_store(undo_port).apply_many(workspace, ids)
+                except UndoConflict as conflict:
+                    self.send_json(409, {"error": str(conflict), "conflict": True})
+                    return
+                if "error" in result:
+                    self.send_json(409, result)
+                    return
+
+                def mark_undone(data):
+                    current = scheduler_module.find(data["inbox"], item_id)
+                    for record in (current or {}).get("outputs", []):
+                        if record.get("undo") in ids:
+                            record["undone"] = True
+                store.update(mark_undone)
+            else:
+                self.send_json(404, {"error": "Page not found."})
+                return
+        except LookupError:
+            self.send_json(404, {"error": "That scheduled task or inbox item no longer exists."})
+            return
+        except ValueError as error:
+            self.send_json(400, {"error": str(error) or "Invalid request."})
+            return
+        except OSError:
+            self.send_json(503, {"error": "Pipkin could not save scheduled tasks. Check the disk and try again."})
+            return
+        self.send_json(200, schedule_state())
 
     def undo_run(self):
         """Check the whole run before undoing files and return any partial results."""
@@ -2289,7 +2619,14 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": f"Enter a draft up to {limit:,} characters."})
             return
         if not GENERATION.acquire(blocking=False):
-            self.send_json(409, {"error": "The model is already replying in another tab."})
+            running = (SCHEDULER.state().get("running") if SCHEDULER else None)
+            if running:
+                self.send_json(409, {
+                    "error": f"The scheduled task “{running.get('title', 'Scheduled task')}” is using the model. Stop it in Scheduled, or send this again when it finishes.",
+                    "code": "busy",
+                })
+            else:
+                self.send_json(409, {"error": "The model is already replying in another tab.", "code": "busy"})
             return
         streaming = False
         deadline = time.monotonic() + 180
@@ -3559,6 +3896,7 @@ if __name__ == "__main__":
             pass
     with ThreadingHTTPServer((HOST, args.port), ChatHandler) as server:
         Thread(target=SESSIONS.manage_model, args=(server.shutdown,), daemon=True).start()
+        start_scheduler(args.port)
         try:
             server.serve_forever()
         finally:

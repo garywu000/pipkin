@@ -10,7 +10,7 @@
     terminal_run: "terminal", terminal_read: "terminal", browser_open: "globe", browser_read: "globe",
     map_document: "file", check_page: "check",
   };
-  const MODE_LABELS = { read: "Read only", ask: "Ask first", auto: "Auto-edit" };
+  const MODE_LABELS = { read: "Read only", ask: "Ask first", auto: "Auto-edit", create: "New files only" };
 
   function createRun(meta = {}) {
     return {

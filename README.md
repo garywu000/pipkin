@@ -228,6 +228,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 | [`agent.py`](agent.py) | Agent loop, workspace tools, context management, recovery, undo, and site checks |
 | [`artifacts.py`](artifacts.py) | Content plans and rendering for sites, Word, PowerPoint, and PDF |
 | [`skills.py`](skills.py) | Portable skill formats, workspace skill loading, and declarative checks |
+| [`scheduler.py`](scheduler.py) | Scheduled background tasks: schedules, missed runs, and the inbox |
 | [`benchmarks/`](benchmarks/) | Work benchmark tasks, graders, and recorded baselines |
 | [`tests/`](tests/) | Agent and workspace regression tests |
 | [`docs/screenshots/`](docs/screenshots/) | Images used in this README |

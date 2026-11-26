@@ -58,6 +58,17 @@
     box.textContent = message;
     box.classList.remove("toast-pop", "toast-out");
     box.hidden = false;
+    // A toast shown while a dialog is open would sit under the dialog's dimmed backdrop. As a popover it is drawn on
+    // top of every dialog; reopening it puts it above dialogs opened since it was last shown.
+    if (typeof box.showPopover === "function") {
+      box.popover = "manual";
+      try {
+        if (box.matches(":popover-open")) box.hidePopover();
+        box.showPopover();
+      } catch {
+        // Engines without popovers keep the plain fixed toast.
+      }
+    }
     void box.offsetWidth;
     box.classList.add("toast-pop");
     clearTimeout(toastTimer);
@@ -68,6 +79,11 @@
       toastTimer = setTimeout(() => {
         box.hidden = true;
         box.classList.remove("toast-out");
+        try {
+          if (typeof box.hidePopover === "function" && box.matches(":popover-open")) box.hidePopover();
+        } catch {
+          // Not a popover in this engine.
+        }
       }, 180);
     }, 2000);
   }

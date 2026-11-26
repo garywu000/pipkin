@@ -60,7 +60,8 @@ COMMAND_TIMEOUT = 120
 WEB_TIMEOUT = 12
 WEB_LIMIT = 2 * 1024 * 1024
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Pipkin/1.0"
-PERMISSION_MODES = ("read", "ask", "auto")
+# "create" is for unattended (scheduled) runs: new files only, no shell, and nothing that waits for an approval.
+PERMISSION_MODES = ("read", "ask", "auto", "create")
 WRITE_TOOL_NAMES = {"write_file", "edit_file", "write_page"}
 WORKSPACE_READS = {"list_files", "search_text", "outline_file", "read_file", "read_files", "map_document", "check_page"}
 SINGLE_FILE_READS = {"outline_file", "read_file", "map_document"}
@@ -1837,13 +1838,14 @@ def available_tools(workspace, mode, web, memory, panels=None, workflow=None, *,
         if workflow == "site":
             tools += SITE_TOOLS
         if mode != "read":
-            tools += [t for t in WRITE_TOOLS if allow_shell or t["function"]["name"] != "run_command"]
+            shell = allow_shell and mode != "create"
+            tools += [t for t in WRITE_TOOLS if shell or t["function"]["name"] != "run_command"]
     if web:
         tools += WEB_TOOLS
     if panels is not None:
         if getattr(panels, "has_terminal", True):
             tools.append(TERMINAL_READ_TOOL)
-            if mode != "read" and allow_shell:
+            if mode not in ("read", "create") and allow_shell:
                 tools.append(TERMINAL_RUN_TOOL)
         if getattr(panels, "has_browser", False):
             tools += BROWSER_TOOLS
@@ -1870,6 +1872,9 @@ def system_prompt(workspace, mode, web, memory, memories, instructions, context,
             "auto": ("File edits apply automatically; the user approves each isolated shell command before it runs."
                      if allow_shell else
                      "File edits apply automatically. Shell commands are disabled unless the user enables them in Settings › Agent."),
+            "create": ("New files only: you can read files and create new ones, but you cannot change or replace files that "
+                       "already existed before this run, and there are no shell commands. Give each new file a new name, "
+                       "for example by adding today's date."),
         }[mode]
         lines.append(f"Workspace folder: {workspace.path.name} (all paths are relative to it). {permission}")
     else:
@@ -2777,6 +2782,13 @@ class Agent:
             path = require_str(args, "path", 500).strip()
             validate_path(path)
             before = workspace.existing_text(path)
+            # Case folding is useful for UI bookkeeping but cannot establish ownership
+            # on case-sensitive filesystems. Require the exact path of a new file.
+            if self.mode == "create" and before is not None and path not in self.saved_files:
+                stem, dot, suffix = path.rpartition(".")
+                example = f"{stem}-{datetime.date.today().isoformat()}.{suffix}" if dot and stem else f"{path}-{datetime.date.today().isoformat()}"
+                raise ValueError(f"Not saved: {path} already exists, and this background task can only create new files. "
+                                 f"Save your work as a new file instead, for example {example}.")
             if before is not None and name in ("write_file", "write_page"):
                 # Small models often rewrite a file they never opened, which silently erases its content.
                 current = path_identity(path)
@@ -2845,7 +2857,14 @@ class Agent:
                 self.declined_paths.add(path_identity(path))
                 return "The user declined this change. Do not retry it."
             self.begin_effect(action)
-            workspace.write_text(path, after)
+            if self.mode == "create" and before is None:
+                data = after.encode("utf-8")
+                if len(data) > MAX_WRITE_BYTES:
+                    raise ValueError("That file is too large to write.")
+                # Exclusive creation protects a file that appears after the initial read.
+                workspace.write_new_artifact(path, data)
+            else:
+                workspace.write_text(path, after)
             if path not in self.saved_files:
                 self.saved_files.append(path)
             rewrite_note = ""

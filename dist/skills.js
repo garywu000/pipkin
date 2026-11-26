@@ -77,6 +77,7 @@
     { name: "pet", icon: "bot", description: "Show or hide Sprig on your desktop." },
     { name: "skills", icon: "book", description: "Browse, import, and share your skills." },
     { name: "save-skill", icon: "plus", description: "Save a skill from your latest completed Work run." },
+    { name: "schedule", icon: "clock", description: "View scheduled tasks and background inbox." },
   ];
   const mentions = [
     { name: "github", icon: "globe", description: "Public GitHub links in Work", instructions:
@@ -88,7 +89,7 @@
   ];
   const reserved = new Set([...starters, ...commands].map(({ name }) => name));
   const workflows = { __proto__: null, site: "site", "study-guide": "study-guide", checklist: "checklist", word: "word", powerpoint: "slides", pdf: "pdf" };
-  const allowedIcons = new Set(["sparkle", "book", "list", "file", "note", "globe", "bot", "pin", "folder", "shield"]);
+  const allowedIcons = new Set(["sparkle", "book", "list", "file", "note", "globe", "bot", "pin", "folder", "shield", "clock"]);
   const allowedOutputs = new Set(["", "chat", "markdown", "site", "study-guide", "checklist", "word", "slides", "pdf"]);
   const workflowOutputs = new Set(["site", "study-guide", "checklist", "word", "slides", "pdf"]);
   const checkTypes = new Set(["file_exists", "html_links", "contains_heading", "contains_text", "min_words", "citations", "no_placeholders"]);
