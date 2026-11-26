@@ -6919,7 +6919,70 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("pageshow", watchSession);
 narrow.addEventListener("change", () => showHistory(false));
 watchSession();
+/* Open a scheduled run as a normal Agent chat: its saved timeline is replayed into an Agent run, so the plan, actions,
+   files and answer look as if you had watched it. The chat is kept, so opening the same run again returns to it. */
+const RUN_CHATS_KEY = "pipkin-scheduled-run-chats";
+async function openScheduledRun(run, task) {
+  if (activeReply || switchingChat || changingChats) {
+    toast("Wait for the current reply to finish, then open the run.");
+    return false;
+  }
+  if (run.status === "running") {
+    toast("This run is still working. Its progress shows in History; open it when it finishes.");
+    return false;
+  }
+  const links = readLocal(RUN_CHATS_KEY, {});
+  if (links[run.id] && chatTitles.has(links[run.id])) {
+    await selectChat(links[run.id]);
+    return true;
+  }
+  let data = null;
+  try {
+    const response = await fetch(`/api/schedules/run?id=${encodeURIComponent(run.id)}`);
+    data = response.ok ? await response.json() : null;
+  } catch {
+    data = null;
+  }
+  if (!data?.run) {
+    toast("That run's details are no longer available.");
+    return false;
+  }
+  const folder = data.folder || task.folder || null;
+  const agentRun = Agent.createRun({ workspace: folder ? folder.split(/[\\/]/).pop() : null, workspacePath: folder,
+    mode: task.access === "create" ? "create" : "read" });
+  for (const part of data.events || []) {
+    try {
+      Agent.apply(agentRun, part);
+    } catch {
+      // One unreadable event shouldn't hide the rest of the run.
+    }
+  }
+  if (agentRun.state === "working") {
+    const ended = { complete: "complete", error: "error" }[data.run.status] || "stopped";
+    Agent.finish(agentRun, ended, ended === "complete" ? undefined : data.run.summary);
+  }
+  agentRun.checkpointId = null;   // a scheduled run has no checkpoint to resume here
+  // Show the run's real start and length, not the moment it was opened.
+  const startedAt = Date.parse(data.run.startedAt || "");
+  const endedAt = Date.parse(data.run.endedAt || "");
+  if (Number.isFinite(startedAt)) agentRun.startedAt = startedAt;
+  if (Number.isFinite(endedAt) && endedAt >= agentRun.startedAt) agentRun.endedAt = endedAt;
+  const started = new Date(data.run.startedAt || Date.now());
+  const title = `${task.title || "Scheduled task"} · ${started.toLocaleDateString([], { month: "short", day: "numeric" })}, `
+    + started.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const messages = [
+    { role: "user", content: data.prompt || task.prompt || task.title || "Scheduled task", scheduledRun: { taskId: task.id, runId: run.id } },
+    { role: "assistant", content: agentRun.answer || data.run.summary || "This run ended without an answer.", agentRun },
+  ];
+  const id = crypto.randomUUID();
+  if (!await saveHistory(messages, { projectId: null, notes: "", title, titleSource: "manual" }, id)) return false;
+  writeLocal(RUN_CHATS_KEY, { ...links, [run.id]: id });
+  await selectChat(id);
+  return true;
+}
+
 window.PipkinSchedule?.init({
+  openRun: openScheduledRun,
   getWorkspace: () => agentWorkspace,
   chooseWorkspace: async () => {
     try {

@@ -28,6 +28,7 @@ from threading import Condition, Event, Lock, Thread
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from uuid import UUID, uuid4, uuid5, NAMESPACE_URL
 import xml.etree.ElementTree as ET
@@ -48,7 +49,7 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.2"
 RELEASE_REPO = "garywu000/pipkin"
 # The list includes pre-releases (betas); GitHub's /releases/latest never does.
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases?per_page=30"
@@ -1029,9 +1030,37 @@ def schedule_state():
         task["folderName"] = Path(task.get("folder") or "").name
     for item in data["inbox"]:
         item["folderName"] = Path(item.get("folder") or "").name
+    for task in data["tasks"]:
+        runs = [run for run in data["runs"] if run.get("taskId") == task["id"] and run.get("status") != "running"]
+        task["unreadRuns"] = sum(1 for run in runs if not run.get("read"))
+        task["runCount"] = len(runs)
     state = SCHEDULER.state() if SCHEDULER else {"running": None, "queued": [], "active": False}
     return {"paused": data["paused"], "tasks": data["tasks"], "inbox": data["inbox"],
             "unread": sum(1 for item in data["inbox"] if not item.get("read")), **state}
+
+
+def schedule_history(task_id):
+    """A task's History, newest first, with each run's outcome."""
+    runs = [run for run in schedule_store().load()["runs"] if run.get("taskId") == task_id]
+    live = SCHEDULER.state().get("running") if SCHEDULER else None
+    for run in runs:
+        if live and run["id"] == live.get("runId"):
+            run.update({key: live[key] for key in ("steps", "activity", "plan") if key in live})
+    return {"runs": runs}
+
+
+def schedule_run(run_id, after=0):
+    """One run's timeline: from memory while it works, from its saved file afterwards."""
+    store = schedule_store()
+    run = scheduler_module.find(store.load()["runs"], run_id)
+    if run is None:
+        return None
+    log = SCHEDULER.log if SCHEDULER else None
+    if log is not None and log.id == run_id:
+        return {"run": run, "events": log.snapshot(after), "live": True, **log.progress()}
+    saved = scheduler_module.load_run_log(store, run_id) or {}
+    return {"run": run, "events": (saved.get("events") or [])[after:], "live": False,
+            "prompt": saved.get("prompt"), "folder": saved.get("folder")}
 
 
 def save_scheduled_task(raw_task, folder, *, item_id=None, confirmation=None):
@@ -1077,7 +1106,7 @@ def save_scheduled_task(raw_task, folder, *, item_id=None, confirmation=None):
     return task
 
 
-def run_scheduled_task(task, stop_event, port):
+def run_scheduled_task(task, stop_event, port, log=None):
     """Run one scheduled task through this server's own Work endpoint, exactly as the page would, but unattended.
 
     Returns {"status", "summary", "outputs"} for the inbox, or {"status": "busy"} when the model is in use."""
@@ -1145,6 +1174,8 @@ def run_scheduled_task(task, stop_event, port):
                 event = json.loads(line)
             except ValueError:
                 continue
+            if log is not None:
+                log.add(event)   # the run's timeline, for its History entry and "open as chat"
             kind = event.get("event")
             if kind == "output" and event.get("path"):
                 outputs[event["path"].casefold()] = {key_name: event[key_name] for key_name in ("path", "action", "undo")
@@ -1196,7 +1227,7 @@ def start_scheduler(port):
     global SCHEDULER
     folder = SETTINGS_FILE.parent
     SCHEDULER = scheduler_module.Scheduler(
-        schedule_store(), lambda task, stop_event: run_scheduled_task(task, stop_event, port),
+        schedule_store(), lambda task, stop_event, log=None: run_scheduled_task(task, stop_event, port, log),
         pressure=memory_pressure, busy=GENERATION.locked,
         lock=scheduler_module.ProcessLock(folder / "scheduler.lock"))
     SCHEDULER.start()
@@ -1825,6 +1856,20 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(200, check_latest_release(force=self.path.endswith("force=1")))
         elif self.path == "/api/schedules":
             self.send_json(200, schedule_state())
+        elif self.path.startswith(("/api/schedules/history?", "/api/schedules/run?")):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            item = (query.get("task") or query.get("id") or [""])[0]
+            if not re.fullmatch(r"[0-9a-f]{32}", item):
+                self.send_json(400, {"error": "Invalid request."})
+            elif self.path.startswith("/api/schedules/history?"):
+                self.send_json(200, schedule_history(item))
+            else:
+                after = (query.get("after") or ["0"])[0]
+                result = schedule_run(item, int(after) if after.isdigit() else 0)
+                if result is None:
+                    self.send_json(404, {"error": "That run is no longer in the task's history."})
+                else:
+                    self.send_json(200, result)
         elif self.path == "/api/usage":
             try:
                 usage = token_usage()
@@ -2501,6 +2546,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                         raise LookupError()
                     if action == "delete":
                         data["tasks"].remove(task)
+                        gone = [run["id"] for run in data.get("runs", []) if run.get("taskId") == task["id"]]
+                        data["runs"] = [run for run in data.get("runs", []) if run.get("taskId") != task["id"]]
+                        for run_id in gone:
+                            scheduler_module.run_file(store, run_id).unlink(missing_ok=True)
                     elif action == "skip":
                         task.pop("missed", None)
                     else:
@@ -2532,7 +2581,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                     SCHEDULER.poke()
             elif action == "read":
                 def mark(data):
-                    for item in data["inbox"]:
+                    # An inbox item and its History entry share an id, so reading either marks both.
+                    for item in [*data["inbox"], *data.get("runs", [])]:
                         if payload.get("all") or item["id"] == item_id:
                             item["read"] = True
                 store.update(mark)

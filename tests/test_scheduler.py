@@ -476,7 +476,7 @@ class SchedulerTest(unittest.TestCase):
         self.busy = False
         self.scheduler = Scheduler(self.store, self.fake_run, busy=lambda: self.busy, clock=lambda: self.now)
 
-    def fake_run(self, task, stop_event):
+    def fake_run(self, task, stop_event, log=None):
         self.runs.append(task["id"])
         return self.result
 
@@ -558,7 +558,7 @@ class SchedulerTest(unittest.TestCase):
 
     def test_a_crashing_run_is_recorded_and_the_scheduler_continues(self):
         self.add(WED - datetime.timedelta(minutes=1))
-        self.scheduler.run_task = lambda task, stop: 1 / 0
+        self.scheduler.run_task = lambda task, stop, log=None: 1 / 0
         self.scheduler.tick()
         self.assertEqual(self.store.load()["inbox"][0]["status"], "error")
         self.assertIsNone(self.scheduler.running)
@@ -1136,3 +1136,86 @@ class ChatScheduleTest(unittest.TestCase):
         self.assertEqual(calls[0][0], "tools")
         self.assertEqual(calls[0][2][1], "every Wed at 18:00")
         self.assertEqual(calls[1:], [("plain",), ("plain",)])
+
+
+class RunHistoryTest(unittest.TestCase):
+    """Each task keeps a History of its runs; every run keeps its timeline so it can open as a chat."""
+
+    def setUp(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = Store(Path(directory.name))
+        self.task = clean_task({"prompt": "Check the folder", "schedule": {"kind": "daily", "time": "09:00"}})
+        self.task.update(folder="/tmp/x", nextRun=scheduler.iso(WED - datetime.timedelta(minutes=1)))
+        self.store.update(lambda data: data["tasks"].append(dict(self.task)))
+        self.seen_running = []
+
+    def run_with(self, result, events=()):
+        def fake(task, stop_event, log=None):
+            self.seen_running.append([run["status"] for run in self.store.load()["runs"]])
+            for event in events:
+                log.add(event)
+            return result
+        scheduler.Scheduler(self.store, fake, clock=lambda: WED).tick()
+
+    def test_a_run_is_in_history_while_running_and_keeps_its_timeline(self):
+        events = [{"event": "run", "id": "r", "workspacePath": "/tmp/x"}, {"event": "step"},
+                  {"event": "delta", "text": "tok"}, {"event": "tool", "id": "t1", "name": "list_files", "label": "List ."},
+                  {"event": "tool_result", "id": "t1", "ok": True, "preview": "a.txt"}, {"event": "result", "text": "Done."}]
+        self.run_with({"status": "complete", "summary": "Done.", "outputs": []}, events)
+        self.assertEqual(self.seen_running, [["running"]], "the entry exists as soon as the run starts")
+        data = self.store.load()
+        run = data["runs"][0]
+        self.assertEqual((run["status"], run["taskId"], run["timeline"], run["read"]), ("complete", self.task["id"], True, False))
+        self.assertEqual(data["inbox"][0]["id"], run["id"], "the inbox item and the history entry share an id")
+        saved = scheduler.load_run_log(self.store, run["id"])
+        self.assertEqual([event["event"] for event in saved["events"]], ["run", "step", "tool", "tool_result", "result"],
+                         "token-by-token text is left out of the saved timeline")
+        self.assertEqual(saved["prompt"], "Check the folder")
+
+    def test_a_run_that_never_started_leaves_no_entry_and_an_interrupted_one_is_marked_stopped(self):
+        self.run_with({"status": "busy"})
+        self.assertEqual(self.store.load()["runs"], [])
+        self.store.update(lambda data: scheduler.record_run(data, self.task, "a" * 32, status="running", startedAt="2026-11-25T09:00:00"))
+        with patch("scheduler.threading.Thread"):   # start() without the background loop
+            scheduler.Scheduler(self.store, lambda *a, **k: None, clock=lambda: WED).start()
+        run = scheduler.find(self.store.load()["runs"], "a" * 32)
+        self.assertEqual(run["status"], "stopped")
+        self.assertIn("closed", run["summary"])
+
+    def test_history_is_bounded_per_task(self):
+        def fill(data):
+            for index in range(scheduler.RUN_HISTORY_PER_TASK + 5):
+                scheduler.record_run(data, self.task, f"{index:032x}", status="complete")
+        self.store.update(fill)
+        self.assertEqual(len(self.store.load()["runs"]), scheduler.RUN_HISTORY_PER_TASK)
+
+
+class RunHistoryEndpointTest(unittest.TestCase):
+    def test_history_run_read_and_delete(self):
+        import server
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(server, "SETTINGS_FILE", root / "settings.json"), patch.object(server, "SCHEDULER", None):
+                task = clean_task({"prompt": "Check", "schedule": {"kind": "daily", "time": "09:00"}})
+                task["folder"] = str(root)
+                store = server.schedule_store()
+                store.update(lambda data: data["tasks"].append(task))
+                log = scheduler.RunLog("b" * 32)
+                log.add({"event": "result", "text": "All good."})
+                scheduler.save_run_log(store, log, task)
+                store.update(lambda data: Scheduler.add_inbox(data, task, "complete", "All good.", [], WED, WED, "schedule",
+                                                              item_id="b" * 32, timeline=True))
+                self.assertEqual(server.schedule_state()["tasks"][0]["unreadRuns"], 1)
+                history = server.schedule_history(task["id"])["runs"]
+                self.assertEqual([(run["id"], run["status"]) for run in history], [("b" * 32, "complete")])
+                run = server.schedule_run("b" * 32)
+                self.assertEqual((run["live"], run["events"][0]["text"], run["prompt"]), (False, "All good.", "Check"))
+                self.assertIsNone(server.schedule_run("c" * 32))
+                store.update(lambda data: [item.update(read=True) for item in [*data["inbox"], *data["runs"]] if item["id"] == "b" * 32])
+                self.assertEqual(server.schedule_state()["tasks"][0]["unreadRuns"], 0)
+                handler = Mock()
+                handler.read_json.return_value = {"id": task["id"]}
+                server.ChatHandler.schedule_action(handler, "delete")
+                self.assertEqual(server.schedule_store().load()["runs"], [])
+                self.assertFalse(scheduler.run_file(store, "b" * 32).exists(), "the timeline file is removed too")

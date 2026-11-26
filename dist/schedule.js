@@ -23,6 +23,10 @@
   let editorWorkspace = null;    // {key, name} when a folder was chosen for this task
   let deleteArmed = false;
   const expanded = new Set();
+  let detailId = null;           // the task whose page is open in the Tasks view
+  let detailHistory = [];        // that task's runs, newest first
+  let showAllInstructions = false;
+  let deleteDetailArmed = false;
 
   const dialog = () => byId("schedule-dialog");
   const editor = () => byId("schedule-editor");
@@ -106,6 +110,7 @@
     }
     seenInbox = ids;
     renderSidebar();
+    if (detailId && dialog()?.open && view === "tasks") void loadHistory();
     if (changed && dialog()?.open) render();
     schedulePoll();
   }
@@ -254,6 +259,15 @@
             check.detail ? el("span", { className: "skill-check-detail", text: check.detail }) : null)))));
     })() : null;
     const actions = [];
+    if (item.timeline && options.openRun) {
+      const chat = el("button", { type: "button", className: "button small", text: "Open as chat" });
+      chat.addEventListener("click", async () => {
+        markRead(item);
+        const task = state.tasks.find((candidate) => candidate.id === item.taskId) || { id: item.taskId, title: item.title, prompt: "" };
+        if (await options.openRun({ id: item.id, status: item.status, startedAt: item.startedAt, summary: item.summary }, task)) dialog().close();
+      });
+      actions.push(chat);
+    }
     if (canUndo) {
       const undo = el("button", { type: "button", className: "button small", text: "Undo run" });
       undo.addEventListener("click", async () => {
@@ -299,8 +313,31 @@
     void act("/api/schedules/read", { id: item.id }, { quiet: true });
   }
 
+  /* ---------- Tasks: a card per task, and a page per task with its History ---------- */
+
+  const RUN_STATUS = {
+    running: { label: "Running", glyph: "clock" }, complete: { label: "Done", glyph: "check" },
+    stopped: { label: "Stopped", glyph: "stop" }, error: { label: "Failed", glyph: "alert" }, skipped: { label: "Skipped", glyph: "clock" },
+  };
+
+  function taskStatus(task) {
+    const running = state.running?.taskId === task.id;
+    if (running) return { key: "running", text: state.running.plan ? `Running · ${state.running.plan}` : "Running" };
+    if ((state.queued || []).includes(task.id)) return { key: "running", text: "Starting soon" };
+    if (task.missed) return { key: "missed", text: "Missed" };
+    if (!task.enabled) return { key: "paused", text: "Paused" };
+    return { key: "active", text: "Active" };
+  }
+
   function renderTasks() {
     const list = byId("schedule-tasks");
+    const task = detailId && state.tasks.find((item) => item.id === detailId);
+    if (detailId && !task) detailId = null;
+    dialog().dataset.detail = String(Boolean(task));
+    if (task) {
+      list.replaceChildren(taskPage(task));
+      return;
+    }
     if (!state.tasks.length) {
       const create = el("button", { type: "button", className: "button small", text: "New task" });
       create.addEventListener("click", () => openEditor(null));
@@ -308,60 +345,152 @@
       return;
     }
     const sorted = [...state.tasks].sort((a, b) => (b.enabled - a.enabled) || String(a.nextRun || "~").localeCompare(String(b.nextRun || "~")));
-    list.replaceChildren(...sorted.map(taskRow));
+    list.replaceChildren(el("div", { className: "task-grid" }, sorted.map(taskCard)));
   }
 
-  function taskRow(task) {
+  function taskCard(task) {
+    const status = taskStatus(task);
+    const failed = ["error", "stopped"].includes(task.lastStatus) && status.key !== "running";
+    const card = el("button", { type: "button", className: "task-card", dataset: { status: status.key },
+      "aria-label": `${task.title}, ${status.text}, ${describe(task.schedule)}` },
+      el("span", { className: "task-card-head" },
+        el("strong", { text: task.title }),
+        failed ? el("span", { className: "task-card-warn", title: `Last run ${task.lastStatus === "error" ? "failed" : "stopped"}` }, icon("alert")) : null,
+        task.unreadRuns ? el("span", { className: "task-card-dot", title: `${task.unreadRuns} new ${task.unreadRuns === 1 ? "run" : "runs"}` }) : null),
+      el("span", { className: "task-card-prompt", text: task.prompt || (task.skill ? `/${task.skill.name}` : "") }),
+      el("span", { className: "task-card-meta" },
+        el("span", { className: "task-card-status", text: status.text }), el("span", { text: " · " + describe(task.schedule) })));
+    card.addEventListener("click", () => openTask(task.id));
+    return card;
+  }
+
+  function openTask(id) {
+    detailId = id;
+    detailHistory = [];
+    showAllInstructions = false;
+    deleteDetailArmed = false;
+    view = "tasks";
+    document.querySelector('input[name="schedule-view"][value="tasks"]').checked = true;
+    render();
+    void loadHistory();
+  }
+
+  async function loadHistory() {
+    const id = detailId;
+    if (!id) return;
+    try {
+      const data = await api(`/api/schedules/history?task=${encodeURIComponent(id)}`);
+      if (detailId !== id) return;
+      detailHistory = data.runs || [];
+      if (dialog().open && view === "tasks") renderTasks();
+    } catch {
+      // The next refresh tries again.
+    }
+  }
+
+  function taskPage(task) {
+    const status = taskStatus(task);
     const running = state.running?.taskId === task.id;
-    const queued = (state.queued || []).includes(task.id);
-    const details = [describe(task.schedule), task.skill?.name ? `/${task.skill.name}` : "", task.folderName, ACCESS_LABELS[task.access] || "", task.web ? "Web" : ""].filter(Boolean).join(" · ");
-    const next = running ? "Running now" : queued ? "Starting soon"
-      : task.enabled && task.nextRun ? `Next: ${moment(task.nextRun)}` : "Off";
-    const notes = [];
-    if (task.missed) {
-      const run = el("button", { type: "button", className: "button small accent", text: "Run now", disabled: running || queued || !state.active });
-      run.addEventListener("click", () => {
-        run.disabled = true;
-        void act("/api/schedules/run", { id: task.id }).then((ok) => { if (!ok) run.disabled = false; });
-      });
-      const skip = el("button", { type: "button", className: "button small", text: "Skip" });
-      skip.addEventListener("click", () => void act("/api/schedules/skip", { id: task.id }));
-      notes.push(el("div", { className: "task-missed" },
-        el("span", { text: `Missed ${moment(task.missed)} while Pipkin was closed.` }), run, skip));
-    }
-    if (task.waitReason && !running) notes.push(el("p", { className: "task-note", text: `Waiting because ${task.waitReason}.` }));
-    if (task.lastRun && !task.missed) {
-      const last = STATUS[task.lastStatus]?.label || "Ran";
-      notes.push(el("p", { className: "task-note", text: `Last run: ${last.toLowerCase()}, ${moment(task.lastRun)}` }));
-    }
-    const runNow = el("button", { type: "button", className: "button small", text: "Run now", disabled: running || queued || !state.active });
-    runNow.addEventListener("click", () => {
-      runNow.disabled = true;
-      void act("/api/schedules/run", { id: task.id }).then((ok) => {
-        if (ok) toast(`Starting “${task.title}”`);
-        else runNow.disabled = false;
-      });
+    const back = el("button", { type: "button", className: "task-page-back" }, icon("chevron-right", "icon back-chevron"), el("span", { text: "Scheduled tasks" }));
+    back.addEventListener("click", () => {
+      detailId = null;
+      render();
     });
+    const edit = el("button", { type: "button", className: "icon-button small", title: "Edit", "aria-label": `Edit “${task.title}”` }, icon("edit"));
+    edit.addEventListener("click", () => openEditor(task));
+    const remove = el("button", { type: "button", className: deleteDetailArmed ? "button small danger-text" : "icon-button small",
+      title: "Delete task", "aria-label": `Delete “${task.title}”` }, deleteDetailArmed ? el("span", { text: "Delete?" }) : icon("trash"));
+    remove.addEventListener("click", async () => {
+      if (!deleteDetailArmed) {
+        deleteDetailArmed = true;
+        renderTasks();
+        return;
+      }
+      if (await act("/api/schedules/delete", { id: task.id })) {
+        toast(`Deleted “${task.title}”`);
+        detailId = null;
+        render();
+      }
+    });
+    const primary = running
+      ? el("button", { type: "button", className: "button small", text: "Stop" })
+      : el("button", { type: "button", className: "button small primary", disabled: status.text === "Starting soon" || !state.active }, icon("play"), el("span", { text: "Run now" }));
+    primary.addEventListener("click", () => {
+      primary.disabled = true;
+      if (running) void act("/api/schedules/stop", {});
+      else void act("/api/schedules/run", { id: task.id }).then((ok) => { if (ok) toast(`Starting “${task.title}”`); else primary.disabled = false; });
+    });
+    const header = el("div", { className: "task-page-head" },
+      el("div", { className: "task-page-crumbs" }, back, el("span", { className: "task-page-sep", text: "/" }), el("strong", { text: task.title })),
+      el("div", { className: "task-page-actions" }, edit, remove, primary));
+
     const toggle = el("input", { type: "checkbox", checked: Boolean(task.enabled) });
     toggle.addEventListener("change", () => {
       void act(toggle.checked ? "/api/schedules/enable" : "/api/schedules/disable", { id: task.id }).then((ok) => {
         if (!ok) toggle.checked = !toggle.checked;
       });
     });
-    const edit = el("button", { type: "button", className: "icon-button small", title: "Edit", "aria-label": `Edit “${task.title}”` }, icon("edit"));
-    edit.addEventListener("click", () => openEditor(task));
-    return el("article", { className: "task-row" + (task.enabled ? "" : " off") + (running ? " running" : "") },
-      el("div", { className: "task-main" },
-        el("div", { className: "task-title" }, el("strong", { text: task.title }), el("span", { className: "task-next", text: next })),
-        el("span", { className: "task-when", text: details }),
-        notes),
-      el("div", { className: "task-actions" }, runNow,
-        el("label", { className: "switch", title: task.enabled ? "Turn off" : "Turn on" }, toggle, el("span"),
-          el("span", { className: "sr-only", text: `${task.title} on` })),
-        edit));
+    const fact = (label, ...value) => el("div", { className: "task-fact" }, el("span", { className: "task-fact-label", text: label }), el("div", { className: "task-fact-value" }, ...value));
+    const facts = el("div", { className: "task-page-facts" },
+      fact("Status", el("label", { className: "task-status-toggle" },
+        el("span", { className: "switch" }, toggle, el("span"), el("span", { className: "sr-only", text: "Task on" })),
+        el("span", { className: "task-status-pill", dataset: { status: status.key }, text: status.text }))),
+      task.missed ? fact("Missed", missedNote(task)) : null,
+      task.waitReason && !running ? fact("Waiting", el("span", { text: `Because ${task.waitReason}.` })) : null,
+      fact("Repeats", el("span", { text: describe(task.schedule) })),
+      fact("Next run", el("span", { text: task.enabled && task.nextRun ? moment(task.nextRun) : "Off" })),
+      fact("Folder", el("span", { className: "task-folder-chip", title: task.folder || "" }, icon("folder"), el("span", { text: task.folderName || task.folder || "" }))),
+      fact("Pipkin may", el("span", { text: (task.access === "create" ? "Read files and create new ones" : "Read files only") + (task.web ? " · search the web" : "") + " · never runs commands" })),
+      task.skill?.name ? fact("Skill", el("span", { text: `/${task.skill.name}` })) : null);
+
+    const instructions = el("p", { className: "task-instructions" + (showAllInstructions ? " open" : ""), text: task.prompt || (task.skill ? `Runs /${task.skill.name}.` : "") });
+    const more = (task.prompt || "").length > 260
+      ? el("button", { type: "button", className: "inbox-more", text: showAllInstructions ? "Show less" : "Show all" }) : null;
+    more?.addEventListener("click", () => {
+      showAllInstructions = !showAllInstructions;
+      renderTasks();
+    });
+    const history = detailHistory.length
+      ? el("div", { className: "task-history" }, detailHistory.map((run) => historyRow(run, task)))
+      : el("p", { className: "task-note", text: task.runCount ? "Loading history…" : "No runs yet. Use Run now to try it." });
+    const side = el("div", { className: "task-page-main" },
+      el("span", { className: "task-fact-label", text: "Instructions" }), instructions, more,
+      el("span", { className: "task-fact-label task-history-label", text: "History" }), history);
+    return el("div", { className: "task-page" }, header, el("div", { className: "task-page-body" }, facts, side));
   }
 
-  /* ---------- the task editor ---------- */
+  function missedNote(task) {
+    const run = el("button", { type: "button", className: "button small accent", text: "Run now", disabled: !state.active });
+    run.addEventListener("click", () => {
+      run.disabled = true;
+      void act("/api/schedules/run", { id: task.id }).then((ok) => { if (!ok) run.disabled = false; });
+    });
+    const skip = el("button", { type: "button", className: "button small", text: "Skip" });
+    skip.addEventListener("click", () => void act("/api/schedules/skip", { id: task.id }));
+    return el("div", { className: "task-missed" }, el("span", { text: `${moment(task.missed)}, while Pipkin was closed.` }), run, skip);
+  }
+
+  function historyRow(run, task) {
+    const info = RUN_STATUS[run.status] || RUN_STATUS.error;
+    const live = run.status === "running";
+    const detail = live
+      ? [run.activity || "Starting", run.plan ? `plan ${run.plan}` : ""].filter(Boolean).join(" · ")
+      : info.label;
+    const row = el("button", { type: "button", className: "task-history-row", dataset: { status: run.status },
+      title: run.summary ? run.summary.slice(0, 300) : "" },
+      el("span", { className: "task-history-glyph" }, live ? el("span", { className: "schedule-spinner", "aria-hidden": "true" }) : icon(info.glyph)),
+      el("span", { className: "task-history-when", text: moment(run.startedAt) + (run.trigger === "manual" ? " · run by you" : "") }),
+      el("span", { className: "task-history-status", text: detail }),
+      !run.read && !live ? el("span", { className: "task-card-dot", title: "New" }) : null);
+    row.addEventListener("click", async () => {
+      if (!options.openRun) return;
+      if (!run.read && !live) void act("/api/schedules/read", { id: run.id }, { quiet: true });
+      if (await options.openRun(run, task)) dialog().close();
+    });
+    return row;
+  }
+
+    /* ---------- the task editor ---------- */
 
   function renderDays(selected) {
     byId("schedule-days").replaceChildren(...DAYS.map((name, index) => {
@@ -583,6 +712,7 @@
     for (const radio of document.querySelectorAll('input[name="schedule-view"]')) {
       radio.addEventListener("change", () => {
         view = radio.value;
+        if (view === "tasks") detailId = null;   // the Tasks tab starts at the card grid
         render();
       });
     }

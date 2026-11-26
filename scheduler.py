@@ -25,6 +25,8 @@ DEFER_LIMIT = datetime.timedelta(minutes=45)     # stop waiting for a busy model
 TICK_SECONDS = 30
 TASK_LIMIT = 30
 INBOX_LIMIT = 60
+RUN_HISTORY_PER_TASK = 40        # runs kept in each task's History (with their timelines)
+RUN_EVENT_LIMIT = 4000
 TITLE_LIMIT = 80
 PROMPT_LIMIT = 4000
 
@@ -882,6 +884,7 @@ class Store:
             data.setdefault("paused", False)
             data["tasks"] = [task for task in data.get("tasks", []) if isinstance(task, dict) and task.get("id")]
             data["inbox"] = [item for item in data.get("inbox", []) if isinstance(item, dict) and item.get("id")]
+            data["runs"] = [run for run in data.get("runs", []) if isinstance(run, dict) and run.get("id")]
             return data
 
     def save(self, data):
@@ -949,6 +952,88 @@ def find(items, item_id):
     return next((item for item in items if item.get("id") == item_id), None)
 
 
+class RunLog:
+    """The timeline of one scheduled run: the same events a Work run streams to the page, minus token-by-token text.
+    Kept in memory while the run works (for live progress) and saved next to the schedules when it ends."""
+
+    STREAMING = ("delta", "thinking", "model_step")
+
+    def __init__(self, run_id):
+        self.id = run_id
+        self.events = []
+        self.lock = threading.Lock()
+        self.steps = 0
+        self.activity = ""
+        self.plan = []
+
+    def add(self, event):
+        if not isinstance(event, dict) or event.get("event") in self.STREAMING:
+            return
+        kind = event.get("event")
+        compact = {key: (value[:6000] if isinstance(value, str) else value) for key, value in event.items()}
+        with self.lock:
+            if kind == "step":
+                self.steps += 1
+            elif kind == "tool" and event.get("label"):
+                self.activity = str(event["label"])[:120]
+            elif kind == "plan" and isinstance(event.get("steps"), list):
+                self.plan = event["steps"]
+            if len(self.events) < RUN_EVENT_LIMIT:
+                self.events.append(compact)
+
+    def progress(self):
+        with self.lock:
+            done = sum(1 for step in self.plan if isinstance(step, dict) and step.get("status") == "completed")
+            return {"runId": self.id, "steps": self.steps, "activity": self.activity,
+                    "plan": f"{done} of {len(self.plan)}" if self.plan else ""}
+
+    def snapshot(self, after=0):
+        with self.lock:
+            return self.events[after:]
+
+
+def run_file(store, run_id):
+    return store.path.parent / "scheduled-runs" / f"{run_id}.json"
+
+
+def save_run_log(store, log, task):
+    """Write a finished run's timeline privately; it backs "open this run as a chat"."""
+    path = run_file(store, log.id)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = path.with_name(path.name + ".tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"events": log.snapshot(), "prompt": task.get("prompt", ""), "folder": task.get("folder")}, handle,
+                  ensure_ascii=False)
+    os.replace(temp, path)
+
+
+def load_run_log(store, run_id):
+    if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
+        return None
+    try:
+        return json.loads(run_file(store, run_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def record_run(data, task, run_id, **fields):
+    """Create or update one entry in a task's History, and keep each task's history bounded."""
+    runs = data.setdefault("runs", [])
+    run = find(runs, run_id)
+    if run is None:
+        run = {"id": run_id, "taskId": task.get("id"), "title": task.get("title", "Scheduled task"), "read": False}
+        runs.insert(0, run)
+    run.update(fields)
+    kept, counts = [], {}
+    for item in runs:
+        counts[item.get("taskId")] = counts.get(item.get("taskId"), 0) + 1
+        if counts[item.get("taskId")] <= RUN_HISTORY_PER_TASK:
+            kept.append(item)
+    data["runs"] = kept
+    return run
+
+
 class Scheduler:
     """Wakes every half minute, starts due tasks one at a time, and records each outcome in the inbox.
 
@@ -969,6 +1054,7 @@ class Scheduler:
         self.manual_lock = threading.Lock()
         self.deferred = {}               # task id -> when it first had to wait
         self.running = None
+        self.log = None                  # the running task's timeline
         self.last_tick = None
         self.thread = None
 
@@ -976,6 +1062,16 @@ class Scheduler:
 
     def start(self):
         if self.thread is None:
+            def interrupted(data):
+                # A run still marked running was cut off when Pipkin last quit.
+                for run in data.get("runs", []):
+                    if run.get("status") == "running":
+                        run.update(status="stopped", summary="Pipkin closed before this run finished.",
+                                   endedAt=run.get("startedAt"))
+            try:
+                self.store.update(interrupted)
+            except OSError:
+                pass
             self.thread = threading.Thread(target=self.loop, name="pipkin-scheduler", daemon=True)
             self.thread.start()
 
@@ -995,8 +1091,10 @@ class Scheduler:
         self.wake.set()
 
     def state(self):
-        current = self.running
+        current, log = self.running, self.log
         running = dict(current) if current else None
+        if running and log is not None:
+            running.update(log.progress())
         with self.manual_lock:
             waiting = list(self.manual)
         return {"running": running, "queued": waiting,
@@ -1102,16 +1200,28 @@ class Scheduler:
                 self.store.update(lambda d: (find(d["tasks"], task_id) or {}).update(waitReason=wait))
             return
         self.stop_event.clear()
-        self.running = {"taskId": task_id, "title": task["title"], "startedAt": iso(now), "trigger": trigger}
+        log = RunLog(uuid.uuid4().hex)
+        self.store.update(lambda d: record_run(d, task, log.id, status="running", startedAt=iso(now), trigger=trigger))
+        self.log = log
+        self.running = {"taskId": task_id, "title": task["title"], "startedAt": iso(now), "trigger": trigger,
+                        "runId": log.id}
         try:
-            result = self.run_task(dict(task), self.stop_event)
+            result = self.run_task(dict(task), self.stop_event, log)
         except Exception as error:  # noqa: BLE001 - one broken run must not stop the scheduler
             result = {"status": "error", "summary": f"Pipkin hit an unexpected error ({type(error).__name__}).",
                       "outputs": []}
         finally:
             self.running = None
+            self.log = None
         ended = self.clock()
+        if result.get("status") != "busy" and log.events:
+            try:
+                save_run_log(self.store, log, task)
+            except OSError:
+                pass
         if result.get("status") == "busy":
+            # It never started: drop the History entry made for it.
+            self.store.update(lambda d: d.update(runs=[run for run in d.get("runs", []) if run.get("id") != log.id]))
             if trigger == "manual":
                 self.store.update(lambda d: self.add_inbox(
                     d, task, "skipped", "Not started because the model was busy. Try Run now again in a moment.", [],
@@ -1136,21 +1246,27 @@ class Scheduler:
                         self.advance(current, ended)
             self.add_inbox(d, task, status, result.get("summary") or "", result.get("outputs") or [],
                            now, ended, trigger, undo_port=result.get("undoPort"),
-                           skill_checks=result.get("skillChecks"))
+                           skill_checks=result.get("skillChecks"), item_id=log.id, timeline=bool(log.events))
         self.store.update(record)
 
     @staticmethod
-    def add_inbox(data, task, status, summary, outputs, started, ended, trigger, *, undo_port=None, skill_checks=None):
+    def add_inbox(data, task, status, summary, outputs, started, ended, trigger, *, undo_port=None, skill_checks=None,
+                  item_id=None, timeline=False):
+        """Put a finished (or skipped) run in the inbox, and record it in the task's History under the same id."""
         item = {
-            "id": uuid.uuid4().hex, "taskId": task.get("id"), "title": task.get("title", "Scheduled task"),
+            "id": item_id or uuid.uuid4().hex, "taskId": task.get("id"), "title": task.get("title", "Scheduled task"),
             "status": status, "summary": summary[:20_000], "outputs": outputs[:40], "folder": task.get("folder"),
             "access": task.get("access"), "startedAt": iso(started), "endedAt": iso(ended), "trigger": trigger,
             "read": False,
         }
         if isinstance(undo_port, int) and 1 <= undo_port <= 65535:
             item["undoPort"] = undo_port
+        if timeline:
+            item["timeline"] = True
         if isinstance(skill_checks, dict) and isinstance(skill_checks.get("results"), list) and skill_checks["results"]:
             item["skillChecks"] = skill_checks
         data["inbox"].insert(0, item)
         del data["inbox"][INBOX_LIMIT:]
+        record_run(data, task, item["id"], status=status, summary=summary[:2000], outputs=outputs[:40],
+                   startedAt=iso(started), endedAt=iso(ended), trigger=trigger, timeline=timeline)
         return item

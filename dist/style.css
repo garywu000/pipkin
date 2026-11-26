@@ -2749,3 +2749,83 @@ html.theme-swap { view-transition-name: root; }
 .update-required-dialog .dialog-actions { justify-content: center; flex-wrap: wrap; }
 
 a.button { text-decoration: none; }
+
+/* ---------- Scheduled: task cards and task pages ---------- */
+.schedule-dialog { width: min(960px, calc(100vw - 32px)); }
+.schedule-dialog .schedule-list { max-height: min(560px, 64vh); }
+.task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 12px; }
+.task-card {
+  display: grid; gap: 6px; align-content: start; min-width: 0; padding: 15px 16px; border-radius: 16px; text-align: left;
+  background: var(--surface-2); border: 1px solid transparent; color: var(--ink); font: inherit; cursor: pointer;
+  transition: border-color .16s var(--ease-out), background-color .16s var(--ease-out), transform .14s var(--ease-spring);
+}
+.task-card:hover { border-color: var(--rule-strong); background: color-mix(in srgb, var(--surface-2) 70%, var(--surface)); }
+.task-card:active { transform: scale(.99); }
+.task-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.task-card-head strong { flex: 1; min-width: 0; font-weight: 600; font-size: .95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-card-warn { flex: none; color: var(--warn); display: inline-flex; }
+.task-card-warn .icon { width: 16px; height: 16px; }
+.task-card-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.task-card-prompt {
+  color: var(--ink-2); font-size: .87rem; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere;
+}
+.task-card-meta { font-size: .8rem; color: var(--muted); }
+.task-card[data-status="running"] .task-card-status { color: var(--accent-text); font-weight: 600; }
+.task-card[data-status="missed"] .task-card-status { color: var(--warn); font-weight: 600; }
+
+.task-page { display: grid; gap: 16px; }
+.task-page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--rule); }
+.task-page-crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: .92rem; }
+.task-page-crumbs strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.task-page-back {
+  display: inline-flex; align-items: center; gap: 4px; flex: none; border: 0; background: none; padding: 2px 4px; border-radius: 6px;
+  color: var(--muted); font: inherit; cursor: pointer;
+}
+.task-page-back:hover { color: var(--ink); background: var(--surface-2); }
+.task-page-back .back-chevron { width: 14px; height: 14px; transform: rotate(180deg); }
+.task-page-sep { color: var(--muted); }
+.task-page-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.task-page-actions .button .icon { width: 13px; height: 13px; }
+.task-page-actions .button.primary { display: inline-flex; align-items: center; gap: 6px; }
+.task-page-body { display: grid; grid-template-columns: minmax(0, 300px) minmax(0, 1fr); gap: 28px; align-items: start; }
+.task-page-facts { display: grid; gap: 16px; }
+.task-fact { display: grid; gap: 6px; }
+.task-fact-label { font-size: .8rem; color: var(--muted); }
+.task-fact-value { font-size: .9rem; color: var(--ink); overflow-wrap: anywhere; }
+.task-status-toggle { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; }
+.task-status-pill { padding: 2px 9px; border-radius: 999px; font-size: .78rem; background: var(--surface-2); color: var(--ink-2); }
+.task-status-pill[data-status="active"], .task-status-pill[data-status="running"] { background: var(--accent-soft); color: var(--accent-text); }
+.task-status-pill[data-status="missed"] { background: var(--warn-soft); color: var(--warn); }
+.task-folder-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 9px; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--rule); font-size: .84rem;
+}
+.task-folder-chip .icon { width: 14px; height: 14px; flex: none; color: var(--muted); }
+.task-folder-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-page-main { display: grid; gap: 8px; min-width: 0; }
+.task-instructions {
+  margin: 0; font-size: .9rem; line-height: 1.55; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.task-instructions.open { display: block; }
+.task-history-label { margin-top: 10px; }
+.task-history { display: grid; gap: 6px; }
+.task-history-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border-radius: 11px; text-align: left;
+  background: var(--surface-2); border: 1px solid transparent; color: var(--ink); font: inherit; font-size: .88rem; cursor: pointer;
+  transition: border-color .15s var(--ease-out);
+}
+.task-history-row:hover { border-color: var(--rule-strong); }
+.task-history-glyph { flex: none; display: inline-flex; color: var(--muted); }
+.task-history-glyph .icon { width: 15px; height: 15px; }
+.task-history-row[data-status="complete"] .task-history-glyph { color: var(--accent-text); }
+.task-history-row[data-status="error"] .task-history-glyph, .task-history-row[data-status="error"] .task-history-status { color: var(--danger); }
+.task-history-row[data-status="stopped"] .task-history-glyph, .task-history-row[data-status="skipped"] .task-history-glyph { color: var(--warn); }
+.task-history-row[data-status="running"] { border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.task-history-row[data-status="running"] .task-history-glyph, .task-history-row[data-status="running"] .task-history-status { color: var(--accent-text); }
+.task-history-when { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-history-status { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .82rem; color: var(--muted); }
+@media (max-width: 720px) {
+  .task-page-body { grid-template-columns: minmax(0, 1fr); }
+}
