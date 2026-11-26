@@ -2102,6 +2102,25 @@ def loose_edit(text, old, new):
     return original, body, text.count(original)
 
 
+def indent_added_lines(text, old, new):
+    r"""Indent the extra lines of an edit whose one-line snippet matched after the file's indentation.
+
+    Models often copy `<li>A</li>` from `\t\t<li>A</li>` and send `<li>A</li>\n<li>B</li>`: the first line keeps
+    the file's tabs, but `<li>B</li>` would land at column 0. When the added lines are written from column 0, give
+    them the matched line's indentation. Lines that already carry their own indentation are left as written."""
+    if "\n" in old or "\n" not in new or not old[:1].strip():
+        return new
+    start = text.find(old)
+    prefix = text[text.rfind("\n", 0, start) + 1:start]
+    if not prefix or prefix.strip(" \t"):
+        return new
+    first, *rest = new.split("\n")
+    meaningful = [line for line in rest if line.strip()]
+    if not meaningful or min(len(line) - len(line.lstrip(" \t")) for line in meaningful) != 0:
+        return new
+    return "\n".join([first] + [(prefix + line) if line.strip() else line for line in rest])
+
+
 SOURCE_MARKER = re.compile(r" ?\[(?:S|A)\d+(?:\s*[,;]\s*(?:S|A)?\d+)*\]")
 
 
@@ -2794,6 +2813,8 @@ class Agent:
                     raise ValueError("That file does not exist. Use write_file to create it.")
                 old, new = require_str(args, "old_text", 60_000), require_str(args, "new_text", 60_000, allow_empty=True)
                 count = before.count(old)
+                if count == 1:
+                    new = indent_added_lines(before, old, new)
                 if count == 0:
                     old, new, count = reindent_edit(before, old, new)
                 if count == 0:

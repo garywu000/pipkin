@@ -56,16 +56,105 @@
     const box = document.getElementById("toast");
     if (!box) return;
     box.textContent = message;
-    box.classList.remove("toast-pop");
+    box.classList.remove("toast-pop", "toast-out");
     box.hidden = false;
     void box.offsetWidth;
     box.classList.add("toast-pop");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
-      box.hidden = true;
+      // Fade out instead of vanishing in one frame.
       box.classList.remove("toast-pop");
+      box.classList.add("toast-out");
+      toastTimer = setTimeout(() => {
+        box.hidden = true;
+        box.classList.remove("toast-out");
+      }, 180);
     }, 2000);
   }
+
+  /* Dialogs animate in with CSS. This gives every way of closing one (close(), Esc, or a method="dialog" form) a
+     short exit animation as well, instead of the dialog and its dimmed backdrop vanishing in one frame. The real
+     close (and its "close" event) follows once the animation ends. */
+  (function animateDialogClose() {
+    const proto = window.HTMLDialogElement?.prototype;
+    if (!proto || proto.pipkinAnimatedClose) return;
+    proto.pipkinAnimatedClose = true;
+    const EXIT_MS = 170;
+    const nativeClose = proto.close;
+    const pending = new WeakMap();
+    const reduced = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const settle = (dialog) => {
+      const job = pending.get(dialog);
+      if (!job) return;
+      pending.delete(dialog);
+      clearTimeout(job.timer);
+      dialog.removeAttribute("data-closing");
+      if (dialog.open) {
+        if (job.hasValue) nativeClose.call(dialog, job.value);
+        else nativeClose.call(dialog);
+      }
+    };
+    proto.close = function close(...args) {
+      if (!this.open || !this.isConnected || reduced()) {
+        if (pending.has(this)) {
+          clearTimeout(pending.get(this).timer);
+          pending.delete(this);
+        }
+        this.removeAttribute("data-closing");
+        return nativeClose.apply(this, args);
+      }
+      const job = pending.get(this);
+      if (job) {
+        if (args.length) Object.assign(job, { hasValue: true, value: args[0] });
+        return undefined;
+      }
+      // Close when the exit animation ends; the timer is a backstop for when animations don't run.
+      pending.set(this, { hasValue: args.length > 0, value: args[0], timer: setTimeout(() => settle(this), EXIT_MS + 120) });
+      this.setAttribute("data-closing", "");
+      return undefined;
+    };
+    for (const name of ["showModal", "show"]) {
+      const native = proto[name];
+      proto[name] = function open(...args) {
+        const job = pending.get(this);
+        if (job && this.open) {
+          // Reopened during its exit: keep it open and replay the entrance.
+          clearTimeout(job.timer);
+          pending.delete(this);
+          this.removeAttribute("data-closing");
+          this.style.animation = "none";
+          void this.offsetWidth;
+          this.style.animation = "";
+          return undefined;
+        }
+        return native.apply(this, args);
+      };
+    }
+    document.addEventListener("animationend", (event) => {
+      if (event.target instanceof HTMLDialogElement && event.animationName === "dialog-out") settle(event.target);
+    }, true);
+    // Esc: run the app's own cancel listeners first, then animate the close unless one of them kept it open.
+    document.addEventListener("cancel", (event) => {
+      const dialog = event.target;
+      if (!(dialog instanceof HTMLDialogElement) || reduced()) return;
+      dialog.addEventListener("cancel", (late) => {
+        if (late.defaultPrevented) return;
+        late.preventDefault();
+        dialog.close();
+      }, { once: true });
+    }, true);
+    // <form method="dialog">: after the form's own submit listeners, close with the same return value, animated.
+    document.addEventListener("submit", (event) => {
+      const form = event.target;
+      if (event.defaultPrevented || !(form instanceof HTMLFormElement) || reduced()) return;
+      const method = (event.submitter?.getAttribute("formmethod") || form.getAttribute("method") || "").toLowerCase();
+      const dialog = form.closest("dialog");
+      if (method !== "dialog" || !dialog?.open) return;
+      event.preventDefault();
+      if (event.submitter) dialog.close(event.submitter.value);
+      else dialog.close();
+    });
+  })();
 
   async function copyText(text, button) {
     try {

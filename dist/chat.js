@@ -170,13 +170,14 @@ const RESERVED_SHORTCUTS = new Set(["Mod+Q", "Mod+W", "Mod+C", "Mod+V", "Mod+X",
 const defaultSettings = {
   theme: "system", palette: "emerald", enterToSend: true, showStats: true, checkUpdates: true, temperature: 0.7, instructions: "",
   memoryEnabled: true, protectMemory: true, allowShell: false, exploreModel: "", shortcuts: {},
-  permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat",
+  permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat", busySend: "steer",
   sidebarCollapsed: false, sidebarWidth: 268,
 };
 const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
 let settings = { ...defaultSettings, ...readLocal(settingsKey, {}) };
 if (!["auto", "on", "off"].includes(settings.webMode)) settings.webMode = settings.web === false ? "off" : "auto";
 delete settings.web;
+if (!["steer", "queue"].includes(settings.busySend)) settings.busySend = "steer";
 let memories = readLocal(memoryKey, []).filter((item) => typeof item === "string");
 let customSkills = Skills.normalize(readLocal(skillKey, []));
 let workspaceSkills = [];
@@ -225,6 +226,12 @@ let activeAgentResync = null;
 let followLatest = true;
 let previousScroll = 0;
 const queuedSteering = new Map();
+// Messages queued while a reply runs, per chat; see "Queued messages" below.
+const QUEUE_LIMIT = 10;
+const queuePanel = byId("message-queue");
+const chatQueues = new Map();
+let queueRenderKey = "";
+const queueShownIds = new Set();  // items already on screen; only new ones play the entry animation
 let sendingSteering = false;
 let session = null;
 let state = "connecting";
@@ -312,11 +319,13 @@ function solidColor(value) {
 function applyTheme(animate = false) {
   if (animate && !reducedMotion.matches) {
     /* A single cross-fade snapshot is far cheaper than transitioning every element's colors. */
-    if (document.startViewTransition && !applyTheme.transitioning) {
+    if (document.startViewTransition && !applyTheme.transitioning && !document.hidden) {
       applyTheme.transitioning = true;
       document.documentElement.classList.add("theme-swap");
       const swap = document.startViewTransition(() => applyTheme(false));
-      swap.finished.finally(() => {
+      // A skipped transition (window hidden mid-swap) still applies the theme; it only rejects `ready`.
+      swap.ready.catch(() => {});
+      swap.finished.catch(() => {}).finally(() => {
         applyTheme.transitioning = false;
         document.documentElement.classList.remove("theme-swap");
       });
@@ -886,30 +895,50 @@ async function updateChatSummary(id, fields) {
 
 /**
  * Replace the placeholder title (trimmed from the first prompt) with a short title the model writes from the first
- * exchange. Runs once per chat, only while the model is already loaded, and never overrides a manual rename.
+ * exchange. Runs after a reply while the chat still has its placeholder title, only while the model is already loaded,
+ * and never overrides a manual rename.
  */
 let titleJob = null;
+const TITLE_BUSY_RETRIES = 6;
 function refineChatTitle(id, userMessage, reply) {
   const chat = chatTitles.get(id);
-  if (!chat || chat.titleSource === "manual" || chat.titleSource === "model" || unsavedChats.has(id)) return;
+  if (!chat || !["generated", "pending"].includes(chat.titleSource) || unsavedChats.has(id) || titleJob) return;
   const command = Skills.parse(userMessage.content || "");
   const request = ((command ? command.input : userMessage.content) || "").trim() ||
     (userMessage.files || []).map((file) => file.name).join(", ");
   if (!request) return;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
-  const done = fetch("/api/title", {
-    method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-    body: JSON.stringify({ request: request.slice(0, 2000), reply: plainText(reply || "").slice(0, 600) }),
-  })
-    .then((response) => response.ok ? response.json() : null)
-    .then((data) => data?.title ? saveModelTitle(id, data.title) : null)
+  const body = JSON.stringify({ request: request.slice(0, 2000), reply: plainText(reply || "").slice(0, 600) });
+  let retrying = true;
+  /* Right after a Work run the server can still hold the model for a moment (saving the checkpoint, closing the
+     stream), especially when the answer arrived through a resync. Wait for it instead of keeping the prompt as the
+     title. A new turn stops the retries; the next reply tries again. */
+  const requestTitle = async () => {
+    for (let attempt = 0; attempt < TITLE_BUSY_RETRIES; attempt += 1) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (!retrying || controller.signal.aborted) return null;
+      const timer = setTimeout(() => controller.abort(), 20000);
+      try {
+        const response = await fetch("/api/title", {
+          method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal, body,
+        });
+        if (response.ok) return (await response.json())?.title || null;
+        if (response.status !== 409 && response.status !== 503) return null;
+        const problem = await response.json().catch(() => ({}));
+        if (/not loaded/i.test(problem.error || "")) return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return null;
+  };
+  const done = requestTitle()
+    .then((title) => title ? saveModelTitle(id, title) : null)
     .catch(() => {})
     .finally(() => {
-      clearTimeout(timer);
       if (titleJob?.done === done) titleJob = null;
     });
-  titleJob = { controller, done };
+  titleJob = { controller, done, stopRetrying: () => { retrying = false; } };
 }
 
 /** Store a model-written title without switching chats or interrupting the composer. */
@@ -1894,8 +1923,9 @@ function modelCanReply() {
 function updateControls() {
   const replying = activeReply !== null;
   const viewingLiveChat = !replying || chatId === activeReplyChatId;
-  const steering = Boolean(viewingLiveChat && activeAgentRun?.runId && activeAgentRun.state === "working" &&
-    !activeReply?.signal.aborted && !modelUnloading && !stopAfterStepButton.disabled);
+  const busyMode = busyAction();
+  const steering = busyMode === "steer";
+  const queueing = busyMode === "queue";
   const sidebarBusy = processingFiles || changingChats || !historyReady;
   const composerBusy = replying || sidebarBusy || switchingChat;
   const agent = agentMode.checked;
@@ -1918,6 +1948,7 @@ function updateControls() {
   const needsSkillBrief = Boolean(Skills.workflows[command?.name] && !command.input && !files.length);
   composer.dataset.busy = String(replying);
   sendButton.disabled = steering ? sendingSteering || !textLength || textLength > 2000 :
+    queueing ? !textLength || (queueFor(chatId)?.items.length || 0) >= QUEUE_LIMIT :
     composerBusy || choosingWorkspace || (!localCommand && !modelCanReply()) || !hasInput || needsSkillBrief;
   newChatButton.disabled = composerBusy;
   byId("topbar-new").disabled = composerBusy;
@@ -1931,16 +1962,21 @@ function updateControls() {
   for (const option of appMode.querySelectorAll("input")) option.disabled = composerBusy || choosingWorkspace;
   workspaceButton.disabled = composerBusy || choosingWorkspace;
   permissionButton.disabled = replying;
-  promptBox.readOnly = (replying && !steering) || switchingChat || !historyReady;
+  promptBox.readOnly = (replying && !steering && !queueing) || switchingChat || !historyReady;
   promptBox.maxLength = steering ? 2000 : 40000;
-  promptBox.placeholder = steering ? "Steer this run…"
+  const otherAction = canSteerNow() ? ` · ${altKeyLabel()}+Return to ${steering ? "queue" : "steer"}` : "";
+  promptBox.placeholder = steering ? "Steer this run" + otherAction
+    : queueing ? "Queue a follow-up" + (otherAction || "…")
     : agent && !replying && stoppedRunToContinue() ? "Correct the stopped run and continue it…"
     : agent ? "Describe a task for the agent…" : "Message Pipkin";
   stopButton.hidden = !replying;
   stopAfterStepButton.hidden = !activeAgentRun?.runId || activeAgentRun.state !== "working";
-  sendButton.hidden = replying && !steering;
-  sendButton.title = steering ? "Send steering note" : "Send";
+  sendButton.hidden = replying && !steering && !queueing;
+  sendButton.title = steering ? "Send steering note" : queueing ? "Add to queue" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
+  sendButton.dataset.action = steering ? "steer" : queueing ? "queue" : "send";
+  sendButton.querySelector("use")?.setAttribute("href", queueing ? "#i-list" : "#i-up");
+  renderQueue();
   for (const button of messagesBox.querySelectorAll("[data-requires-idle]")) button.disabled = replying;
   renderSkillMenu();
 }
@@ -3722,7 +3758,7 @@ function restoreSteeringDraft(notes) {
   updateTokenMeter();
 }
 
-async function sendSteering(run, text) {
+async function sendSteering(run, text, { keepDraft = false } = {}) {
   const id = crypto.randomUUID();
   const signal = activeReply.signal;
   const pending = { text, saved: false };
@@ -3736,9 +3772,11 @@ async function sendSteering(run, text) {
   };
   renderSteering("steering_queued");
   sendingSteering = true;
-  promptBox.value = "";
-  autoGrow();
-  updateTokenMeter();
+  if (!keepDraft) {
+    promptBox.value = "";
+    autoGrow();
+    updateTokenMeter();
+  }
   updateControls();
   try {
     const response = await fetch("/api/agent/steer", {
@@ -3764,6 +3802,163 @@ async function sendSteering(run, text) {
       updateControls();
     }
   }
+}
+
+/* ====================================================================== */
+/* Queued messages                                                         */
+/* ====================================================================== */
+/* Messages typed while a reply or Work run is going wait above the composer, one queue per chat. They send one at a
+   time, in order, as new turns after the reply finishes. A stop, an error, or being in another chat pauses the queue
+   until you send the next one yourself. */
+
+function altKeyLabel() {
+  return PipkinPlatform.isMac ? "⌥" : "Alt";
+}
+
+function canSteerNow() {
+  return Boolean(activeReply && chatId === activeReplyChatId && !activeReply.signal.aborted && activeAgentRun?.runId &&
+    activeAgentRun.state === "working" && !modelUnloading && !stopAfterStepButton.disabled);
+}
+
+/** What sending does while a reply is running in this chat: "steer", "queue", or null when nothing is running. */
+function busyAction(alternate = false) {
+  if (!activeReply || chatId !== activeReplyChatId || activeReply.signal.aborted) return null;
+  if (!canSteerNow()) return "queue";
+  return (settings.busySend === "queue") !== alternate ? "queue" : "steer";
+}
+
+function queueFor(id, create = false) {
+  if (!id) return null;
+  let queue = chatQueues.get(id);
+  if (!queue && create) chatQueues.set(id, queue = { items: [], paused: "" });
+  return queue || null;
+}
+
+function queueMessage(text) {
+  const queue = queueFor(activeReplyChatId, true);
+  if (!text || !queue) return;
+  if (queue.items.length >= QUEUE_LIMIT) {
+    announce(`The queue holds up to ${QUEUE_LIMIT} messages.`, true);
+    return;
+  }
+  queue.items.push({ id: crypto.randomUUID(), text });
+  promptBox.value = "";
+  autoGrow();
+  updateTokenMeter();
+  updateControls();
+  announce(`Queued. It sends when this ${activeAgentRun ? "run" : "reply"} finishes.`);
+}
+
+function removeQueued(queue, item) {
+  const index = queue.items.indexOf(item);
+  if (index >= 0) queue.items.splice(index, 1);
+  if (!queue.items.length) queue.paused = "";
+  updateControls();
+}
+
+function renderQueue() {
+  const queue = queueFor(chatId);
+  const items = queue?.items || [];
+  const running = Boolean(activeReply && activeReplyChatId === chatId);
+  const steer = canSteerNow();
+  const key = JSON.stringify([chatId, items.map((item) => item.id), queue?.paused, running, steer, Boolean(activeAgentRun)]);
+  if (key === queueRenderKey) return;
+  queueRenderKey = key;
+  queuePanel.hidden = !items.length;
+  if (!items.length) {
+    queuePanel.replaceChildren();
+    return;
+  }
+  const note = queue.paused || (running ? `Sends after this ${activeAgentRun ? "run" : "reply"}` : "Sending the next one…");
+  const head = el("div", { className: "queue-head" },
+    icon("list"),
+    el("strong", { text: `Queued · ${items.length}` }),
+    el("span", { className: "queue-note" + (queue.paused ? " paused" : ""), text: note }),
+    queue.paused && !activeReply ? el("button", {
+      type: "button", className: "queue-send-next", text: "Send next",
+      onClick: () => {
+        queue.paused = "";
+        void sendNextQueued(chatId);
+      },
+    }) : null,
+    el("button", {
+      type: "button", className: "queue-clear", text: "Clear", title: "Remove every queued message",
+      onClick: () => {
+        queue.items = [];
+        queue.paused = "";
+        updateControls();
+        promptBox.focus({ preventScroll: true });
+      },
+    }));
+  const list = el("ol", { className: "queue-list" }, items.map((item, index) => el("li", {
+    className: "queue-item" + (queueShownIds.has(item.id) ? "" : " new"), dataset: { id: item.id } },
+    el("span", { className: "queue-index", text: String(index + 1), "aria-hidden": "true" }),
+    el("p", { className: "queue-text", text: item.text, title: item.text }),
+    el("div", { className: "queue-actions" },
+      steer ? el("button", {
+        type: "button", className: "queue-steer", text: "Steer now", title: "Send this into the current run as a steering note",
+        onClick: () => {
+          if (!canSteerNow() || item.text.length > 2000) {
+            announce(item.text.length > 2000 ? "A steering note can be up to 2,000 characters." : "The run can't take a steering note right now.", true);
+            return;
+          }
+          removeQueued(queue, item);
+          void sendSteering(activeAgentRun, item.text, { keepDraft: true });
+        },
+      }) : null,
+      index ? el("button", {
+        type: "button", className: "icon-button small", title: "Move up", "aria-label": "Move up",
+        onClick: () => {
+          const at = queue.items.indexOf(item);
+          if (at > 0) queue.items.splice(at - 1, 2, item, queue.items[at - 1]);
+          updateControls();
+        },
+      }, icon("up")) : null,
+      el("button", {
+        type: "button", className: "icon-button small", title: "Edit", "aria-label": "Edit queued message",
+        onClick: () => {
+          removeQueued(queue, item);
+          promptBox.value = [item.text, promptBox.value.trim()].filter(Boolean).join("\n\n");
+          autoGrow();
+          updateTokenMeter();
+          updateControls();
+          promptBox.focus();
+        },
+      }, icon("edit")),
+      el("button", {
+        type: "button", className: "icon-button small", title: "Remove", "aria-label": "Remove queued message",
+        onClick: () => removeQueued(queue, item),
+      }, icon("x"))))));
+  queuePanel.replaceChildren(head, list);
+  for (const item of items) queueShownIds.add(item.id);
+}
+
+/** Send the chat's next queued message as a new turn, once nothing is running and the chat is open. */
+async function sendNextQueued(id) {
+  const queue = queueFor(id);
+  if (!queue?.items.length || queue.paused || activeReply || chatId !== id || switchingChat || !historyReady) return;
+  if (!modelCanReply()) {
+    queue.paused = "Paused until the model is ready";
+    updateControls();
+    return;
+  }
+  const item = queue.items.shift();
+  updateControls();
+  if (!await startTurn(item.text, { queued: true })) {
+    queue.items.unshift(item);
+    queue.paused = "Paused: the next message couldn't be sent";
+    updateControls();
+  }
+}
+
+/** After a reply ends: send the next queued message if it finished, otherwise wait for the user. */
+function continueQueue(id, completed) {
+  const queue = queueFor(id);
+  if (!queue?.items.length) return;
+  if (!completed) queue.paused = "Paused because the last reply didn't finish";
+  else if (chatId !== id) queue.paused = "Paused while you were in another chat";
+  updateControls();
+  if (!queue.paused) setTimeout(() => void sendNextQueued(id), 250);
 }
 
 async function discardWorkCheckpoints(ids) {
@@ -3862,46 +4057,68 @@ async function runLocalCommand({ name, input }) {
   }
 }
 
-async function sendMessage(event) {
+async function sendMessage(event, { alternate = false } = {}) {
   event?.preventDefault();
-  if (sendButton.disabled) return;
+  const busy = busyAction(alternate);
+  if (sendButton.disabled && !(alternate && busy)) return;
   const text = promptBox.value.trim();
-  if (activeAgentRun?.state === "working") {
+  if (busy === "steer") {
+    if (!text || sendingSteering) return;
+    if (text.length > 2000) {
+      announce(`A steering note can be up to 2,000 characters. Shorten it, or press ${altKeyLabel()}+Return to queue it.`, true);
+      return;
+    }
     await sendSteering(activeAgentRun, text);
     return;
   }
-  if (refreshPasteExcerpts()) updateFiles();
-  const command = Skills.parse(text);
-  if (Skills.commands.some(({ name }) => name === command?.name)) {
-    promptBox.value = "";
-    autoGrow();
-    updateControls();
-    updateTokenMeter();
-    await runLocalCommand(command);
+  if (busy === "queue") {
+    queueMessage(text);
     return;
   }
-  const humanize = humanizeInput(command, files);
+  if (activeReply || alternate) return;
+  await startTurn(text);
+}
+
+/** Start a turn from text typed in the composer, or from a queued message (which leaves the composer alone).
+    Returns false when the message was not sent. */
+async function startTurn(text, { queued = false } = {}) {
+  if (!queued && refreshPasteExcerpts()) updateFiles();
+  const draftFiles = queued ? [] : files;
+  const command = Skills.parse(text);
+  if (Skills.commands.some(({ name }) => name === command?.name)) {
+    if (!queued) {
+      promptBox.value = "";
+      autoGrow();
+      updateControls();
+      updateTokenMeter();
+    }
+    await runLocalCommand(command);
+    return true;
+  }
+  const humanize = humanizeInput(command, draftFiles);
   if (humanize?.error) {
     announce(humanize.error, true);
-    return;
+    return false;
   }
   if (!humanize && Skills.requestedMentions(text).some(({ name }) => name === "github") && (!agentMode.checked || settings.webMode === "off")) {
     announce("Use Agent mode with Web enabled to read a public GitHub link.", true);
-    return;
+    return false;
   }
   const skill = findSkill(command?.name);
   if (command && !skill) {
     announce("Unknown skill /" + command.name + ". Open Skills to see the available commands.", true);
-    return;
+    return false;
   }
-  if (!canRunSkill(skill, text)) return;
-  const continuing = !command && !humanize && !files.length && text.length <= 2000 ? stoppedRunToContinue() : null;
+  if (!canRunSkill(skill, text)) return false;
+  const continuing = !command && !humanize && !draftFiles.length && text.length <= 2000 ? stoppedRunToContinue() : null;
   const proceed = async () => {
-    const attachments = files;
-    promptBox.value = "";
-    autoGrow();
-    files = [];
-    updateFiles();
+    const attachments = draftFiles;
+    if (!queued) {
+      promptBox.value = "";
+      autoGrow();
+      files = [];
+      updateFiles();
+    }
     if (continuing) {
       await submitTurn(text, [], true, { resume: continuing.checkpointId, steering: text });
       return;
@@ -3921,9 +4138,10 @@ async function sendMessage(event) {
         return true;
       },
     });
-    return;
+    return true;
   }
   await proceed();
+  return true;
 }
 
 /* The chat's last reply, when it is a Work run that stopped (or paused) after starting in the current workspace.
@@ -3950,7 +4168,10 @@ async function resumeWork(checkpointId) {
 
 async function submitTurn(text, attachments, useAgent, { resume = null, steering = null, skill = null, modeOverride = null, humanize = null } = {}) {
   // A title request takes a few seconds and holds the model; let it finish so this turn isn't refused as busy.
-  if (titleJob) await titleJob.done;
+  if (titleJob) {
+    titleJob.stopRetrying();
+    await titleJob.done;
+  }
   useAgent = useAgent && !humanize;
   const userMessage = { role: "user", content: text };
   if (skill) {
@@ -4064,6 +4285,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     view.reasoning.classList.remove("live");
   }
 
+  let turnFailed = false;
   try {
     if (useAgent || (!chatId && !history.length)) {
       const placeholder = { role: "assistant", content: interrupted, ...replyDetails, ...sourceState(),
@@ -4388,6 +4610,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     if (!done) throw new Error("The reply was interrupted. Try sending your message again.");
     announce(answer.trim() ? "" : "The model returned an empty reply.", !answer.trim());
   } catch (error) {
+    turnFailed = true;
     if (agentRun) {
       const stopped = error.name === "AbortError";
       if (agentRun.state === "working") Agent.finish(agentRun, stopped ? "stopped" : "error");
@@ -4435,7 +4658,11 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
       activeReplyHistory.push(userMessage, { role: "assistant", content: answer, thinking: thought, thinkingDurationMs, agentRun,
         stats, ...replyDetails, ...(rewriteNote && { rewriteNote }), web: web.length ? web : undefined, ...sourceState(sourceNote) });
       const saved = await saveHistory([...activeReplyHistory], runContext, runChatId);
-      if (saved && activeReplyHistory.length === 2 && !humanize) refineChatTitle(runChatId, userMessage, answer);
+      // Name the chat from its first request; if an earlier attempt failed, a later reply tries again.
+      if (saved && !humanize) {
+        const firstRequest = activeReplyHistory.find((message) => message.role === "user") || userMessage;
+        refineChatTitle(runChatId, firstRequest, answer);
+      }
       if (saved && !unsavedChats.has(runChatId) && agentRun?.state === "complete" && agentRun.checkpointId) {
         void discardWorkCheckpoints([agentRun.checkpointId]).catch(() => {});
       }
@@ -4485,6 +4712,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     updateLastActions();
     updateControls();
     promptBox.focus({ preventScroll: true });
+    continueQueue(runChatId, !turnFailed && Boolean(answer.trim()) && (!agentRun || agentRun.state === "complete"));
   }
 }
 
@@ -4602,6 +4830,7 @@ function openSettings(tabId = "tab-general") {
   byId("setting-instructions").value = settings.instructions;
   byId("setting-memory").checked = settings.memoryEnabled;
   settingsDialog.querySelector(`input[name="web-mode"][value="${settings.webMode}"]`).checked = true;
+  settingsDialog.querySelector(`input[name="busy-send"][value="${settings.busySend}"]`).checked = true;
   byId("setting-steps").value = String(settings.maxSteps);
   renderMemories();
   renderModelControls();
@@ -4946,6 +5175,11 @@ promptBox.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key !== "Enter" || event.isComposing) return;
+  if (event.altKey && !event.shiftKey && busyAction() !== null) {
+    event.preventDefault();
+    void sendMessage(null, { alternate: true });
+    return;
+  }
   const send = settings.enterToSend ? !event.shiftKey : (event.metaKey || event.ctrlKey);
   if (!send) return;
   event.preventDefault();
@@ -5392,6 +5626,11 @@ byId("setting-instructions").addEventListener("change", (event) => {
 });
 byId("setting-memory").addEventListener("change", (event) => saveSettings({ memoryEnabled: event.target.checked }));
 byId("setting-web").addEventListener("change", (event) => setWebMode(event.target.value));
+byId("setting-busy-send").addEventListener("change", (event) => {
+  saveSettings({ busySend: event.target.value === "queue" ? "queue" : "steer" });
+  updateControls();
+});
+for (const key of document.querySelectorAll(".alt-key")) key.textContent = altKeyLabel();
 byId("setting-steps").addEventListener("change", (event) => saveSettings({ maxSteps: Number(event.target.value) }));
 byId("permission-choice").addEventListener("change", (event) => {
   saveSettings({ permission: event.target.value });

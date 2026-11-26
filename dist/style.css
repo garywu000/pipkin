@@ -136,6 +136,8 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
+/* The closed side panel waits just off the right edge; never let it make the page scroll sideways. */
+html { overflow-x: clip; }
 body {
   margin: 0; background-color: var(--bg); color: var(--ink);
   --harness-width: 0px;
@@ -230,7 +232,7 @@ kbd {
   position: relative; height: 100dvh; min-width: 0; overflow: hidden; display: flex; flex-direction: column; gap: 6px;
   padding: 12px 10px 10px; background: var(--sidebar); border-right: 1px solid var(--rule);
   width: var(--sidebar-width);
-  transition: transform .28s var(--ease-out), opacity .22s var(--ease-out);
+  transition: transform .3s var(--ease-out), opacity .22s var(--ease-out);
   will-change: transform, opacity;
 }
 body[data-sidebar-collapsed] .sidebar { transform: translateX(-100%); opacity: 0; pointer-events: none; }
@@ -386,8 +388,13 @@ dialog::backdrop {
   animation: fade-in .2s var(--ease-out);
 }
 dialog[open] { animation: dialog-in .24s var(--ease-spring); }
+/* Set by ui.js while a dialog plays its exit; the real close follows when it ends. */
+dialog[open][data-closing] { animation: dialog-out .17s var(--ease-out) forwards; pointer-events: none; }
+dialog[data-closing]::backdrop { animation: fade-out .17s var(--ease-out) forwards; }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(10px) scale(.965); } }
+@keyframes dialog-out { to { opacity: 0; transform: translateY(6px) scale(.98); } }
 @keyframes fade-in { from { opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
 .dialog-body { padding: 22px; display: grid; gap: 11px; }
 .dialog-body h2 { font-size: 1.15rem; margin: 0 0 2px; letter-spacing: -.02em; font-weight: 650; }
 .dialog-body p, .dialog-body > label { margin: 0; color: var(--ink-2); font-size: .9rem; overflow-wrap: anywhere; }
@@ -1065,7 +1072,7 @@ h1 {
 .md > :last-child { margin-bottom: 0; }
 .md p { margin: 0 0 .85em; }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.3em 0 .5em; line-height: 1.3; letter-spacing: -.02em; }
-.md h1 { font-size: 1.45rem; } .md h2 { font-size: 1.25rem; } .md h3 { font-size: 1.1rem; } .md h4, .md h5, .md h6 { font-size: 1rem; }
+.md h1 { font-size: 1.45rem; animation: none; } .md h2 { font-size: 1.25rem; } .md h3 { font-size: 1.1rem; } .md h4, .md h5, .md h6 { font-size: 1rem; }
 .md ul, .md ol { margin: 0 0 .85em; padding-left: 1.5em; }
 .md li { margin: .25em 0; }
 .md li > ul, .md li > ol { margin: .25em 0; }
@@ -1181,6 +1188,49 @@ h1 {
 .composer { max-width: var(--column); margin: 0 auto; }
 .feedback:not(:empty) { display: flex; align-items: center; gap: 6px; font-size: .85rem; color: var(--muted); margin: 0 6px 8px; animation: panel-in .18s var(--ease-out); }
 .feedback[data-error="true"] { color: var(--danger); }
+/* Messages queued while a reply or Work run is going: a stack that sits on top of the composer. */
+.message-queue {
+  margin: 0 14px -1px; padding: 8px 8px 9px; border-radius: 16px 16px 0 0;
+  border: 1px solid var(--rule-strong); border-bottom: 0;
+  background: var(--glass-strong);
+  backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  animation: popover-in .2s var(--ease-out);
+}
+.queue-head { display: flex; align-items: center; gap: 8px; padding: 0 4px 6px 6px; font-size: .8rem; color: var(--muted); }
+.queue-head > .icon { width: 14px; height: 14px; flex: none; color: var(--accent-text); }
+.queue-head strong { color: var(--ink); font-weight: 600; }
+.queue-note { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-note.paused { color: var(--warn); }
+.queue-head button, .queue-steer {
+  flex: none; border: 0; border-radius: 8px; padding: 3px 8px; font: inherit; font-size: .78rem; cursor: pointer;
+  background: transparent; color: var(--muted); transition: background-color .15s var(--ease-out), color .15s var(--ease-out);
+}
+.queue-head button:hover, .queue-steer:hover { background: var(--surface-2); color: var(--ink); }
+.queue-head .queue-send-next { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+.queue-head .queue-send-next:hover { background: color-mix(in srgb, var(--accent) 24%, var(--accent-soft)); color: var(--accent-text); }
+.queue-list { list-style: none; margin: 0; padding: 0 0 1px; display: grid; gap: 4px; max-height: 168px; overflow-y: auto; }
+.queue-item {
+  display: flex; align-items: center; gap: 9px; min-width: 0; padding: 5px 4px 5px 8px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--rule);
+}
+@keyframes queue-in { from { opacity: 0; transform: scale(.985); } }
+.queue-item.new { animation: queue-in .2s var(--ease-out); }
+.queue-index {
+  flex: none; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 6px;
+  background: var(--surface-2); color: var(--muted); font-size: .7rem; font-variant-numeric: tabular-nums;
+}
+.queue-text {
+  flex: 1; min-width: 0; margin: 0; font-size: .86rem; line-height: 1.35; color: var(--ink);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere;
+}
+.queue-actions { flex: none; display: flex; align-items: center; gap: 1px; opacity: .55; transition: opacity .15s var(--ease-out); }
+.queue-item:hover .queue-actions, .queue-item:focus-within .queue-actions { opacity: 1; }
+.queue-steer { color: var(--accent-text); font-weight: 600; }
+.message-queue:not([hidden]) + .composer-box { border-top-left-radius: 18px; border-top-right-radius: 18px; }
+.send-button[data-action="queue"] .icon { width: 17px; height: 17px; }
+@media (hover: none) { .queue-actions { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .message-queue, .queue-item { animation: none; } }
+
 .composer-box {
   position: relative; padding: 11px 11px 9px 14px;
   border: 1px solid var(--rule-strong); border-radius: 22px;
@@ -1440,7 +1490,9 @@ h1 {
   box-shadow: var(--shadow-lg); border: 1px solid color-mix(in srgb, var(--bg) 14%, transparent);
 }
 .toast-pop { animation: toast-in .24s var(--ease-spring); }
+.toast-out { animation: toast-out .18s var(--ease-out) forwards; }
 @keyframes toast-in { from { opacity: 0; translate: -50% 12px; transform: scale(.94); } }
+@keyframes toast-out { to { opacity: 0; translate: -50% 6px; transform: scale(.97); } }
 
 /* ---------- Turn navigator ---------- */
 .turn-navigator { position: absolute; z-index: 3; top: 50%; right: 12px; translate: 0 -50%; max-height: 70%; display: flex; align-items: center; }
@@ -1788,7 +1840,7 @@ details[open] > summary .chev-sm { transform: rotate(90deg); }
 .onboarding.ob-exit {
   animation: ob-out .32s var(--ease-out) forwards; pointer-events: none;
 }
-@keyframes ob-out { to { opacity: 0; transform: scale(1.035); filter: blur(6px); } }
+@keyframes ob-out { to { opacity: 0; transform: scale(1.025); } }
 .ob-backdrop { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
 .ob-aura {
   position: absolute; border-radius: 50%; filter: blur(64px); opacity: .75;
@@ -1841,20 +1893,18 @@ details[open] > summary .chev-sm { transform: rotate(90deg); }
   transition: color .16s var(--ease-out), background-color .16s var(--ease-out);
 }
 .ob-top-skip:hover, .ob-skip-step:hover, .ob-ghost:hover { color: var(--ink); background: var(--surface-2); }
-.ob-stage {
-  position: relative; flex: 1; display: grid; align-items: center; min-height: 0;
-  transition: height .36s cubic-bezier(.22, 1, .36, 1);
-}
+.ob-stage { position: relative; flex: 1; display: grid; align-items: center; min-height: 0; }
 .ob-step { grid-area: 1 / 1; display: grid; gap: 20px; width: 100%; will-change: transform, opacity; }
 .ob-step[data-dir="next"] { animation: ob-slide-next .4s cubic-bezier(.22, 1, .36, 1) both; }
 .ob-step[data-dir="prev"] { animation: ob-slide-prev .4s cubic-bezier(.22, 1, .36, 1) both; }
 .ob-step.ob-leaving { pointer-events: none; }
 .ob-step.ob-leaving[data-dir="next"] { animation: ob-leave-next .28s cubic-bezier(.4, 0, .2, 1) forwards; }
 .ob-step.ob-leaving[data-dir="prev"] { animation: ob-leave-prev .28s cubic-bezier(.4, 0, .2, 1) forwards; }
-@keyframes ob-slide-next { from { opacity: 0; transform: translateX(28px) scale(.985); filter: blur(2px); } }
-@keyframes ob-slide-prev { from { opacity: 0; transform: translateX(-28px) scale(.985); filter: blur(2px); } }
-@keyframes ob-leave-next { to { opacity: 0; transform: translateX(-24px) scale(.985); filter: blur(2px); } }
-@keyframes ob-leave-prev { to { opacity: 0; transform: translateX(24px) scale(.985); filter: blur(2px); } }
+/* Opacity and transform only: a blur here re-rendered the card's own backdrop blur on every frame. */
+@keyframes ob-slide-next { from { opacity: 0; transform: translateX(28px) scale(.985); } }
+@keyframes ob-slide-prev { from { opacity: 0; transform: translateX(-28px) scale(.985); } }
+@keyframes ob-leave-next { to { opacity: 0; transform: translateX(-24px) scale(.985); } }
+@keyframes ob-leave-prev { to { opacity: 0; transform: translateX(24px) scale(.985); } }
 
 /* Palette swatch cards (Onboarding & Settings) */
 .ob-palette-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
@@ -2068,7 +2118,16 @@ details[open] > summary .chev-sm { transform: rotate(90deg); }
   position: fixed; inset: 0; z-index: 2; display: grid; place-items: center; overflow: hidden; cursor: pointer;
   transition: opacity .44s var(--ease-out), transform .44s var(--ease-out);
 }
-.onboarding[data-intro="reveal"] .ob-intro { opacity: 0; transform: scale(1.06); pointer-events: none; }
+.onboarding[data-intro="reveal"] .ob-intro { pointer-events: none; }
+.onboarding[data-intro="reveal"] .ob-intro > :not(.ob-intro-logo) { opacity: 0; transition: opacity .3s var(--ease-out); }
+/* The intro logo lands in this spot, so the card's own copy appears only as it arrives. */
+.ob-emblem.ob-emblem-landing { animation: emblem-float 5.2s 1.4s ease-in-out infinite; }
+.ob-emblem.ob-emblem-landing .ob-emblem-core { animation: ob-core-land .2s .62s linear both; }
+.ob-emblem.ob-emblem-landing .ob-ring { opacity: 0; animation: spin 9s linear infinite, ob-ring-in .5s .58s var(--ease-out) forwards; }
+.ob-emblem.ob-emblem-landing .ob-ring-2 { animation: spin 15s linear infinite reverse, ob-ring-in-soft .5s .66s var(--ease-out) forwards; }
+@keyframes ob-core-land { from { opacity: 0; } }
+@keyframes ob-ring-in { from { opacity: 0; scale: .86; } to { opacity: 1; scale: 1; } }
+@keyframes ob-ring-in-soft { from { opacity: 0; scale: .86; } to { opacity: .55; scale: 1; } }
 .onboarding[data-intro="playing"] .ob-card {
   opacity: 0; transform: translateY(26px) scale(.94); pointer-events: none; animation: none;
 }
@@ -2145,7 +2204,7 @@ body[data-harness-open][data-harness-view="terminal"] { --harness-width: min(440
   display: flex; flex-direction: column; padding: 14px 14px 16px;
   background: var(--sidebar); border-left: 1px solid var(--rule);
   opacity: 0; transform: translateX(18px); pointer-events: none;
-  transition: transform .28s var(--ease-out), opacity .22s var(--ease-out);
+  transition: transform .3s var(--ease-out), opacity .22s var(--ease-out);
   will-change: transform, opacity;
 }
 body[data-harness-open] .harness-panel {

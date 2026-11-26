@@ -343,26 +343,39 @@
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const prev = animateTransition && !reduced ? stage.querySelector(".ob-step:not(.ob-leaving)") : null;
 
+    const card = overlay.querySelector(".ob-card");
     if (prev) {
       for (const stale of stage.querySelectorAll(".ob-step.ob-leaving")) stale.remove();
-      const fromHeight = stage.offsetHeight;
-      stage.style.height = fromHeight + "px";
+      /* The card animates from its current height to the new step's height. The leaving step is lifted out of the
+         layout where it stands, so it no longer props the card open and then lets it snap shut when removed. */
+      const from = card.getBoundingClientRect().height;
+      const stageBox = stage.getBoundingClientRect();
+      const prevBox = prev.getBoundingClientRect();
+      Object.assign(prev.style, {
+        position: "absolute", top: `${prevBox.top - stageBox.top}px`, left: `${prevBox.left - stageBox.left}px`,
+        width: `${prevBox.width}px`,
+      });
       prev.classList.add("ob-leaving");
       prev.dataset.dir = direction;
       view.dataset.dir = direction;
       stage.append(view);
-      const toHeight = view.offsetHeight;
+      Object.assign(card.style, { transition: "none", height: "" });
+      const to = card.getBoundingClientRect().height;
+      if (Math.abs(to - from) > 1) {
+        Object.assign(card.style, { height: `${from}px`, overflow: "hidden" });
+        card.getBoundingClientRect();
+        Object.assign(card.style, { transition: "height .48s cubic-bezier(.45, 0, .2, 1)", height: `${to}px` });
+      }
       requestAnimationFrame(() => {
-        stage.style.height = toHeight + "px";
         const target = view.querySelector("textarea, select, .ob-cta, .button.accent");
         target?.focus({ preventScroll: true });
       });
       stageTransitionTimer = setTimeout(() => {
         prev.remove();
-        stage.style.height = "";
-      }, 390);
+        Object.assign(card.style, { transition: "", height: "", overflow: "" });
+      }, 500);
     } else {
-      stage.style.height = "";
+      Object.assign(card.style, { transition: "", height: "", overflow: "" });
       view.dataset.dir = direction;
       stage.replaceChildren(view);
       requestAnimationFrame(() => {
@@ -407,6 +420,31 @@
       el("div", { className: "ob-shockwave ob-shockwave-2" }),
       el("div", { className: "ob-intro-logo" },
         el("img", { src: "/favicon.png", alt: "", width: 72, height: 72 })));
+  }
+
+  /* The intro's big logo travels into the card's logo spot and becomes it, instead of fading out while a second
+     copy fades in somewhere else. */
+  function flyLogoIntoCard(intro) {
+    const logo = intro.querySelector(".ob-intro-logo");
+    const card = overlay.querySelector(".ob-card");
+    const target = overlay.querySelector(".ob-step-hero .ob-emblem-core");
+    if (!logo || !card || !target) return;
+    // The landing emblem skips its own scale-in, so the measurement below is its final size.
+    overlay.querySelector(".ob-step-hero .ob-emblem")?.classList.add("ob-emblem-landing");
+    // Measure where the logo spot will be once the card has settled (it starts lowered and slightly shrunk).
+    Object.assign(card.style, { transform: "none", animation: "none" });
+    const end = target.getBoundingClientRect();
+    Object.assign(card.style, { transform: "", animation: "" });
+    const start = logo.getBoundingClientRect();
+    const dx = end.left + end.width / 2 - (start.left + start.width / 2);
+    const dy = end.top + end.height / 2 - (start.top + start.height / 2);
+    const scale = end.width / start.width;
+    logo.style.animation = "none";
+    logo.style.opacity = "1";
+    logo.style.transition = "transform .7s cubic-bezier(.22, 1, .36, 1), opacity .2s .62s linear";
+    logo.getBoundingClientRect();
+    logo.style.transform = `translate(${dx}px, ${dy}px) scale(${scale})`;
+    logo.style.opacity = "0";
   }
 
   function finish(applyChanges) {
@@ -489,6 +527,7 @@
       const reveal = () => {
         if (!overlay || overlay.dataset.intro !== "playing") return;
         clearIntroTimers();
+        flyLogoIntoCard(intro);
         overlay.dataset.intro = "reveal";
         introTimers.push(setTimeout(() => {
           intro.remove();

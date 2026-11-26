@@ -130,6 +130,31 @@ class ReliabilityTest(unittest.TestCase):
             self.assertEqual((self.root / "members.html").read_text(), self.MEMBERS.replace(
                 "  <title>Members</title>\n", '  <title>Members</title>\n  <link rel="stylesheet" href="style.css">\n'))
 
+    def test_added_lines_get_the_matched_lines_indentation(self):
+        # Qwen 27B in a live run: it matched "<li>…</li>" without the file's tabs, and the new shift landed at column 0.
+        page = "<ul>\n\t\t\t\t<li>Snack table</li>\n\t\t\t\t<li>Judging helpers</li>\n\t\t\t</ul>\n"
+        python = "def total(items):\n    count = 0\n    return count\n"
+        cases = [
+            # Added lines written from column 0 take the matched line's indentation.
+            (page, "<li>Judging helpers</li>", "<li>Judging helpers</li>\n<li>Cleanup crew</li>",
+             page.replace("helpers</li>\n", "helpers</li>\n\t\t\t\t<li>Cleanup crew</li>\n")),
+            (python, "count = 0", "count = 0\nfor item in items:\n    count += item",
+             python.replace("count = 0\n", "count = 0\n    for item in items:\n        count += item\n")),
+            # Lines that already carry the file's indentation are left as written.
+            (page, "<li>Judging helpers</li>", "<li>Judging helpers</li>\n\t\t\t\t<li>Cleanup crew</li>",
+             page.replace("helpers</li>\n", "helpers</li>\n\t\t\t\t<li>Cleanup crew</li>\n")),
+            (page, "<li>Judging helpers</li>", "<li>Judging helpers</li>\n\t\t\t</ul>\n\t\t\t<p>More</p>",
+             page.replace("helpers</li>\n", "helpers</li>\n\t\t\t</ul>\n\t\t\t<p>More</p>\n")),
+        ]
+        for before, old, new, expected in cases:
+            (self.root / "file.txt").write_text(before)
+            self.run_agent([
+                {"tool_calls": [tool("read_file", path="file.txt")]},
+                {"tool_calls": [tool("edit_file", path="file.txt", old_text=old, new_text=new)]},
+                {"content": "Edited."},
+            ])
+            self.assertEqual((self.root / "file.txt").read_text(), expected, new)
+
     def test_rewrite_that_drops_content_is_refused_once(self):
         (self.root / "members.html").write_text(self.MEMBERS)
         rewrite = self.MEMBERS.replace("    <li>Lena (captain)</li>\n    <li>Marcus (mechanical)</li>\n    <li>Priya (electrical)</li>\n", "")

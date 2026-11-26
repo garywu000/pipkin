@@ -443,6 +443,13 @@
                 <label><input type="radio" name="web-mode" value="off"><span>Off</span></label>
               </div>
             </div>
+            <div class="setting">
+              <div><strong>Messages during a run</strong><p>Steer adds your message to the current run. Queue sends it next, after the run finishes. <kbd class="alt-key">⌥</kbd>+Return does the other one.</p></div>
+              <div class="segmented" id="setting-busy-send" role="radiogroup" aria-label="Messages during a run">
+                <label><input type="radio" name="busy-send" value="steer"><span>Steer</span></label>
+                <label><input type="radio" name="busy-send" value="queue"><span>Queue</span></label>
+              </div>
+            </div>
             <div class="setting stack">
               <label for="setting-steps"><strong>Step limit</strong></label>
               <div class="select-wrap">
@@ -560,6 +567,7 @@
         <div id="live-run-banner" class="live-run-banner" role="status" hidden></div>
         <div id="pressure-banner" class="pressure-banner" role="status" hidden></div>
         <div id="feedback" class="feedback" role="status"></div>
+        <div id="message-queue" class="message-queue" aria-label="Queued messages" hidden></div>
         <div class="composer-box">
           <div id="draft-files" class="attachments draft" aria-label="Attachments" hidden></div>
           <div id="skill-menu" class="skill-menu" role="listbox" aria-label="Commands and tools" hidden></div>
