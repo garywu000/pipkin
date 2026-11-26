@@ -7,7 +7,7 @@ import sys
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import scheduler
 from scheduler import Scheduler, Store, clean_task, next_run
@@ -32,6 +32,168 @@ def post(port, path, payload):
 
 # Wednesday, November 25, 2026
 WED = datetime.datetime(2026, 11, 25, 9, 0)
+
+
+def proposal_json(**changes):
+    return dict({"is_schedule_request": True, "title": "Notes summary", "prompt": "Summarize the notes.",
+                 "kind": "weekly", "days": ["Wed"], "date": None, "time": "18:00", "access": "read",
+                 "web": False, "skill_name": None, "needs_clarification": []}, **changes)
+
+
+class ProposalTest(unittest.TestCase):
+    def test_prefilter(self):
+        for request in (
+            "I want you to read my notes and condense them into a summary every Wednesday at 6pm",
+            "Could you please summarize my notes each Friday?",
+            "I'd like you to translate my notes every Friday",
+            "Every Wednesday at 6pm, summarize my notes.",
+            "Remind me to check my notes tomorrow at 9am",
+            "Schedule a report for next Friday", "Check my notes daily", "Read my notes at 6pm",
+        ):
+            with self.subTest(request=request):
+                self.assertTrue(scheduler.looks_like_schedule_request(request))
+        for request in (
+            "Why do we have lab every Wednesday at 6pm?", "Translate 'every Wednesday at 6pm' into Spanish",
+            "What is a daily schedule?", "I read my notes every Wednesday", "I used to read my notes every Wednesday",
+            "/schedule every Wednesday", "Summarize my notes", "Hello", None,
+        ):
+            with self.subTest(request=request):
+                self.assertFalse(scheduler.looks_like_schedule_request(request))
+
+    def test_weekly_mapping_and_no_persistent_fields(self):
+        result = scheduler.normalize_proposal(proposal_json(days=["Sun", "Wed", "Wed"]), WED)
+        self.assertEqual(result["task"]["schedule"], {"kind": "weekly", "days": [2, 6], "time": "18:00"})
+        self.assertEqual(result["nextRun"], "2026-11-25T18:00:00")
+        for field in ("id", "created", "folder", "skill", "confirmationId"):
+            self.assertNotIn(field, result["task"])
+
+    def test_default_time_and_tomorrow(self):
+        result = scheduler.normalize_proposal(proposal_json(), WED, "Summarize the notes every Wednesday")
+        self.assertEqual(result["task"]["schedule"]["time"], "09:00")
+        self.assertIn("time", result["needsClarification"])
+        result = scheduler.normalize_proposal(proposal_json(kind="once", date="2026-11-29", time="09:00"),
+                                              WED, "Summarize notes tomorrow at 9am")
+        self.assertEqual(result["nextRun"], "2026-11-26T09:00:00")
+        result = scheduler.normalize_proposal(proposal_json(kind="once", date="2026-11-27"),
+                                              WED, "Review tomorrow's agenda on Friday at 6pm")
+        self.assertEqual(result["nextRun"], "2026-11-27T18:00:00")
+        result = scheduler.normalize_proposal(proposal_json(), WED, "Summarize notes every Wednesday at 6")
+        self.assertIn("time", result["needsClarification"])
+
+    def test_permissions_require_explicit_request(self):
+        raw = proposal_json(access="create", web=True, skill_name="/notes-summary", skill={"instructions": "unsafe"})
+        result = scheduler.normalize_proposal(raw, WED, "Summarize notes every Wednesday at 6pm")
+        self.assertEqual(result["task"]["access"], "read")
+        self.assertFalse(result["task"]["web"])
+        self.assertEqual(result["skillName"], "notes-summary")
+        self.assertNotIn("skill", result["task"])
+        result = scheduler.normalize_proposal(raw, WED, "Create a new PDF file and search the web every Wednesday at 6pm")
+        self.assertEqual(result["task"]["access"], "create")
+        self.assertTrue(result["task"]["web"])
+        result = scheduler.normalize_proposal(raw, WED, "Read only: do not create files or use the internet every Wednesday at 6pm")
+        self.assertEqual(result["task"]["access"], "read")
+        self.assertFalse(result["task"]["web"])
+        self.assertEqual(scheduler.normalize_proposal(proposal_json(access="auto"), WED)["task"]["access"], "read")
+        result = scheduler.normalize_proposal(raw, WED, "Write a summary of the documents every Wednesday at 6pm")
+        self.assertEqual(result["task"]["access"], "read")
+        result = scheduler.normalize_proposal(raw, WED, "Save the summary to a new text file every Wednesday at 6pm")
+        self.assertEqual(result["task"]["access"], "create")
+
+    def test_invalid_and_unsupported_results(self):
+        self.assertIsNone(scheduler.normalize_proposal({"is_schedule_request": False}, WED))
+        for raw in ([], {"is_schedule_request": "true"}, proposal_json(days=[]), proposal_json(days=[2]),
+                    proposal_json(kind="monthly"), proposal_json(kind="once", date=None),
+                    proposal_json(kind="once", date="2020-01-01"), proposal_json(time="25:00"),
+                    proposal_json(prompt=""), proposal_json(needs_clarification="time")):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                scheduler.normalize_proposal(raw, WED)
+
+
+class ProposalEndpointTest(unittest.TestCase):
+    def test_http_proposal_then_confirm(self):
+        import server
+        from uuid import uuid4
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ws").mkdir()
+            with patch.object(server, "SETTINGS_FILE", root / "settings.json"), patch.object(server, "WORKSPACES", {}), \
+                 patch.object(server, "SCHEDULER", None), patch.object(server, "SESSIONS", server.BrowserSessions()) as sessions, \
+                 patch.object(sessions, "ensure_loaded"), patch.object(server.ChatHandler, "agent_step") as step:
+                step.return_value = {"content": json.dumps(proposal_json())}
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.ChatHandler)
+                Thread(target=httpd.serve_forever, daemon=True).start()
+                try:
+                    port = httpd.server_address[1]
+                    self.assertEqual(post(port, "/api/schedules/propose", {"request": "Hello"}), {"isSchedule": False})
+                    step.assert_not_called()
+                    result = post(port, "/api/schedules/propose", {"request": "Summarize notes every Wednesday at 6pm"})
+                    self.assertTrue(result["isSchedule"])
+                    self.assertEqual(server.schedule_state()["tasks"], [])
+                    payload = {"task": result["proposal"]["task"], "confirmationId": str(uuid4())}
+                    with self.assertRaises(RuntimeError):
+                        post(port, "/api/schedules/save", payload)
+                    payload["workspace"] = server.grant_workspace(server.Workspace(root / "ws"))
+                    saved = post(port, "/api/schedules/save", payload)
+                    self.assertEqual(post(port, "/api/schedules/save", payload)["task"]["id"], saved["task"]["id"])
+                    self.assertEqual(len(server.schedule_state()["tasks"]), 1)
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+
+    def test_propose_and_explicit_idempotent_confirm(self):
+        import server
+        from uuid import uuid4
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ws").mkdir()
+            with patch.object(server, "SETTINGS_FILE", root / "settings.json"), patch.object(server, "WORKSPACES", {}), \
+                 patch.object(server, "SCHEDULER", None), patch.object(server, "SESSIONS"), \
+                 patch.object(server, "select", return_value=([], [], [])):
+                handler = Mock()
+                handler.read_json.return_value = {"request": "Summarize my notes every Wednesday at 6pm"}
+                handler.agent_step.return_value = {"content": json.dumps(proposal_json())}
+                server.ChatHandler.schedule_propose(handler)
+                status, body = handler.send_json.call_args.args
+                self.assertEqual(status, 200)
+                self.assertTrue(body["isSchedule"])
+                self.assertFalse((root / "schedules.json").exists())
+                self.assertEqual(handler.agent_step.call_args.args[1:3], ([], False))
+                self.assertIs(handler.agent_step.call_args.kwargs["output_schema"], scheduler.PROPOSAL_SCHEMA)
+                key = server.grant_workspace(server.Workspace(root / "ws"))
+                handler.read_json.return_value = {"task": body["proposal"]["task"], "workspace": key,
+                                                  "confirmationId": str(uuid4())}
+                server.ChatHandler.schedule_action(handler, "save")
+                status, saved = handler.send_json.call_args.args
+                self.assertEqual(status, 200)
+                server.ChatHandler.schedule_action(handler, "save")
+                self.assertEqual(handler.send_json.call_args.args[1]["task"]["id"], saved["task"]["id"])
+                self.assertEqual(len(server.schedule_state()["tasks"]), 1)
+
+    def test_false_invalid_and_busy_fallthrough(self):
+        import server
+        with patch.object(server, "SESSIONS"), patch.object(server, "select", return_value=([], [], [])), \
+             patch.object(server, "schedule_store") as store:
+            handler = Mock()
+            handler.read_json.return_value = {"request": "Why do we have lab every Wednesday?"}
+            server.ChatHandler.schedule_propose(handler)
+            handler.send_json.assert_called_with(200, {"isSchedule": False})
+            handler.agent_step.assert_not_called()
+            handler.read_json.return_value = {"request": "Check notes every Wednesday at 6pm"}
+            handler.agent_step.return_value = {"content": '{"is_schedule_request": false}'}
+            server.ChatHandler.schedule_propose(handler)
+            handler.send_json.assert_called_with(200, {"isSchedule": False})
+            handler.agent_step.return_value = {"content": "not JSON"}
+            server.ChatHandler.schedule_propose(handler)
+            self.assertEqual(handler.send_json.call_args.args[0], 422)
+            self.assertTrue(server.GENERATION.acquire(blocking=False), "proposal released the generation lock")
+            try:
+                handler.agent_step.reset_mock()
+                server.ChatHandler.schedule_propose(handler)
+                self.assertEqual(handler.send_json.call_args.args[0], 409)
+                handler.agent_step.assert_not_called()
+            finally:
+                server.GENERATION.release()
+            store.assert_not_called()
 
 
 class NextRunTest(unittest.TestCase):

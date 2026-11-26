@@ -9,6 +9,7 @@ import datetime
 from contextlib import contextmanager
 import json
 import os
+import re
 import sys
 import threading
 import uuid
@@ -26,6 +27,121 @@ TASK_LIMIT = 30
 INBOX_LIMIT = 60
 TITLE_LIMIT = 80
 PROMPT_LIMIT = 4000
+
+DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+CLARIFICATION_FIELDS = ("time", "date", "days", "kind", "prompt", "skill_name", "access", "web")
+PROPOSAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_schedule_request": {"type": "boolean"},
+        "title": {"type": "string"},
+        "prompt": {"type": "string"},
+        "kind": {"type": "string", "enum": list(KINDS)},
+        "days": {"type": "array", "items": {"type": "string", "enum": list(DAY_NAMES)}},
+        "date": {"type": ["string", "null"]},
+        "time": {"type": ["string", "null"]},
+        "access": {"type": "string", "enum": list(ACCESS)},
+        "web": {"type": "boolean"},
+        "skill_name": {"type": ["string", "null"]},
+        "needs_clarification": {"type": "array", "items": {"type": "string", "enum": list(CLARIFICATION_FIELDS)}},
+    },
+    "additionalProperties": False,
+}
+PROPOSAL_SCHEMA["required"] = list(PROPOSAL_SCHEMA["properties"])
+
+_DAY = r"(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
+_CADENCE = re.compile(
+    rf"\b(?:(?:every|each)\s+(?:{_DAY}|days?|weekdays?|weekends?|weeks?|mornings?|afternoons?|evenings?|nights?)"
+    rf"|daily|weekly|nightly|weekdays|weekends|tomorrow|tonight|next\s+{_DAY}|on\s+{_DAY}s?"
+    r"|\d{4}-\d{2}-\d{2})\b", re.I)
+_CLOCK = re.compile(r"\b(?:\d{1,2}:\d{2}(?:\s*[ap]\.?m\.?)?|\d{1,2}\s*[ap]\.?m\.?|at\s+\d{1,2}(?!\d)|noon|midnight)\b", re.I)
+_AMBIGUOUS_CLOCK = re.compile(r"\bat\s+(?:[1-9]|1[0-2])\b(?!\s*(?::\d{2}|[ap]\.?m))", re.I)
+_ACTION = (r"(?:read|review|check|summari[sz]e|condense|monitor|scan|collect|find|search|look|research|write|save|"
+           r"create|generate|prepare|compile|send|remind|notify|report|run|organize|update|backup|back\s+up|"
+           r"download|list|analy[sz]e|compare|translate|make|draft|schedule|track|give|tell|fetch|open|extract|"
+           r"calculate|convert|clean|process|email|produce|export|deliver|audit|verify|log|repeat)")
+_REQUEST = re.compile(
+    rf"^(?:(?:please|kindly)\s+)?{_ACTION}\b|"
+    rf"\b(?:i (?:want|need|would like) you to|i['’]d like you to|(?:can|could|would|will) you(?: please)?|please|kindly)\s+{_ACTION}\b", re.I)
+_ABOUT = re.compile(r"^(?:why|what|when|where|who|how|is|are|do|does|did|was|were|should|has|have)\b|"
+                    r"^(?:please\s+)?(?:explain|define|describe|tell me (?:about|why|how|what))\b|"
+                    r"^(?:please\s+)?translate\s+(?:this\s+)?(?:['\"“‘]|every\b|each\b|daily\b|weekly\b)", re.I)
+_FILE_NOUN = r"(?:files?|documents?|spreadsheets?|pdfs?|csvs?|workbooks?)"
+_FILE_MODIFIERS = r"(?:(?:a|an|the|new|another|separate|dated|daily|weekly|summary|text|markdown|word|pdf|csv|excel|output)\s+)*"
+_CREATE_FILE = re.compile(
+    rf"\b(?:write|save|create|generate|export|make|produce|draft)\s+{_FILE_MODIFIERS}{_FILE_NOUN}\b|"
+    rf"\b(?:write|save|create|generate|export|produce)\b[^.!?\n]{{0,100}}\b(?:to|as|into)\s+{_FILE_MODIFIERS}{_FILE_NOUN}\b|"
+    r"\b(?:save|export|write)\b[^.!?\n]{0,100}\b(?:in|to|into)\s+(?:(?:a|the|my|this)\s+)?folder\b", re.I)
+_WEB = re.compile(r"\b(?:search|browse|check|look up|research|fetch|read|monitor|visit|use)\b[^.!?\n]{0,80}"
+                  r"(?:\b(?:the web|the internet|online|websites?|web pages?)\b|https?://)", re.I)
+_NO_CREATE = re.compile(r"\b(?:read[- ]only|(?:do not|don't|never|without)\s+"
+                        r"(?:[^.!?\n]{0,100}\b(?:or|and)\s+)?(?:write|save|create|generate|modify|edit|change))\b", re.I)
+_NO_WEB = re.compile(r"\b(?:offline|no (?:web|internet)|(?:do not|don't|never|without)\s+"
+                     r"(?:[^.!?\n]{0,100}\b(?:or|and)\s+)?(?:browse|search|use)\s+(?:the )?(?:web|internet))\b", re.I)
+
+
+def looks_like_schedule_request(text):
+    """Cheap, conservative gate. The model still decides whether a candidate is a request."""
+    if not isinstance(text, str):
+        return False
+    text = text.strip()
+    if not text or text.startswith("/") or _ABOUT.search(text):
+        return False
+    if not (_CADENCE.search(text) or _CLOCK.search(text)):
+        return False
+    if _REQUEST.search(text):
+        return True
+    # Accept timing-first imperatives, e.g. "Every Wednesday at 6pm, summarize my notes."
+    return bool(_CADENCE.match(text) and re.search(rf"[,;:]\s*(?:please\s+)?{_ACTION}\b", text, re.I))
+
+
+def normalize_proposal(raw, now, request=""):
+    """Return a validated draft, without creating a task or trusting model-granted permissions."""
+    if not isinstance(raw, dict) or type(raw.get("is_schedule_request")) is not bool:
+        raise ValueError("Invalid schedule proposal.")
+    if not raw["is_schedule_request"]:
+        return None
+    clarification = raw.get("needs_clarification", [])
+    if not isinstance(clarification, list) or not all(isinstance(field, str) for field in clarification):
+        raise ValueError("Invalid schedule clarification.")
+    clarification = [field for field in CLARIFICATION_FIELDS if field in clarification]
+    schedule = {"kind": raw.get("kind"), "time": raw.get("time")}
+    if schedule["time"] in (None, "") or (request and not _CLOCK.search(request)):
+        schedule["time"] = "09:00"
+        if "time" not in clarification:
+            clarification.append("time")
+    elif _AMBIGUOUS_CLOCK.search(request) and "time" not in clarification:
+        clarification.append("time")
+    if schedule["kind"] == "weekly":
+        days = raw.get("days")
+        if not isinstance(days, list) or not days or not all(isinstance(day, str) and day in DAY_NAMES for day in days):
+            raise ValueError("Choose the days for the weekly task.")
+        schedule["days"] = [DAY_NAMES.index(day) for day in days]
+    elif schedule["kind"] == "once":
+        date = raw.get("date")
+        if date == "tomorrow" or re.search(r"\btomorrow\s+(?:at\b|noon\b|midnight\b|\d)", request, re.I):
+            date = (now.date() + datetime.timedelta(days=1)).isoformat()
+        elif date == "today":
+            date = now.date().isoformat()
+        schedule["date"] = date
+    skill_name = raw.get("skill_name")
+    if skill_name is not None:
+        if not isinstance(skill_name, str) or not skills_module.NAME_RE.fullmatch(skill_name.strip().lstrip("/").lower()):
+            skill_name = None
+        else:
+            skill_name = skill_name.strip().lstrip("/").lower()
+    task = clean_task({
+        "title": raw.get("title"), "prompt": raw.get("prompt"), "schedule": schedule,
+        "access": "create" if raw.get("access") == "create" and _CREATE_FILE.search(request) and not _NO_CREATE.search(request) else "read",
+        "web": raw.get("web") is True and bool(_WEB.search(request)) and not _NO_WEB.search(request),
+        "enabled": True,
+    })
+    upcoming = next_run(task["schedule"], now)
+    if upcoming is None:
+        raise ValueError("That time has already passed. Choose a future time.")
+    task.pop("id")
+    task.pop("created")
+    return {"task": task, "nextRun": iso(upcoming), "needsClarification": clarification, "skillName": skill_name}
 
 
 def iso(moment):
