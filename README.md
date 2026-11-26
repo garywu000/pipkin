@@ -5,11 +5,11 @@
 <p align="center"><strong>Local AI chat and a workspace agent for Mac and Windows.</strong><br>
 Chat with an Ollama model on your computer, or give Agent a folder and turn your files into a website, document, or presentation.</p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/download/v2.3.0/Pipkin-macos-arm64.zip"><img src="docs/download-macos.svg" alt="Download Pipkin for Mac, Apple Silicon ZIP" width="264" height="76"></a>
-  <a href="https://github.com/garywu000/pipkin/releases/download/v2.3.0/Pipkin-windows-x64.zip"><img src="docs/download-windows.svg" alt="Download Pipkin for Windows, x64 ZIP" width="264" height="76"></a>
+  <a href="https://github.com/garywu000/pipkin/releases/download/v2.3.3/Pipkin-macos-arm64.zip"><img src="docs/download-macos.svg" alt="Download Pipkin for Mac, Apple Silicon ZIP" width="264" height="76"></a>
+  <a href="https://github.com/garywu000/pipkin/releases/download/v2.3.3/Pipkin-windows-x64.zip"><img src="docs/download-windows.svg" alt="Download Pipkin for Windows, x64 ZIP" width="264" height="76"></a>
 </p>
 <p align="center">
-  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.3.0"><strong>v2.3.0 release notes</strong></a> ·
+  <a href="https://github.com/garywu000/pipkin/releases/tag/v2.3.3"><strong>v2.3.3 release notes</strong></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#choosing-a-model-for-agent">Choose a model</a> ·
   <a href="#shareable-skills">Shareable skills</a> ·
@@ -167,6 +167,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.3.3](https://github.com/garywu000/pipkin/releases/tag/v2.3.3) | Scheduled task pages with run history and live progress, and any run opens as an Agent chat. Optional beta updates, labeled as beta in the app, and required updates only a whole major version behind. |
 | [v2.3.2 beta](https://github.com/garywu000/pipkin/releases/tag/v2.3.2) | Scheduled tasks get their own pages: task cards, a History of every run with live progress, and any run opens as an Agent chat. |
 | [v2.3.1 beta](https://github.com/garywu000/pipkin/releases/tag/v2.3.1) | Beta updates: turn them on in Settings › General to get test versions early, each one optional. Pipkin now requires an update only when it is a whole major version behind. Shorter one-line update notice. |
 | [v2.3.0](https://github.com/garywu000/pipkin/releases/tag/v2.3.0) | Ask for a scheduled task in your own words, in Chat or Agent mode ("check my notes every Wednesday at 6pm"). Pipkin shows a confirmation card and creates the task only when you click Create task. |

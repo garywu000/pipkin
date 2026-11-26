@@ -170,6 +170,7 @@
     byId("schedule-read-all").hidden = view !== "inbox" || !unread;
     byId("schedule-inbox").hidden = view !== "inbox";
     byId("schedule-tasks").hidden = view !== "tasks";
+    dialog().dataset.detail = String(view === "tasks" && Boolean(detailId && state.tasks.some((item) => item.id === detailId)));
     renderRunning();
     if (view === "inbox") renderInbox();
     else renderTasks();
@@ -350,16 +351,26 @@
 
   function taskCard(task) {
     const status = taskStatus(task);
+    const running = state.running?.taskId === task.id;
     const failed = ["error", "stopped"].includes(task.lastStatus) && status.key !== "running";
+    const nextText = running ? "Running now" : task.enabled && task.nextRun ? `Next ${moment(task.nextRun)}` : "Off";
     const card = el("button", { type: "button", className: "task-card", dataset: { status: status.key },
       "aria-label": `${task.title}, ${status.text}, ${describe(task.schedule)}` },
-      el("span", { className: "task-card-head" },
-        el("strong", { text: task.title }),
-        failed ? el("span", { className: "task-card-warn", title: `Last run ${task.lastStatus === "error" ? "failed" : "stopped"}` }, icon("alert")) : null,
-        task.unreadRuns ? el("span", { className: "task-card-dot", title: `${task.unreadRuns} new ${task.unreadRuns === 1 ? "run" : "runs"}` }) : null),
+      el("span", { className: "task-card-top" },
+        el("span", { className: "task-card-icon", "aria-hidden": "true" },
+          running ? el("span", { className: "schedule-spinner" }) : icon("clock")),
+        el("span", { className: "task-card-title-group" },
+          el("strong", { text: task.title }),
+          el("span", { className: "task-card-when", text: describe(task.schedule) })),
+        el("span", { className: "task-card-badges" },
+          failed ? el("span", { className: "task-card-warn", title: `Last run ${task.lastStatus === "error" ? "failed" : "stopped"}` }, icon("alert")) : null,
+          task.unreadRuns ? el("span", { className: "task-card-dot", title: `${task.unreadRuns} new ${task.unreadRuns === 1 ? "run" : "runs"}` }) : null,
+          el("span", { className: "task-status-pill", dataset: { status: status.key }, text: status.text }))),
       el("span", { className: "task-card-prompt", text: task.prompt || (task.skill ? `/${task.skill.name}` : "") }),
-      el("span", { className: "task-card-meta" },
-        el("span", { className: "task-card-status", text: status.text }), el("span", { text: " · " + describe(task.schedule) })));
+      el("span", { className: "task-card-foot" },
+        task.folderName ? el("span", { className: "task-card-folder" }, icon("folder"), el("span", { text: task.folderName })) : null,
+        el("span", { className: "task-card-next", text: nextText }),
+        icon("chevron-right", "icon task-card-chev")));
     card.addEventListener("click", () => openTask(task.id));
     return card;
   }
@@ -391,12 +402,14 @@
   function taskPage(task) {
     const status = taskStatus(task);
     const running = state.running?.taskId === task.id;
-    const back = el("button", { type: "button", className: "task-page-back" }, icon("chevron-right", "icon back-chevron"), el("span", { text: "Scheduled tasks" }));
+    const back = el("button", { type: "button", className: "button small task-page-back" },
+      icon("chevron-right", "icon back-chevron"), el("span", { text: "All tasks" }));
     back.addEventListener("click", () => {
       detailId = null;
       render();
     });
-    const edit = el("button", { type: "button", className: "icon-button small", title: "Edit", "aria-label": `Edit “${task.title}”` }, icon("edit"));
+    const edit = el("button", { type: "button", className: "button small task-page-edit", title: "Edit task", "aria-label": `Edit “${task.title}”` },
+      icon("edit"), el("span", { text: "Edit" }));
     edit.addEventListener("click", () => openEditor(task));
     const remove = el("button", { type: "button", className: deleteDetailArmed ? "button small danger-text" : "icon-button small",
       title: "Delete task", "aria-label": `Delete “${task.title}”` }, deleteDetailArmed ? el("span", { text: "Delete?" }) : icon("trash"));
@@ -414,14 +427,15 @@
     });
     const primary = running
       ? el("button", { type: "button", className: "button small", text: "Stop" })
-      : el("button", { type: "button", className: "button small primary", disabled: status.text === "Starting soon" || !state.active }, icon("play"), el("span", { text: "Run now" }));
+      : el("button", { type: "button", className: "button small accent task-page-run", disabled: status.text === "Starting soon" || !state.active },
+        icon("play"), el("span", { text: "Run now" }));
     primary.addEventListener("click", () => {
       primary.disabled = true;
       if (running) void act("/api/schedules/stop", {});
       else void act("/api/schedules/run", { id: task.id }).then((ok) => { if (ok) toast(`Starting “${task.title}”`); else primary.disabled = false; });
     });
-    const header = el("div", { className: "task-page-head" },
-      el("div", { className: "task-page-crumbs" }, back, el("span", { className: "task-page-sep", text: "/" }), el("strong", { text: task.title })),
+    const nav = el("div", { className: "task-page-nav" },
+      back,
       el("div", { className: "task-page-actions" }, edit, remove, primary));
 
     const toggle = el("input", { type: "checkbox", checked: Boolean(task.enabled) });
@@ -430,33 +444,67 @@
         if (!ok) toggle.checked = !toggle.checked;
       });
     });
-    const fact = (label, ...value) => el("div", { className: "task-fact" }, el("span", { className: "task-fact-label", text: label }), el("div", { className: "task-fact-value" }, ...value));
-    const facts = el("div", { className: "task-page-facts" },
-      fact("Status", el("label", { className: "task-status-toggle" },
-        el("span", { className: "switch" }, toggle, el("span"), el("span", { className: "sr-only", text: "Task on" })),
-        el("span", { className: "task-status-pill", dataset: { status: status.key }, text: status.text }))),
-      task.missed ? fact("Missed", missedNote(task)) : null,
-      task.waitReason && !running ? fact("Waiting", el("span", { text: `Because ${task.waitReason}.` })) : null,
-      fact("Repeats", el("span", { text: describe(task.schedule) })),
-      fact("Next run", el("span", { text: task.enabled && task.nextRun ? moment(task.nextRun) : "Off" })),
-      fact("Folder", el("span", { className: "task-folder-chip", title: task.folder || "" }, icon("folder"), el("span", { text: task.folderName || task.folder || "" }))),
-      fact("Pipkin may", el("span", { text: (task.access === "create" ? "Read files and create new ones" : "Read files only") + (task.web ? " · search the web" : "") + " · never runs commands" })),
-      task.skill?.name ? fact("Skill", el("span", { text: `/${task.skill.name}` })) : null);
 
-    const instructions = el("p", { className: "task-instructions" + (showAllInstructions ? " open" : ""), text: task.prompt || (task.skill ? `Runs /${task.skill.name}.` : "") });
+    const scheduleLine = [
+      describe(task.schedule),
+      task.enabled && task.nextRun ? `Next: ${moment(task.nextRun)}` : "Paused",
+    ].filter(Boolean).join(" · ");
+
+    const accessSummary = (task.access === "create" ? "Creates new files" : "Read only") + (task.web ? " · Web" : "");
+    const safetySummary = task.access === "create"
+      ? "Never edits existing files or runs commands"
+      : "Never runs commands";
+    const metaChip = (glyph, labelText, valueText, titleText = "") => el("div", { className: "schedule-proposal-chip task-hero-chip", title: titleText },
+      icon(glyph),
+      el("span", { className: "chip-label", text: labelText }),
+      el("strong", { text: valueText }));
+
+    const hero = el("section", { className: "task-hero-card", dataset: { status: status.key } },
+      el("div", { className: "task-hero-top" },
+        el("span", { className: "task-hero-icon", "aria-hidden": "true" },
+          running ? el("span", { className: "schedule-spinner" }) : icon("clock")),
+        el("div", { className: "task-hero-heading" },
+          el("h3", { text: task.title }),
+          el("p", { className: "task-hero-schedule", text: scheduleLine })),
+        el("label", { className: "task-status-toggle", title: task.enabled ? "Turn task off" : "Turn task on" },
+          el("span", { className: "task-status-pill", dataset: { status: status.key }, text: status.text }),
+          el("span", { className: "switch" }, toggle, el("span"), el("span", { className: "sr-only", text: "Task on" })))),
+      task.missed ? missedNote(task) : null,
+      task.waitReason && !running ? el("div", { className: "task-wait-banner" }, icon("clock"), el("span", { text: `Waiting because ${task.waitReason}.` })) : null,
+      el("div", { className: "task-hero-chips" },
+        metaChip("folder", "Folder", task.folderName || task.folder || "None", task.folder || ""),
+        metaChip("shield", "Access", accessSummary),
+        metaChip("check", "Safeguards", safetySummary),
+        task.skill?.name ? metaChip("sparkle", "Skill", `/${task.skill.name}`) : null));
+
+    const promptText = task.prompt || (task.skill ? `Runs /${task.skill.name}.` : "");
+    const instructions = el("p", { className: "task-instructions" + (showAllInstructions ? " open" : ""), text: promptText });
     const more = (task.prompt || "").length > 260
       ? el("button", { type: "button", className: "inbox-more", text: showAllInstructions ? "Show less" : "Show all" }) : null;
     more?.addEventListener("click", () => {
       showAllInstructions = !showAllInstructions;
       renderTasks();
     });
-    const history = detailHistory.length
+    const instructionsCard = el("section", { className: "task-section-card" },
+      el("div", { className: "task-section-head" },
+        el("span", { className: "task-section-title", text: "What Pipkin does each run" }),
+        more),
+      el("div", { className: "task-instructions-well" }, instructions));
+
+    const runCount = detailHistory.length || task.runCount || 0;
+    const historyBody = detailHistory.length
       ? el("div", { className: "task-history" }, detailHistory.map((run) => historyRow(run, task)))
-      : el("p", { className: "task-note", text: task.runCount ? "Loading history…" : "No runs yet. Use Run now to try it." });
-    const side = el("div", { className: "task-page-main" },
-      el("span", { className: "task-fact-label", text: "Instructions" }), instructions, more,
-      el("span", { className: "task-fact-label task-history-label", text: "History" }), history);
-    return el("div", { className: "task-page" }, header, el("div", { className: "task-page-body" }, facts, side));
+      : el("div", { className: "task-history-empty" },
+        icon("clock"),
+        el("span", { text: task.runCount ? "Loading run history…" : "No runs yet — click Run now above to try this task." }));
+    const historyCard = el("section", { className: "task-section-card" },
+      el("div", { className: "task-section-head" },
+        el("span", { className: "task-section-title", text: "Recent runs" }),
+        runCount ? el("span", { className: "task-section-count", text: String(runCount) }) : null,
+        detailHistory.length ? el("span", { className: "task-section-hint", text: "Click a run to open as chat" }) : null),
+      historyBody);
+
+    return el("div", { className: "task-page" }, nav, hero, instructionsCard, historyCard);
   }
 
   function missedNote(task) {
@@ -467,7 +515,7 @@
     });
     const skip = el("button", { type: "button", className: "button small", text: "Skip" });
     skip.addEventListener("click", () => void act("/api/schedules/skip", { id: task.id }));
-    return el("div", { className: "task-missed" }, el("span", { text: `${moment(task.missed)}, while Pipkin was closed.` }), run, skip);
+    return el("div", { className: "task-missed" }, el("span", { text: `Missed ${moment(task.missed)} while Pipkin was closed.` }), run, skip);
   }
 
   function historyRow(run, task) {
@@ -479,9 +527,12 @@
     const row = el("button", { type: "button", className: "task-history-row", dataset: { status: run.status },
       title: run.summary ? run.summary.slice(0, 300) : "" },
       el("span", { className: "task-history-glyph" }, live ? el("span", { className: "schedule-spinner", "aria-hidden": "true" }) : icon(info.glyph)),
-      el("span", { className: "task-history-when", text: moment(run.startedAt) + (run.trigger === "manual" ? " · run by you" : "") }),
+      el("span", { className: "task-history-info" },
+        el("span", { className: "task-history-when", text: moment(run.startedAt) }),
+        run.trigger === "manual" ? el("span", { className: "task-history-trigger", text: "Manual run" }) : null),
       el("span", { className: "task-history-status", text: detail }),
-      !run.read && !live ? el("span", { className: "task-card-dot", title: "New" }) : null);
+      !run.read && !live ? el("span", { className: "task-card-dot", title: "New" }) : null,
+      icon("chevron-right", "icon task-history-chev"));
     row.addEventListener("click", async () => {
       if (!options.openRun) return;
       if (!run.read && !live) void act("/api/schedules/read", { id: run.id }, { quiet: true });

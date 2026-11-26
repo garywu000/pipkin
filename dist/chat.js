@@ -2273,7 +2273,8 @@ function updateParts(job, { required = false } = {}) {
   let message = required
     ? `You're on v${updateInfo.current || ""}, a whole version behind. Update to ${label} to keep using Pipkin.`
     : beta ? `Pipkin v${updateInfo.latest} is ready to test` : `Pipkin v${updateInfo.latest} is available`;
-  let detail = required ? "" : beta ? "may have bugs" : `You're on v${updateInfo.current || ""}`;
+  let detail = required ? "" : beta ? "may have bugs"
+    : `You're on v${updateInfo.current || ""}${updateInfo.currentChannel === "beta" ? " beta" : ""}`;
   let progress = null;
   let glyph = job.state === "error" ? "alert" : job.state === "ready" ? "check" : "download";
   if (job.state === "downloading") {
@@ -2422,7 +2423,7 @@ function renderUpdateSettingNote() {
   const btn = byId("check-updates-now");
   if (btn) btn.disabled = settings.checkUpdates === false;
   if (!note) return;
-  const cur = updateInfo?.current ? `v${updateInfo.current}` : "Current version";
+  const cur = updateInfo?.current ? `v${updateInfo.current}${updateInfo.currentChannel === "beta" ? " beta" : ""}` : "Current version";
   if (settings.checkUpdates === false) {
     note.textContent = `${cur} · Automatic checks off. Pipkin won't contact GitHub Releases.`;
     return;
@@ -2482,7 +2483,7 @@ async function checkForUpdates(force = false, announceResult = false) {
     renderUpdateSettingNote();
     if (announceResult) {
       if (updateInfo.available) toast(`Pipkin v${updateInfo.latest}${updateInfo.channel === "beta" ? " beta" : ""} is available`);
-      else if (updateInfo.checked) toast(`Pipkin v${updateInfo.current} is up to date`);
+      else if (updateInfo.checked) toast(`Pipkin v${updateInfo.current}${updateInfo.currentChannel === "beta" ? " beta" : ""} is up to date`);
       else toast("Could not reach GitHub Releases right now");
     }
   } catch {

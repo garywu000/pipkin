@@ -120,6 +120,7 @@ class UpdateCheckTest(unittest.TestCase):
             result = server.check_latest_release(opener=self.releases(*listing))   # cache is ignored: setting changed
             self.assertTrue(result["available"])
             self.assertEqual((result["latest"], result["channel"]), ("2.3.1", "beta"))
+            self.assertEqual(result["currentChannel"], "stable", "2.3.0 is an official release")
             self.assertFalse(result["required"])
             self.fresh()
             newer_official = server.check_latest_release(opener=self.releases("v2.4.0", ("v2.3.1", True)))
@@ -129,6 +130,10 @@ class UpdateCheckTest(unittest.TestCase):
             self.fresh()
             on_beta = server.check_latest_release(opener=self.releases("v2.3.0", ("v2.3.1", True)))
             self.assertFalse(on_beta["available"], "turning betas off never offers an older version")
+            self.assertEqual(on_beta["currentChannel"], "beta", "this copy's own release is a pre-release")
+            self.fresh()
+            promoted = server.check_latest_release(opener=self.releases("v2.3.0", "v2.3.1"))
+            self.assertEqual(promoted["currentChannel"], "stable", "unticking pre-release makes it official")
 
     def test_a_whole_major_version_behind_is_required(self):
         with patch.object(server, "APP_VERSION", "1.4.0"):

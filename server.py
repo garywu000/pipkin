@@ -49,7 +49,7 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.3.3"
 RELEASE_REPO = "garywu000/pipkin"
 # The list includes pre-releases (betas); GitHub's /releases/latest never does.
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases?per_page=30"
@@ -672,8 +672,10 @@ def check_latest_release(*, force=False, opener=None):
         candidate = test if test and (stable is None or is_newer_version(test["version"], stable["version"])) else stable
         current = parse_semver(APP_VERSION)
         required = bool(stable and current and parse_semver(stable["version"])[0] > current[0])
+        # Whether this copy is a beta: its own release is a pre-release. Promoting it on GitHub makes it official.
+        own = next((entry for entry in entries if parse_semver(entry["version"]) == current), None)
         payload = {"enabled": True, "beta": beta, "current": APP_VERSION, "available": False, "checked": True,
-                   "required": False}
+                   "required": False, "currentChannel": ("beta" if own["prerelease"] else "stable") if own else None}
         release = None
         if candidate:
             release = {"version": candidate["version"], "assets": candidate["assets"]}
