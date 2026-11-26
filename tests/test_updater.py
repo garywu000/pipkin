@@ -162,6 +162,7 @@ class InstallDetectionTest(unittest.TestCase):
         self.assertIn("source", updater.install_blocker(None, "darwin"))
         self.assertIn("Mac and Windows", updater.install_blocker(Path("/x"), "linux"))
         self.assertIn("Applications", updater.install_blocker(Path("/private/var/folders/x/AppTranslocation/y/Pipkin.app"), "darwin"))
+        self.assertIn("backup copy", updater.install_blocker(Path("/Users/u/Library/Application Support/Pipkin/updates/previous-version.app"), "darwin"))
         with TemporaryDirectory() as directory:
             app = mac_app(directory, "1.0.0")
             self.assertIsNone(updater.install_blocker(app, "darwin"))
@@ -228,11 +229,14 @@ class FullUpdateTest(unittest.TestCase):
         script = job.dir / ("apply-update.sh" if self.mac else "apply-update.ps1")
         env = {**os.environ, "PIPKIN_UPDATE_NO_RELAUNCH": "1"}
         if self.mac:
+            before_inode = self.root.stat().st_ino
             subprocess.run(["/bin/sh", str(script), "0"], check=True, env=env, timeout=60)
             installed = plistlib.loads((self.root / "Contents" / "Info.plist").read_bytes())["CFBundleShortVersionString"]
             self.assertEqual(installed, "9.9.9")
             self.assertTrue(os.access(self.root / "Contents" / "MacOS" / "Pipkin", os.X_OK))
-            self.assertTrue((job.dir / "previous-version.app" / "Contents" / "Info.plist").exists())
+            self.assertEqual(self.root.stat().st_ino, before_inode, "Pipkin.app inode must stay intact so pinned Dock icons never follow a backup")
+            self.assertFalse((job.dir / "previous-version.app").exists())
+            self.assertFalse((job.dir / "previous-contents").exists())
         else:
             subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script),
                             "-AppPid", "0"], check=True, env=env, timeout=120)

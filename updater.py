@@ -228,6 +228,8 @@ def install_blocker(root, platform_name=None):
         return "This copy of Pipkin runs from source, so update it with git."
     if "/AppTranslocation/" in Path(root).as_posix():
         return "Move Pipkin to your Applications folder, then reopen it to enable one-click updates."
+    if Path(root).name == "previous-version.app" or "/updates/previous-" in Path(root).as_posix():
+        return "This is an older backup copy of Pipkin. Quit it and open your main Pipkin app to update."
     if not (os.access(root, os.W_OK) and os.access(root.parent, os.W_OK)):
         return f"Pipkin can't write to {root.parent}, so download the new version from GitHub instead."
     return None
@@ -358,25 +360,40 @@ if ($env:PIPKIN_UPDATE_NO_RELAUNCH -ne '1') {{ Start-Process -FilePath (Join-Pat
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """
     q = shlex.quote
+    legacy_backup = Path(backup).parent / "previous-version.app"
     return f"""#!/bin/sh
-# Pipkin update helper: waits for Pipkin to quit, swaps in the verified new version, and reopens it.
+# Pipkin update helper: waits for Pipkin to quit, swaps Contents/ in place so pinned Dock icons stay valid, and reopens it.
 trap '' HUP
-APP={q(str(root))}; NEW={q(str(staged))}; BACKUP={q(str(backup))}; RESULT={q(str(result))}; VERSION={q(version)}
+APP={q(str(root))}; NEW={q(str(staged))}; BACKUP={q(str(backup))}; LEGACY_BACKUP={q(str(legacy_backup))}
+RESULT={q(str(result))}; VERSION={q(version)}; SERVER_PID={int(server_pid)}
 wait_for() {{
   [ "${{1:-0}}" -gt 0 ] 2>/dev/null || return 0
-  i=0; while kill -0 "$1" 2>/dev/null && [ $i -lt 200 ]; do sleep 0.3; i=$((i + 1)); done
+  i=0; limit="${{2:-40}}"
+  while kill -0 "$1" 2>/dev/null && [ $i -lt "$limit" ]; do sleep 0.25; i=$((i + 1)); done
 }}
-wait_for "${{1:-0}}"
-wait_for {int(server_pid)}
+wait_for "${{1:-0}}" 40
+wait_for "$SERVER_PID" 20
+if [ "$SERVER_PID" -gt 0 ] 2>/dev/null && kill -0 "$SERVER_PID" 2>/dev/null; then
+  kill -TERM "$SERVER_PID" 2>/dev/null || true
+  wait_for "$SERVER_PID" 20
+fi
+if [ -n "$APP" ] && [ "${{1:-0}}" -gt 0 ] 2>/dev/null; then
+  /usr/bin/pkill -TERM -f "$APP/Contents/MacOS/Pipkin" 2>/dev/null || true
+  i=0
+  while /usr/bin/pgrep -f "$APP/Contents/MacOS/Pipkin" >/dev/null 2>&1 && [ $i -lt 20 ]; do
+    sleep 0.25; i=$((i + 1))
+  done
+fi
 ok=false; message=""
-rm -rf "$BACKUP"
-if mv "$APP" "$BACKUP"; then
-  if mv "$NEW" "$APP" && [ -x "$APP/Contents/MacOS/Pipkin" ]; then
+rm -rf "$BACKUP" "$LEGACY_BACKUP"
+if [ -d "$APP/Contents" ] && mv "$APP/Contents" "$BACKUP"; then
+  if mv "$NEW/Contents" "$APP/Contents" && [ -x "$APP/Contents/MacOS/Pipkin" ]; then
     ok=true
-    rm -rf "$(dirname "$NEW")"
+    /usr/bin/touch "$APP" 2>/dev/null || true
+    rm -rf "$BACKUP" "$(dirname "$NEW")"
   else
     message="The new version could not be put in place, so Pipkin kept the current one."
-    rm -rf "$APP"; mv "$BACKUP" "$APP"
+    rm -rf "$APP/Contents"; mv "$BACKUP" "$APP/Contents"
   fi
 else
   message="Pipkin could not move its current version aside."
@@ -481,9 +498,9 @@ class Updater:
             staged = extract(part, staging, "Pipkin" if self.platform == "win32" else "Pipkin.app", self.platform)
             part.unlink(missing_ok=True)
             check_staged(staged, version, self.platform)
-            # Windows renames the old folder beside itself (same drive, so it is instant); the Mac keeps the previous
-            # app in Pipkin's data folder so a second Pipkin never shows up in Applications.
-            backup = (self.root.parent / (self.root.name + ".previous")) if self.platform == "win32" else self.dir / "previous-version.app"
+            # Windows renames the old folder beside itself (same drive, so it is instant); the Mac swaps Contents/ in
+            # place so Pipkin.app keeps its inode and pinned Dock icons never follow a backup folder.
+            backup = (self.root.parent / (self.root.name + ".previous")) if self.platform == "win32" else self.dir / "previous-contents"
             script = self.dir / ("apply-update.ps1" if self.platform == "win32" else "apply-update.sh")
             script.write_text(helper_script(self.root, staged, backup, self.dir / "result.json", self.server_pid, version,
                                             self.platform), encoding="utf-8")

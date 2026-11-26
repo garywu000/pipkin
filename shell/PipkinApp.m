@@ -130,6 +130,7 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
 @property (strong) NSTask *devServer;
 @property (strong) id busyActivity;
 @property (assign) BOOL quitConfirmed;
+@property (assign) BOOL duplicateLaunch;
 @property (copy) NSString *devDir;
 @property (strong) PipkinPet *pet;
 @property (assign) BOOL mainParked;
@@ -489,6 +490,20 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    NSString *bundleId = [NSBundle mainBundle].bundleIdentifier;
+    if (bundleId.length) {
+        pid_t me = getpid();
+        for (NSRunningApplication *other in [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleId]) {
+            if (other.processIdentifier != me && !other.isTerminated) {
+                AppLog(@"Another Pipkin (pid %d) is already running; activating it and exiting.", other.processIdentifier);
+                [other activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+                self.duplicateLaunch = YES;
+                self.quitConfirmed = YES;
+                [NSApp terminate:nil];
+                return;
+            }
+        }
+    }
     NSString *candidate = [[[NSBundle mainBundle].bundlePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"pipkin-dev"];
     if ([[NSFileManager defaultManager] fileExistsAtPath:[candidate stringByAppendingPathComponent:@"server.py"]]) self.devDir = candidate;
     [self buildMenus];
@@ -784,6 +799,13 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
         return;
     }
     AppLog(@"Installing update; helper pid %d", task.processIdentifier);
+    NSString *bundleId = [NSBundle mainBundle].bundleIdentifier;
+    if (bundleId.length) {
+        pid_t me = getpid();
+        for (NSRunningApplication *other in [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleId]) {
+            if (other.processIdentifier != me && !other.isTerminated) [other terminate];
+        }
+    }
     self.quitConfirmed = YES;
     [NSApp terminate:nil];
 }
@@ -836,6 +858,7 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    if (self.duplicateLaunch) return;
     AppLog(@"Quitting");
     self.pet.visible = NO;
     if (!self.server.running && !self.mainParked) [self unloadExternalModel];

@@ -47,7 +47,7 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 RELEASE_REPO = "garywu000/pipkin"
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
 RELEASE_URL_PREFIX = f"https://github.com/{RELEASE_REPO}/releases/"
