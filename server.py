@@ -53,7 +53,7 @@ PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
 APP_VERSION = "2.5.0"
 GITHUB = github_connector.Connection()
-DRIVE = drive_connector.Connection()
+DRIVE = drive_connector.Connection(store=drive_connector.os_credential_store())
 RELEASE_REPO = "garywu000/pipkin"
 # The list includes pre-releases (betas); GitHub's /releases/latest never does.
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases?per_page=30"
@@ -2147,10 +2147,17 @@ class ChatHandler(BaseHTTPRequestHandler):
                 return
             if action == "start":
                 result = DRIVE.start(payload.get("client"), payload.get("writes", False))
+            elif action == "browse":
+                result = DRIVE.browse(
+                    payload.get("parent", "root"),
+                    payload.get("query"),
+                    payload.get("page"),
+                    include_files=bool(payload.get("includeFiles", True)),
+                )
             elif action == "select":
-                result = DRIVE.select(payload.get("folder"))
+                result = DRIVE.select(payload.get("folder"), files=payload.get("files"))
             elif action == "disconnect":
-                DRIVE.disconnect()
+                DRIVE.disconnect(forget_client=bool(payload.get("forgetClient", True)))
                 result = DRIVE.state()
             elif action == "status":
                 result = DRIVE.state()
@@ -3369,6 +3376,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                     github_connector.validate_destination(request_text, github.grant)
                 if use_github and key is not None and github.grant["writes"] and github_connector.local_upload_requested(request_text):
                     # Only the dedicated upload tool may read explicitly named workspace files.
+                    source_key = key
+                    if authorized_workspace(source_key) is None:
+                        raise ValueError("Choose your workspace folder again before uploading files.")
+                    github.workspace_resolver = lambda: authorized_workspace(source_key)
+                if use_drive and key is not None and github.grant["writes"] and drive_connector.local_upload_requested(request_text):
+                    # Only drive_upload_file may read explicitly named workspace files.
                     source_key = key
                     if authorized_workspace(source_key) is None:
                         raise ValueError("Choose your workspace folder again before uploading files.")

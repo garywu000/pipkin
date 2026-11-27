@@ -590,9 +590,111 @@
     return card;
   }
 
+  function driveApprovalCard(entry, onApprove) {
+    const EXPIRED = { steering: "Skipped (you steered the run)", stop: "Canceled (the run is stopping)", ended: "Canceled when the run stopped" };
+    const heading = entry.decision === "approved" ? "Approved" : entry.decision === "denied" ? "Declined"
+      : entry.decision === "expired" ? EXPIRED[entry.reason] || "Not answered" : "Review Google Drive action";
+    let data = null;
+    try { data = JSON.parse(entry.detail || ""); } catch { data = null; }
+    const folder = data?.folder || "";
+    const account = data?.account || "";
+    const target = data?.target || "";
+    const op = data?.operation || "";
+    const card = el("div", { className: "approval-card github-approval drive-approval", dataset: { decision: entry.decision || "pending" } });
+    const folderPill = !entry.decision && folder ? el("span", { className: "schedule-proposal-perm", text: folder }) : null;
+    card.append(el("header", {},
+      icon(entry.decision === "approved" ? "check" : entry.decision ? "x" : "folder"),
+      el("span", { text: entry.decision ? `${heading} · ${entry.title}` : heading }),
+      folderPill));
+    if (entry.decision) return card;
+
+    const body = el("div", { className: "github-approval-body" });
+    body.append(el("div", { className: "github-approval-hero" },
+      el("div", { className: "schedule-proposal-title", text: entry.title || "Google Drive action" }),
+      account || target ? el("div", { className: "github-approval-sub",
+        text: [account, target ? `Target: ${target}` : ""].filter(Boolean).join(" · ") }) : null));
+
+    const chips = [];
+    const chip = (glyph, labelText, valueText) => el("div", { className: "schedule-proposal-chip" },
+      icon(glyph), el("span", { className: "chip-label", text: labelText }), el("strong", { text: valueText }));
+    if (folder) chips.push(chip("folder", "Folder", folder));
+    if (data?.payload?.name && (op === "drive_create_doc" || op === "drive_create_folder")) {
+      chips.push(chip(op === "drive_create_folder" ? "folder" : "note", "Name", data.payload.name));
+    }
+    if (data?.tabId) chips.push(chip("list", "Tab", data.tabId));
+    if (data?.range) chips.push(chip("list", "Range", data.range));
+    if (data?.mode) chips.push(chip("edit", "Mode", data.mode === "append" ? "Append rows" : "Update range"));
+    if (data?.slideIndex) chips.push(chip("note", "Slide", `#${data.slideIndex}`));
+    if (data?.heading) chips.push(chip("note", "Heading", `H${data.level || 2} · ${data.heading}`));
+    if (data?.after) chips.push(chip("search", "Insert after", data.after.slice(0, 60)));
+    if (data?.fileName) {
+      chips.push(chip("file", "Upload", `${data.fileName} (${formatBytes(data.bytes || 0)})`));
+      if (data.sourcePath) chips.push(chip("folder", "Source", data.sourcePath));
+      if (data.mimeType) chips.push(chip("note", "Type", data.mimeType));
+      if (data.sha256) chips.push(chip("check", "SHA-256", data.sha256.slice(0, 12)));
+    }
+    if (chips.length) body.append(el("div", { className: "github-approval-chips" }, ...chips));
+
+    if (typeof data?.originalText === "string" && typeof data?.replacementText === "string") {
+      const oldLines = data.originalText.split("\n").map((l) => "-" + l).join("\n");
+      const newLines = data.replacementText.split("\n").map((l) => "+" + l).join("\n");
+      const syntheticDiff = `--- ${target || "document"}\n+++ ${target || "document"}\n@@ replace @@\n${oldLines}\n${newLines}`;
+      body.append(el("div", { className: "github-approval-section" },
+        el("span", { className: "github-section-label", text: "Text change" }),
+        diffView(syntheticDiff)));
+    }
+    if (Array.isArray(data?.values) && data.values.length) {
+      const renderTable = (rows, labelText) => {
+        const table = el("table", { className: "drive-sheet-table" });
+        const tbody = el("tbody");
+        for (const row of rows.slice(0, 12)) {
+          const tr = el("tr");
+          for (const cell of (Array.isArray(row) ? row : [row]).slice(0, 8)) {
+            tr.append(el("td", { text: String(cell ?? "") }));
+          }
+          tbody.append(tr);
+        }
+        table.append(tbody);
+        return el("div", { className: "github-approval-section" },
+          el("span", { className: "github-section-label", text: labelText }),
+          el("div", { className: "drive-sheet-preview" }, table));
+      };
+      if (Array.isArray(data.existingValues) && data.existingValues.length) {
+        body.append(renderTable(data.existingValues, `Current cells (${data.existingValues.length} row${data.existingValues.length === 1 ? "" : "s"})`));
+      }
+      body.append(renderTable(data.values, `${data.mode === "append" ? "Rows to append" : "New cell values"} (${data.values.length} row${data.values.length === 1 ? "" : "s"})`));
+    }
+    if (data?.slideTitle || data?.slideBody) {
+      body.append(el("div", { className: "drive-slide-preview" },
+        data.slideTitle ? el("strong", { text: data.slideTitle }) : null,
+        data.slideBody ? el("p", { text: data.slideBody }) : null));
+    }
+    const textPreview = data?.initialContent || data?.appendText || data?.body || "";
+    if (textPreview) {
+      body.append(el("div", { className: "schedule-proposal-prompt github-approval-text" },
+        el("span", { text: data?.initialContent ? "Initial content" : "Content" }),
+        el("p", { text: textPreview })));
+    }
+    body.append(el("details", { className: "github-raw-details" },
+      el("summary", {}, icon("chevron-right", "icon chev-sm"), el("span", { text: "Inspect exact payload" })),
+      el("div", { className: "tool-output", text: entry.detail || "" })));
+    card.append(body);
+
+    const footer = el("footer");
+    const deny = el("button", { type: "button", className: "button small", text: "Deny", disabled: Boolean(entry.submitting) });
+    const allow = el("button", { type: "button", className: "button small accent", disabled: Boolean(entry.submitting),
+      text: entry.submitting ? "Sending…" : "Approve Drive action" });
+    deny.addEventListener("click", () => onApprove?.(entry, false));
+    allow.addEventListener("click", () => onApprove?.(entry, true));
+    footer.append(el("span", { className: "decision", text: folder ? `Writes to Google Drive (${folder}) only if you approve.` : "Writes to the selected Google Drive folder." }), deny, allow);
+    card.append(footer);
+    return card;
+  }
+
   function approvalCard(entry, onApprove) {
     if (entry.kind === "schedule") return scheduleCard(entry, onApprove);
     if (entry.kind === "github") return githubApprovalCard(entry, onApprove);
+    if (entry.kind === "drive") return driveApprovalCard(entry, onApprove);
     const card = el("div", { className: "approval-card", dataset: { decision: entry.decision || "pending" } });
     const EXPIRED = { steering: "Skipped (you steered the run)", stop: "Canceled (the run is stopping)", ended: "Canceled when the run stopped" };
     const heading = entry.decision === "approved" ? "Approved" : entry.decision === "denied" ? "Declined"

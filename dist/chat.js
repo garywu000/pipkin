@@ -7141,24 +7141,111 @@ window.PipkinSchedule?.init({
 
 let drivePoll = null;
 let driveBusy = false;
-async function driveConnection(action) {
+let driveState = null;
+let drivePickerState = { open: false, parent: "root", parentName: "My Drive", up: null, selectedFiles: new Set() };
+
+function renderDriveScopeBar(grant) {
+  const bar = byId("drive-scope-bar");
+  const note = byId("drive-scope-note");
+  const files = grant?.allowedFiles;
+  if (Array.isArray(files) && files.length) {
+    bar.hidden = false;
+    const preview = files.slice(0, 3).map((f) => f.name).join(", ");
+    note.textContent = `Restricted to ${files.length} file${files.length === 1 ? "" : "s"}: ${preview}${files.length > 3 ? ` +${files.length - 3} more` : ""}`;
+  } else {
+    bar.hidden = true;
+    note.textContent = "";
+  }
+}
+
+async function browseDrive(parent = "root") {
+  const list = byId("drive-picker-list");
+  const picker = byId("drive-picker");
+  const pathEl = byId("drive-picker-path");
+  const upBtn = byId("drive-picker-up");
+  const useBtn = byId("drive-picker-use");
+  picker.hidden = false;
+  drivePickerState.open = true;
+  list.replaceChildren(el("p", { className: "hint", text: "Loading My Drive…" }));
+  upBtn.disabled = useBtn.disabled = true;
+  try {
+    const response = await fetch("/api/connectors/drive/browse", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parent, includeFiles: true }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Could not browse My Drive.");
+    drivePickerState.parent = data.parent || "root";
+    drivePickerState.parentName = data.parentName || "My Drive";
+    drivePickerState.up = data.up || null;
+    drivePickerState.selectedFiles = new Set();
+    pathEl.textContent = drivePickerState.parentName;
+    upBtn.disabled = !drivePickerState.up && drivePickerState.parent === "root";
+    useBtn.disabled = drivePickerState.parent === "root";
+    useBtn.textContent = "Use this folder";
+
+    const rows = [];
+    for (const folder of data.folders || []) {
+      const btn = el("button", { type: "button", className: "drive-picker-row drive-picker-folder" },
+        icon("folder"),
+        el("span", { className: "drive-picker-name", text: folder.name }),
+        el("span", { className: "drive-picker-meta", text: "Folder" }));
+      btn.addEventListener("click", () => browseDrive(folder.id));
+      rows.push(btn);
+    }
+    for (const file of data.files || []) {
+      const box = el("input", { type: "checkbox" });
+      box.addEventListener("change", () => {
+        if (box.checked) drivePickerState.selectedFiles.add(file.id);
+        else drivePickerState.selectedFiles.delete(file.id);
+        const count = drivePickerState.selectedFiles.size;
+        useBtn.textContent = count ? `Use ${count} selected file${count === 1 ? "" : "s"}` : "Use this folder";
+      });
+      const kind = file.mimeType === "application/vnd.google-apps.document" ? "Doc"
+        : file.mimeType === "application/vnd.google-apps.spreadsheet" ? "Sheet"
+        : file.mimeType === "application/vnd.google-apps.presentation" ? "Slides"
+        : file.mimeType === "application/pdf" ? "PDF" : "File";
+      rows.push(el("label", { className: "drive-picker-row drive-picker-file" },
+        box,
+        icon("note"),
+        el("span", { className: "drive-picker-name", text: file.name }),
+        el("span", { className: "drive-picker-meta", text: kind })));
+    }
+    list.replaceChildren(...(rows.length ? rows : [el("p", { className: "hint", text: "This folder is empty." })]));
+  } catch (error) {
+    list.replaceChildren(el("p", { className: "hint drive-picker-error", text: error.message || "Could not browse My Drive." }));
+    upBtn.disabled = drivePickerState.parent === "root";
+    useBtn.disabled = drivePickerState.parent === "root";
+  }
+}
+
+async function driveConnection(action, extraPayload = null) {
   if (driveBusy) return;
   driveBusy = true;
   clearTimeout(drivePoll);
+  const card = byId("drive-connector-card");
   const status = byId("drive-status");
   const signin = byId("drive-start");
   const select = byId("drive-select");
+  const browse = byId("drive-browse");
   const disconnect = byId("drive-disconnect");
-  signin.disabled = select.disabled = disconnect.disabled = true;
+  const clientLabel = byId("drive-client-label");
+  signin.disabled = select.disabled = browse.disabled = disconnect.disabled = true;
   let data = null;
   try {
-    let payload = {};
+    let payload = extraPayload ? { ...extraPayload } : {};
     if (action === "start") {
       const file = byId("drive-client").files[0];
-      if (!file || file.size > 12000) throw new Error("Choose your Desktop OAuth client JSON file.");
-      payload = { client: JSON.parse(await file.text()), writes: byId("drive-writes").checked };
-      byId("drive-client").value = "";
-    } else if (action === "select") {
+      if (file) {
+        if (file.size > 12000) throw new Error("Choose your Desktop OAuth client JSON file (under 12 KB).");
+        payload = { client: JSON.parse(await file.text()), writes: byId("drive-writes").checked };
+        byId("drive-client").value = "";
+      } else if (driveState?.hasSavedClient) {
+        payload = { client: null, writes: byId("drive-writes").checked };
+      } else {
+        throw new Error("Choose your Desktop OAuth client JSON file first.");
+      }
+    } else if (action === "select" && !payload.folder) {
       payload = { folder: byId("drive-folder").value.trim() };
     }
     const response = await fetch("/api/connectors/drive/" + action, {
@@ -7166,23 +7253,69 @@ async function driveConnection(action) {
     });
     data = await response.json();
     if (!response.ok) throw new Error(data.error || "Google Drive connection failed.");
+    driveState = data;
     const grant = data.connection;
-    status.textContent = data.error || (grant ? `Connected as ${grant.account} · ${grant.folderName} · ${grant.writes ? "Reviewed writes" : "Read only"}` :
-      data.pending ? "Complete authorization in your browser…" : data.signedIn ? "Signed in. Enter a folder ID or link, then select it." : "Not connected.");
+    const scopeNote = grant?.allowedFiles?.length ? ` · ${grant.allowedFiles.length} file${grant.allowedFiles.length === 1 ? "" : "s"}` : "";
+    status.dataset.error = data.error ? "true" : "false";
+    status.textContent = data.error || (grant
+      ? `Connected as ${grant.account} · ${grant.folderName}${scopeNote} · ${grant.writes ? "Reviewed writes" : "Read only"}`
+      : data.pending ? "Complete Google authorization in your browser…"
+      : data.signedIn ? "Signed in. Browse My Drive or paste a folder ID to select your scope."
+      : "Not connected.");
+    card.dataset.state = grant ? "connected" : "disconnected";
     byId("drive-status-pill").textContent = grant ? "Connected" : data.pending ? "Signing in" : data.signedIn ? "Select folder" : "Not connected";
     byId("drive-status-pill").dataset.status = grant ? "active" : "paused";
+    if (data.hasSavedClient) {
+      clientLabel.textContent = data.persisted
+        ? "OAuth client & session saved in OS Keychain. Choose JSON to replace."
+        : "OAuth client loaded. Choose JSON to replace.";
+    } else {
+      clientLabel.textContent = "Choose your downloaded Google Desktop OAuth JSON file.";
+    }
     if (grant) byId("drive-folder").value = grant.folder;
     if (data.signedIn) byId("drive-writes").checked = Boolean(data.writeScope);
+    if (!data.signedIn) {
+      byId("drive-picker").hidden = true;
+      drivePickerState.open = false;
+    }
+    renderDriveScopeBar(grant);
     if (data.pending) drivePoll = setTimeout(() => driveConnection("status"), 1500);
   } catch (error) {
+    status.dataset.error = "true";
     status.textContent = error.message || "Google Drive connection failed.";
   } finally {
     driveBusy = false;
-    signin.disabled = Boolean(data?.pending);
-    select.disabled = !data?.signedIn;
-    disconnect.disabled = false;
+    const st = data || driveState;
+    signin.disabled = Boolean(st?.pending);
+    signin.textContent = st?.signedIn ? "Re-authorize" : "Sign in with Google";
+    select.disabled = !st?.signedIn;
+    browse.disabled = !st?.signedIn;
+    disconnect.disabled = !(st?.signedIn || st?.pending || st?.hasSavedClient);
   }
 }
+byId("drive-client-btn").addEventListener("click", () => byId("drive-client").click());
+byId("drive-client").addEventListener("change", () => {
+  const file = byId("drive-client").files[0];
+  if (file) byId("drive-client-label").textContent = `Selected: ${file.name}`;
+});
 byId("drive-start").addEventListener("click", () => driveConnection("start"));
 byId("drive-select").addEventListener("click", () => driveConnection("select"));
 byId("drive-disconnect").addEventListener("click", () => driveConnection("disconnect"));
+byId("drive-browse").addEventListener("click", () => {
+  const picker = byId("drive-picker");
+  if (!picker.hidden) { picker.hidden = true; drivePickerState.open = false; return; }
+  browseDrive("root");
+});
+byId("drive-picker-up").addEventListener("click", () => browseDrive(drivePickerState.up || "root"));
+byId("drive-picker-use").addEventListener("click", async () => {
+  if (drivePickerState.parent === "root") return;
+  byId("drive-folder").value = drivePickerState.parent;
+  const files = Array.from(drivePickerState.selectedFiles);
+  await driveConnection("select", { folder: drivePickerState.parent, ...(files.length ? { files } : {}) });
+  byId("drive-picker").hidden = true;
+  drivePickerState.open = false;
+});
+byId("drive-scope-clear").addEventListener("click", () => {
+  const folder = driveState?.connection?.folder || byId("drive-folder").value.trim();
+  if (folder) driveConnection("select", { folder, files: [] });
+});

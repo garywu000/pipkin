@@ -269,6 +269,288 @@ class DriveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.connection._token({**response, "scope": drive.READ_SCOPE + " unrelated"}, drive.READ_SCOPE, "client", "secret")
 
+    def test_credential_persistence_and_disconnect_wipe(self):
+        store = drive.MemoryStore()
+        store.persistent = True
+        api = FakeAPI()
+        c1 = drive.Connection(api_factory=lambda _: api, store=store)
+        c1._oauth = {
+            "access": "acc1", "refresh": "ref1", "expires": 9e9,
+            "client_id": "fake.apps.googleusercontent.com", "secret": "fake-secret",
+            "scope": drive.WRITE_SCOPE,
+        }
+        c1._saved_client = {"client_id": "fake.apps.googleusercontent.com", "secret": "fake-secret"}
+        c1.select("root")
+        self.assertTrue(c1.state()["persisted"])
+        self.assertTrue(c1.state()["hasSavedClient"])
+
+        # Simulate restarting Pipkin with a brand-new Connection backed by the same store.
+        c2 = drive.Connection(api_factory=lambda _: api, store=store)
+        st = c2.state()
+        self.assertTrue(st["signedIn"])
+        self.assertTrue(st["hasSavedClient"])
+        self.assertEqual(st["connection"]["folder"], "root")
+        self.assertNotIn("token", json.dumps(st))
+
+        # Disconnect wipes persisted credentials cleanly.
+        c2.disconnect()
+        c3 = drive.Connection(api_factory=lambda _: api, store=store)
+        self.assertFalse(c3.state()["signedIn"])
+        self.assertFalse(c3.state()["hasSavedClient"])
+        self.assertIsNone(c3.state()["connection"])
+
+    def test_browse_and_file_specific_scope(self):
+        self.api.items["sub"] = {"id": "sub", "name": "Reports", "mimeType": drive.FOLDER, "parents": ["root"]}
+        self.api.items["doc2"] = {"id": "doc2", "name": "Secret", "mimeType": drive.DOC, "parents": ["root"], "capabilities": {"canEdit": True}, "version": "1"}
+        original = self.api.call
+
+        def call(path, **kw):
+            if path == "files":
+                return {"files": [copy.deepcopy(self.api.items["sub"]), copy.deepcopy(self.api.items["doc"]),
+                                  copy.deepcopy(self.api.items["doc2"]), copy.deepcopy(self.api.items["shortcut"])]}
+            return original(path, **kw)
+
+        self.api.call = call
+        browsed = self.connection.browse("root")
+        self.assertEqual([f["id"] for f in browsed["folders"]], ["sub"])
+        self.assertEqual({f["id"] for f in browsed["files"]}, {"doc", "doc2"})
+
+        # Narrow grant to ONLY "doc" inside "root".
+        st = self.connection.select("root", files=["doc"])
+        self.assertEqual(len(st["connection"]["allowedFiles"]), 1)
+        turn = self.turn()
+        listed = json.loads(turn.execute("drive_list", {}).split("\n", 1)[1])
+        self.assertEqual({f["id"] for f in listed["files"]}, {"sub", "doc"})
+        self.assertIn("Hello world", turn.execute("drive_read", {"id": "doc"}))
+        with self.assertRaisesRegex(ValueError, "file-specific"):
+            turn.execute("drive_read", {"id": "doc2"})
+        with self.assertRaises(ValueError):
+            self.connection.select("root", files=["outside"])
+
+    def test_docs_tables_multitab_cross_run_and_section_insert(self):
+        self.api.document = {
+            "revisionId": "r10",
+            "tabs": [
+                {
+                    "tabProperties": {"tabId": "t.0", "title": "Overview"},
+                    "documentTab": {"body": {"content": [
+                        {"startIndex": 1, "endIndex": 10, "paragraph": {
+                            "paragraphStyle": {"namedStyleType": "HEADING_1"},
+                            "elements": [{"startIndex": 1, "textRun": {"content": "Overview\n"}}],
+                        }},
+                        {"startIndex": 10, "endIndex": 32, "paragraph": {
+                            "elements": [
+                                {"startIndex": 10, "textRun": {"content": "Status: "}},
+                                {"startIndex": 18, "textRun": {"content": "In Progress\n"}},
+                                {"startIndex": 30, "inlineObjectElement": {"inlineObjectId": "img1"}},
+                            ],
+                        }},
+                        {"startIndex": 33, "endIndex": 80, "table": {"tableRows": [
+                            {"tableCells": [
+                                {"content": [{"paragraph": {"elements": [{"startIndex": 35, "textRun": {"content": "Metric\n"}}]}}]},
+                                {"content": [{"paragraph": {"elements": [{"startIndex": 45, "textRun": {"content": "Value\n"}}]}}]},
+                            ]},
+                            {"tableCells": [
+                                {"content": [{"paragraph": {"elements": [{"startIndex": 55, "textRun": {"content": "Users\n"}}]}}]},
+                                {"content": [{"paragraph": {"elements": [{"startIndex": 65, "textRun": {"content": "4200\n"}}]}}]},
+                            ]},
+                        ]}},
+                    ]}},
+                },
+                {
+                    "tabProperties": {"tabId": "t.1", "title": "Appendix"},
+                    "documentTab": {"body": {"content": [
+                        {"startIndex": 1, "endIndex": 15, "paragraph": {
+                            "elements": [{"startIndex": 1, "textRun": {"content": "Appendix note\n"}}],
+                        }},
+                    ]}},
+                },
+            ],
+        }
+        turn = self.turn()
+        read_main = json.loads(turn.execute("drive_read", {"id": "doc"}).split("\n", 1)[1])
+        self.assertIn("# Overview", read_main["text"])
+        self.assertIn("| Metric | Value |", read_main["text"])
+        self.assertIn("| Users | 4200 |", read_main["text"])
+        self.assertEqual(len(read_main["tabs"]), 2)
+
+        read_tab2 = json.loads(turn.execute("drive_read", {"id": "doc", "tab_id": "t.1"}).split("\n", 1)[1])
+        self.assertIn("Appendix note", read_tab2["text"])
+
+        # Cross-run replacement spanning "Status: " + "In Progress" inside a Doc with an image + table.
+        res = turn.execute("drive_replace_doc", {"id": "doc", "old": "Status: In Progress", "new": "Status: Done"},
+                           approve=lambda *_: True)
+        self.assertIn("succeeded", res)
+        req0 = self.api.posts[-1][1]["requests"][0]["deleteContentRange"]["range"]
+        self.assertEqual(req0, {"startIndex": 10, "endIndex": 29, "tabId": "t.0"})
+
+        # Table cell replacement.
+        res2 = turn.execute("drive_replace_doc", {"id": "doc", "old": "4200", "new": "5100"}, approve=lambda *_: True)
+        self.assertIn("succeeded", res2)
+        self.assertEqual(self.api.posts[-1][1]["requests"][0]["deleteContentRange"]["range"],
+                         {"startIndex": 65, "endIndex": 69, "tabId": "t.0"})
+
+        # Section insert after "Overview".
+        res3 = turn.execute("drive_insert_section", {
+            "id": "doc", "heading": "Next Steps", "level": "2", "body": "Ship beta.", "after": "Overview",
+        }, approve=lambda *_: True)
+        self.assertIn("succeeded", res3)
+        reqs = self.api.posts[-1][1]["requests"]
+        self.assertEqual(reqs[0]["insertText"]["location"], {"index": 10, "tabId": "t.0"})
+        self.assertEqual(reqs[1]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"], "HEADING_2")
+
+    def test_create_doc_with_initial_content(self):
+        original = self.api.call
+
+        def call(path, **kw):
+            if path == "documents/created":
+                return {"revisionId": "r0", "tabs": [{"tabProperties": {"tabId": "t.0"}, "documentTab": {"body": {"content": []}}}]}
+            if path == "documents/created:batchUpdate":
+                self.api.posts.append((path, copy.deepcopy(kw["data"])))
+                return {"documentId": "created"}
+            return original(path, **kw)
+
+        self.api.call = call
+        res = self.turn().execute("drive_create_doc", {"name": "Launch Plan", "content": "# Launch Plan\nReady to go."},
+                                  approve=lambda *_: True)
+        data = json.loads(res.split("\n", 1)[1])
+        self.assertTrue(data["populated"])
+        self.assertEqual(self.api.posts[1][0], "documents/created:batchUpdate")
+        self.assertEqual(self.api.posts[1][1]["requests"][1]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"], "HEADING_1")
+
+    def test_sheets_read_and_write(self):
+        self.api.items["sheet1"] = {"id": "sheet1", "name": "Budget", "mimeType": drive.SHEET,
+                                    "parents": ["root"], "capabilities": {"canEdit": True}, "version": "3"}
+        sheet_calls = []
+        original = self.api.call
+
+        def call(path, **kw):
+            if kw.get("sheets"):
+                sheet_calls.append((kw.get("method", "GET"), path, copy.deepcopy(kw.get("data"))))
+                if path == "spreadsheets/sheet1":
+                    return {"properties": {"title": "Budget"}, "sheets": [{"properties": {"sheetId": 0, "title": "Q4", "gridProperties": {"rowCount": 50, "columnCount": 10}}}]}
+                if path.startswith("spreadsheets/sheet1/values/") and kw.get("method", "GET") == "GET":
+                    return {"range": "Q4!A1:B2", "values": [["Item", "Cost"], ["Hosting", "20"]]}
+                if kw.get("method") == "PUT":
+                    return {"spreadsheetId": "sheet1", "updatedRange": "Q4!A2:B2"}
+                if kw.get("method") == "POST":
+                    return {"spreadsheetId": "sheet1", "updates": {"updatedRange": "Q4!A3:B3"}}
+            return original(path, **kw)
+
+        self.api.call = call
+        turn = self.turn()
+        read_res = json.loads(turn.execute("drive_read", {"id": "sheet1"}).split("\n", 1)[1])
+        self.assertEqual(read_res["sheets"][0]["title"], "Q4")
+        self.assertEqual(read_res["values"][1], ["Hosting", "20"])
+
+        # Test small-model stringified JSON 2D array coercion + approval detail preview.
+        details = []
+        upd = turn.execute("drive_update_sheet", {
+            "id": "sheet1", "range": "Q4!A2:B2", "values": '[["Hosting", 25]]', "mode": "update",
+        }, approve=lambda k, t, d: details.append(json.loads(d)) or True)
+        self.assertIn("succeeded", upd)
+        self.assertEqual(details[0]["existingValues"][1], ["Hosting", "20"])
+        self.assertEqual(details[0]["values"], [["Hosting", 25]])
+
+        app = turn.execute("drive_update_sheet", {
+            "id": "sheet1", "range": "Q4!A:B", "values": "[['Domain', 12]]", "mode": "append",
+        }, approve=lambda *_: True)
+        self.assertIn("Q4!A3:B3", app)
+        # Small models sometimes pass the selected folder's display name instead of its ID.
+        self.assertIn("Document", turn.execute("drive_list", {"folder": "Test folder"}))
+
+    def test_slides_read_and_write(self):
+        self.api.items["deck1"] = {"id": "deck1", "name": "Demo Deck", "mimeType": drive.SLIDES,
+                                   "parents": ["root"], "capabilities": {"canEdit": True}, "version": "2"}
+        pres_data = {
+            "presentationId": "deck1", "title": "Demo Deck", "revisionId": "s1",
+            "slides": [{
+                "objectId": "p1",
+                "pageElements": [{"shape": {"text": {"textElements": [{"textRun": {"content": "Q3 Roadmap\n"}}]}}}],
+                "slideProperties": {"notesPage": {"pageElements": [{"shape": {"text": {"textElements": [{"textRun": {"content": "Keep brief\n"}}]}}}]}},
+            }],
+        }
+        original = self.api.call
+
+        def call(path, **kw):
+            if kw.get("slides"):
+                if kw.get("method") == "POST":
+                    self.api.posts.append((path, copy.deepcopy(kw["data"])))
+                    return {"presentationId": "deck1"}
+                return copy.deepcopy(pres_data)
+            return original(path, **kw)
+
+        self.api.call = call
+        turn = self.turn()
+        read_res = json.loads(turn.execute("drive_read", {"id": "deck1"}).split("\n", 1)[1])
+        self.assertEqual(read_res["slides"][0]["text"], "Q3 Roadmap")
+        self.assertEqual(read_res["slides"][0]["notes"], "Keep brief")
+
+        rep = turn.execute("drive_update_slides", {
+            "id": "deck1", "action": "replace_text", "old": "Q3", "new": "Q4", "slide_index": "1",
+        }, approve=lambda *_: True)
+        self.assertIn("succeeded", rep)
+        self.assertEqual(self.api.posts[-1][1]["requests"][0]["replaceAllText"]["pageObjectIds"], ["p1"])
+
+        add = turn.execute("drive_update_slides", {
+            "id": "deck1", "action": "add_slide", "title": "Summary", "body": "All green.",
+        }, approve=lambda *_: True)
+        self.assertIn("succeeded", add)
+        self.assertEqual(self.api.posts[-1][1]["requests"][0]["createSlide"]["slideLayoutReference"]["predefinedLayout"], "TITLE_AND_BODY")
+
+    def test_binary_metadata_and_workspace_upload(self):
+        self.api.items["img1"] = {"id": "img1", "name": "logo.png", "mimeType": "image/png", "size": "2048",
+                                  "parents": ["root"], "version": "1"}
+        turn = self.turn()
+        # Upload tool is hidden when no workspace_resolver is attached.
+        self.assertNotIn("drive_upload_file", {t["function"]["name"] for t in turn.tools})
+        meta = json.loads(turn.execute("drive_read", {"id": "img1"}).split("\n", 1)[1])
+        self.assertTrue(meta["binary"])
+        self.assertEqual(meta["mimeType"], "image/png")
+
+        # Attach workspace and test binary upload + PEM key refusal.
+        ws_dir = Path(self.tmp.name) / "ws"
+        ws_dir.mkdir()
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        (ws_dir / "chart.png").write_bytes(png_bytes)
+        (ws_dir / "secret.bin").write_bytes(b"\x00\x01-----BEGIN PRIVATE KEY-----\nABC\n")
+        ws = agent.Workspace(ws_dir)
+        turn.workspace_resolver = lambda: ws
+        self.assertIn("drive_upload_file", {t["function"]["name"] for t in turn.tools})
+
+        uploaded = []
+        original = self.api.call
+
+        def call(path, **kw):
+            if kw.get("upload"):
+                uploaded.append((path, kw.get("content_type"), kw.get("data")))
+                return {"id": "up1", "name": "chart.png", "mimeType": "image/png", "parents": ["root"], "size": str(len(png_bytes))}
+            return original(path, **kw)
+
+        self.api.call = call
+        with self.assertRaisesRegex(ValueError, "Private keys"):
+            turn.execute("drive_upload_file", {"source_path": "secret.bin"}, approve=lambda *_: True)
+
+        details = []
+        res = turn.execute("drive_upload_file", {"source_path": "chart.png"},
+                           approve=lambda k, t, d: details.append(json.loads(d)) or True)
+        self.assertIn("up1", res)
+        self.assertEqual(details[0]["bytes"], len(png_bytes))
+        self.assertEqual(len(uploaded), 1)
+        self.assertIn("multipart/related", uploaded[0][1])
+        self.assertIn(png_bytes, uploaded[0][2])
+
+    def test_routing_covers_sheets_slides_and_uploads(self):
+        for prompt in [
+            "Read my Google Sheet Budget",
+            "Update cells A2:B3 in my Google Sheets tracker",
+            "Add a slide to my Google Slides deck",
+            "Upload chart.png from my local workspace to Google Drive",
+        ]:
+            self.assertTrue(drive.requested(prompt), prompt)
+        self.assertTrue(drive.local_upload_requested("Upload chart.png from my workspace to Google Drive"))
+        self.assertFalse(drive.local_upload_requested("List files in Google Drive"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -582,22 +582,71 @@
                 </div>
               </div>
             </div>
-            <div class="connector-card" id="drive-connector-card">
-              <div class="connector-card-head"><div class="connector-card-title"><strong>Google Drive · Beta</strong><p>Connect your own Google Cloud Desktop OAuth client. Enable Drive and Docs APIs first.</p></div><span id="drive-status-pill" class="task-status-pill" data-status="paused">Not connected</span></div>
-              <div class="connector-card-body">
-                <label>Desktop OAuth client JSON <input id="drive-client" type="file" accept=".json,application/json"></label>
-                <label><input id="drive-writes" type="checkbox"> Enable reviewed writes (requests full Drive OAuth access; Pipkin restricts tools to the selected folder)</label>
-                <p>Read-only sign-in requests read access to Drive. Credentials stay in memory until disconnect or restart.</p>
-                <label>My Drive folder ID or URL <input id="drive-folder" type="text" autocomplete="off" spellcheck="false"></label>
+            <div class="connector-card" id="drive-connector-card" data-state="disconnected">
+              <div class="connector-card-head">
+                <span class="connector-card-icon" aria-hidden="true"><svg class="icon"><use href="#i-folder"/></svg></span>
+                <div class="connector-card-title">
+                  <strong>Google Drive</strong>
+                  <p>Connect your Google Cloud Desktop OAuth client (enable Drive, Docs, Sheets, and Slides APIs). Tokens stay encrypted in your OS Keychain until Disconnect.</p>
+                </div>
+                <span id="drive-status-pill" class="task-status-pill" data-status="paused">Not connected</span>
               </div>
-              <div class="connector-card-foot"><p id="drive-status" class="connector-status" role="status">Not connected.</p><div class="connector-actions">
-                <button id="drive-disconnect" class="button small" type="button">Disconnect</button>
-                <button id="drive-start" class="button small" type="button">Sign in with Google</button>
-                <button id="drive-select" class="button small accent" type="button" disabled>Select folder</button>
-              </div></div>
+              <div class="connector-card-body">
+                <div class="drive-client-row">
+                  <div class="drive-client-meta">
+                    <strong>Desktop OAuth client JSON</strong>
+                    <small id="drive-client-label">Choose your downloaded Google Desktop OAuth JSON file.</small>
+                  </div>
+                  <button id="drive-client-btn" class="button small" type="button">Choose JSON…</button>
+                  <input id="drive-client" type="file" accept=".json,application/json" hidden>
+                </div>
+                <label class="connector-toggle-row">
+                  <div>
+                    <strong>Allow reviewed Drive &amp; Workspace writes in Agent mode</strong>
+                    <small>Every write — Docs, Sheets, Slides, folders, and local uploads — requires your approval and stays inside the selected scope.</small>
+                  </div>
+                  <span class="switch"><input id="drive-writes" type="checkbox"><span></span><span class="sr-only">Allow reviewed Google Drive writes</span></span>
+                </label>
+                <div class="field">
+                  <span>My Drive folder <small>(ID, URL, or browse after sign-in)</small></span>
+                  <div class="drive-folder-row">
+                    <input id="drive-folder" type="text" placeholder="Paste folder URL or ID, or click Browse…" autocomplete="off" spellcheck="false">
+                    <button id="drive-browse" class="button small" type="button" disabled>Browse My Drive…</button>
+                  </div>
+                </div>
+                <div id="drive-picker" class="drive-picker" hidden>
+                  <div class="drive-picker-bar">
+                    <button id="drive-picker-up" class="button small" type="button" disabled>Up</button>
+                    <strong id="drive-picker-path">My Drive</strong>
+                    <button id="drive-picker-use" class="button small accent" type="button">Use this folder</button>
+                  </div>
+                  <p class="hint drive-picker-hint">Open a folder to select it, or check specific files inside it for narrower file-only access.</p>
+                  <div id="drive-picker-list" class="drive-picker-list" role="list"></div>
+                </div>
+                <div id="drive-scope-bar" class="drive-scope-bar" hidden>
+                  <span id="drive-scope-note"></span>
+                  <button id="drive-scope-clear" class="button small" type="button">Allow whole folder</button>
+                </div>
+                <div class="connector-caps" aria-label="Supported Google Drive capabilities">
+                  <span class="connector-cap">Docs (formatted &amp; tables)</span>
+                  <span class="connector-cap">Google Sheets</span>
+                  <span class="connector-cap">Google Slides</span>
+                  <span class="connector-cap">Binary &amp; uploads</span>
+                  <span class="connector-cap">File-level scoping</span>
+                  <span class="connector-cap">OS Keychain</span>
+                </div>
+              </div>
+              <div class="connector-card-foot">
+                <p id="drive-status" class="connector-status" role="status">Not connected.</p>
+                <div class="connector-actions">
+                  <button id="drive-disconnect" class="button small" type="button" disabled>Disconnect</button>
+                  <button id="drive-start" class="button small" type="button">Sign in with Google</button>
+                  <button id="drive-select" class="button small accent" type="button" disabled>Select folder</button>
+                </div>
+              </div>
             </div>
-            <p class="hint connector-footnote">Ask naturally about Google Drive or Google Docs, or use @drive. Chat reads; Agent can create folders and Docs and append or replace reviewed text.</p>
-            <p class="hint connector-footnote">Ask naturally in Chat (read-only) or Agent mode (reviewed writes), or mention <code>@github</code>. Commits and pushes target unprotected non-default branches. Say “local workspace” for local-only edits. Reconnect after restarting Pipkin.</p>
+            <p class="hint connector-footnote">Ask naturally about Google Drive, Docs, Sheets, or Slides (or use <code>@drive</code>). Chat reads; Agent can edit Docs with formatting, update Sheets and Slides, and upload workspace files with approval.</p>
+            <p class="hint connector-footnote">Ask naturally in Chat (read-only) or Agent mode (reviewed writes), or mention <code>@github</code>. Commits and pushes target unprotected non-default branches. Say “local workspace” for local-only edits.</p>
           </section>
           <section id="panel-data" role="tabpanel" aria-labelledby="tab-data" hidden>
             <div class="setting">
