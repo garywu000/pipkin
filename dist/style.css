@@ -2920,3 +2920,90 @@ a.button { text-decoration: none; }
   .task-hero-top { flex-wrap: wrap; }
   .task-status-toggle { margin-left: auto; }
 }
+
+/* ---------- GitHub approval card & Settings Connected accounts ---------- */
+.github-approval[data-decision="pending"] {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--rule));
+  box-shadow: inset 0 1px 0 var(--specular), 0 10px 26px color-mix(in srgb, var(--accent) 9%, rgb(0 0 0 / .1)), var(--shadow-sm);
+  border-radius: 16px;
+}
+.github-approval[data-decision="pending"] header { background: var(--accent-soft); color: var(--accent-text); }
+.github-approval-body { display: grid; gap: 10px; padding: 13px 14px 12px; background: var(--surface); }
+.github-approval-hero { display: grid; gap: 2px; }
+.github-approval-sub { font-size: .8rem; color: var(--muted); }
+.github-approval-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.github-approval-warn { margin: 0; }
+.github-approval-section { display: grid; gap: 6px; }
+.github-section-label { font-size: .76rem; font-weight: 600; color: var(--muted); }
+.github-commit-list, .github-file-list {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 5px;
+  max-height: 180px; overflow-y: auto;
+}
+.github-commit-list li, .github-file-list li {
+  display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 9px; border-radius: 9px;
+  background: var(--surface-2); border: 1px solid var(--rule); font-size: .82rem;
+}
+.github-commit-list code, .github-file-list code {
+  font: 500 .78rem ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent-text);
+  background: none; padding: 0; flex: none;
+}
+.github-file-list code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.github-commit-subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.github-commit-list small, .github-file-list small { flex: none; font-size: .74rem; color: var(--muted); }
+.github-file-kind {
+  flex: none; padding: 1px 7px; border-radius: 999px; font-size: .71rem; font-weight: 600;
+  background: var(--accent-soft); color: var(--accent-text);
+}
+.github-file-kind[data-kind="del"] { background: var(--danger-soft); color: var(--danger); }
+.github-file-kind[data-kind="bin"] { background: var(--surface); color: var(--ink-2); border: 1px solid var(--rule); }
+.github-approval-text { padding: 0; }
+.github-approval .diff { border: 1px solid var(--rule); border-radius: 10px; max-height: 220px; }
+.github-raw-details { border-top: 1px solid var(--rule); padding-top: 8px; }
+.github-raw-details > summary {
+  display: inline-flex; align-items: center; gap: 5px; font-size: .78rem; color: var(--muted);
+  cursor: pointer; list-style: none;
+}
+.github-raw-details > summary::-webkit-details-marker { display: none; }
+.github-raw-details > summary:hover { color: var(--ink); }
+.github-raw-details > summary .chev-sm { opacity: 1; }
+.github-raw-details .tool-output { margin-top: 7px; border: 1px solid var(--rule); border-radius: 10px; max-height: 200px; }
+
+.connector-card {
+  display: grid; gap: 14px; padding: 15px 16px; border-radius: 16px;
+  background: var(--surface); border: 1px solid var(--rule);
+  box-shadow: inset 0 1px 0 var(--specular), var(--shadow-sm);
+}
+.connector-card[data-state="connected"] {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--rule));
+}
+.connector-card-head { display: flex; align-items: flex-start; gap: 11px; }
+.connector-card-icon {
+  flex: none; width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--accent-text);
+}
+.connector-card-icon .icon { width: 18px; height: 18px; }
+.connector-card-title { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.connector-card-title strong { font-size: .96rem; font-weight: 640; color: var(--ink); }
+.connector-card-title p { margin: 0; font-size: .82rem; color: var(--muted); line-height: 1.42; }
+.connector-card-title code { font-size: .78rem; }
+.connector-card-body { display: grid; gap: 12px; }
+.connector-toggle-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 10px 12px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--rule); cursor: pointer;
+}
+.connector-toggle-row > div { display: grid; gap: 2px; min-width: 0; }
+.connector-toggle-row strong { font-size: .86rem; font-weight: 600; color: var(--ink); }
+.connector-toggle-row small { font-size: .78rem; color: var(--muted); line-height: 1.38; }
+.connector-caps { display: flex; flex-wrap: wrap; gap: 6px; }
+.connector-cap {
+  padding: 3px 9px; border-radius: 999px; font-size: .74rem; font-weight: 540;
+  background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--rule);
+}
+.connector-card-foot {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  padding-top: 11px; border-top: 1px solid var(--rule);
+}
+.connector-status { margin: 0; font-size: .82rem; color: var(--muted); flex: 1; min-width: 160px; }
+.connector-status[data-error="true"] { color: var(--danger); }
+.connector-actions { display: flex; align-items: center; gap: 7px; flex: none; }
+.connector-footnote { margin-top: 12px; }

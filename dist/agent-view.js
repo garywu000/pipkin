@@ -362,8 +362,11 @@
     const target = space > 0 ? text.slice(space + 1) : "";
     const label = el("span", { className: "tool-label" }, el("span", { className: "tool-verb", text: verb }), target ? " " : null, target ? el("code", { text: target }) : null);
     const meta = el("span", { className: "tool-meta-slot" });
+    const toolIcon = TOOL_ICONS[entry.name] || (entry.name?.startsWith("github_")
+      ? (/commit|upload|push|create|merge|update|publish|comment/.test(entry.name) ? "edit" : "globe")
+      : "sparkle");
     details.append(el("summary", {},
-      el("span", { className: "tool-kind" }, icon(TOOL_ICONS[entry.name] || "sparkle")),
+      el("span", { className: "tool-kind" }, icon(toolIcon)),
       label, meta, icon("chevron-right", "icon chev-sm")));
     const content = el("div");
     details.append(content);
@@ -464,8 +467,132 @@
     return card;
   }
 
+  function formatBytes(size) {
+    if (!Number.isFinite(size)) return "";
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  function parseGithubApprovalDetail(detail) {
+    if (typeof detail !== "string") return { data: null, diff: "" };
+    const splitAt = detail.indexOf("\n\nDiff:\n");
+    const jsonPart = splitAt >= 0 ? detail.slice(0, splitAt) : detail;
+    const diff = splitAt >= 0 ? detail.slice(splitAt + 8) : "";
+    try {
+      const parsed = JSON.parse(jsonPart);
+      return { data: parsed && typeof parsed === "object" ? parsed : null, diff };
+    } catch {
+      return { data: null, diff: "" };
+    }
+  }
+
+  function githubApprovalCard(entry, onApprove) {
+    const EXPIRED = { steering: "Skipped (you steered the run)", stop: "Canceled (the run is stopping)", ended: "Canceled when the run stopped" };
+    const heading = entry.decision === "approved" ? "Approved" : entry.decision === "denied" ? "Declined"
+      : entry.decision === "expired" ? EXPIRED[entry.reason] || "Not answered" : "Review GitHub action";
+    const { data, diff } = parseGithubApprovalDetail(entry.detail);
+    const repo = data?.repository || "";
+    const account = data?.account || "";
+    const payload = data?.payload && typeof data.payload === "object" ? data.payload : {};
+    const expected = data?.expectedState && typeof data.expectedState === "object" ? data.expectedState : {};
+    const card = el("div", { className: "approval-card github-approval", dataset: { decision: entry.decision || "pending" } });
+    const repoPill = !entry.decision && repo ? el("span", { className: "schedule-proposal-perm", text: repo }) : null;
+    card.append(el("header", {},
+      icon(entry.decision === "approved" ? "check" : entry.decision ? "x" : "globe"),
+      el("span", { text: entry.decision ? `${heading} · ${entry.title}` : heading }),
+      repoPill));
+    if (entry.decision) return card;
+
+    const body = el("div", { className: "github-approval-body" });
+    body.append(el("div", { className: "github-approval-hero" },
+      el("div", { className: "schedule-proposal-title", text: entry.title || data?.action || "GitHub action" }),
+      account ? el("div", { className: "github-approval-sub", text: `Account @${account}${repo ? ` · ${repo}` : ""}` }) : null));
+
+    const chips = [];
+    const chip = (glyph, labelText, valueText) => el("div", { className: "schedule-proposal-chip" },
+      icon(glyph), el("span", { className: "chip-label", text: labelText }), el("strong", { text: valueText }));
+    if (data?.branch || payload.branch) chips.push(chip("globe", "Branch", data?.branch || payload.branch));
+    if (payload.head && payload.base) chips.push(chip("globe", "Branches", `${payload.head} → ${payload.base}`));
+    if (payload.localBranch && payload.remoteBranch) chips.push(chip("globe", "Push", `${payload.localBranch} → ${payload.remoteBranch}`));
+    if (payload.ref && expected.base) chips.push(chip("globe", "From", `${expected.base} (${String(expected.sha || "").slice(0, 7)})`));
+    if (payload.merge_method) chips.push(chip("check", "Method", payload.merge_method));
+    if (expected.checksPassed === true) {
+      const count = (expected.checks?.length || 0) + (expected.statuses?.length || 0);
+      chips.push(chip("check", "CI checks", count ? `${count} passed` : "None reported"));
+    }
+    if (payload.tag_name || expected.tag) chips.push(chip("sparkle", "Tag", payload.tag_name || expected.tag));
+    if (typeof payload.draft === "boolean") chips.push(chip("note", "Mode", payload.draft ? "Draft" : "Publish now"));
+    if (payload.prerelease === true) chips.push(chip("alert", "Channel", "Pre-release"));
+    if (expected.assetName) {
+      chips.push(chip("file", "Asset", `${expected.assetName} (${formatBytes(expected.bytes)})`));
+      if (expected.source) chips.push(chip("folder", "Source", `${expected.workspace ? expected.workspace + "/" : ""}${expected.source}`));
+    }
+    if (Number.isInteger(expected.commitCount)) {
+      chips.push(chip("list", "Commits", `${expected.commitCount} (${expected.fileCount || 0} files)`));
+      if (expected.newBranch) chips.push(chip("sparkle", "Remote", "Creates new branch"));
+    }
+    if (payload.state) chips.push(chip("check", "State", payload.state + (payload.state_reason ? ` (${payload.state_reason})` : "")));
+    if (data?.message || payload.message) chips.push(chip("chat", "Message", data?.message || payload.message));
+    if (chips.length) body.append(el("div", { className: "github-approval-chips" }, ...chips));
+
+    if (expected.workingTreeDirty) {
+      body.append(el("div", { className: "schedule-proposal-note github-approval-warn" },
+        icon("alert"),
+        el("span", { text: "Your local folder has uncommitted changes. Only committed Git history will be pushed." })));
+    }
+    if (Array.isArray(expected.commits) && expected.commits.length) {
+      body.append(el("div", { className: "github-approval-section" },
+        el("span", { className: "github-section-label", text: `Commits to push (${expected.commitCount})` }),
+        el("ul", { className: "github-commit-list" }, ...expected.commits.slice(0, 12).map((c) => el("li", {},
+          el("code", { text: c.sha }),
+          el("span", { className: "github-commit-subject", text: c.subject }),
+          el("small", { text: [c.author, c.date].filter(Boolean).join(" · ") }))))));
+    }
+    if (Array.isArray(expected.changes) && expected.changes.length) {
+      body.append(el("div", { className: "github-approval-section" },
+        el("span", { className: "github-section-label", text: `Files in commit (${expected.changes.length})` }),
+        el("ul", { className: "github-file-list" }, ...expected.changes.map((c) => {
+          const kind = c.encoding === "binary" ? `Binary · ${formatBytes(c.bytes)}`
+            : c.new === null ? "Delete" : c.previousBlob ? "Modify" : "Add";
+          return el("li", {},
+            el("span", { className: "github-file-kind", dataset: { kind: c.new === null && c.encoding !== "binary" ? "del" : c.encoding === "binary" ? "bin" : "mod" }, text: kind }),
+            el("code", { text: c.path }),
+            c.sha256 ? el("small", { text: `sha256:${c.sha256.slice(0, 10)}` }) : null);
+        }))));
+    }
+    if (diff) {
+      body.append(el("div", { className: "github-approval-section" },
+        el("span", { className: "github-section-label", text: "Diff" }),
+        diffView(diff)));
+    }
+    const textPreview = payload.title && payload.body !== undefined
+      ? `${payload.title}${payload.body ? "\n\n" + payload.body : ""}`
+      : (payload.body || (payload.name && payload.tag_name ? `${payload.name}${payload.body ? "\n\n" + payload.body : ""}` : ""));
+    if (textPreview && !diff) {
+      body.append(el("div", { className: "schedule-proposal-prompt github-approval-text" },
+        el("span", { text: "Content" }),
+        el("p", { text: textPreview })));
+    }
+    body.append(el("details", { className: "github-raw-details" },
+      el("summary", {}, icon("chevron-right", "icon chev-sm"), el("span", { text: "Inspect exact payload" })),
+      el("div", { className: "tool-output", text: entry.detail || "" })));
+    card.append(body);
+
+    const footer = el("footer");
+    const deny = el("button", { type: "button", className: "button small", text: "Deny", disabled: Boolean(entry.submitting) });
+    const allow = el("button", { type: "button", className: "button small accent", disabled: Boolean(entry.submitting),
+      text: entry.submitting ? "Sending…" : "Approve GitHub action" });
+    deny.addEventListener("click", () => onApprove?.(entry, false));
+    allow.addEventListener("click", () => onApprove?.(entry, true));
+    footer.append(el("span", { className: "decision", text: repo ? `Writes to ${repo} only if you approve.` : "Writes to the selected GitHub repository." }), deny, allow);
+    card.append(footer);
+    return card;
+  }
+
   function approvalCard(entry, onApprove) {
     if (entry.kind === "schedule") return scheduleCard(entry, onApprove);
+    if (entry.kind === "github") return githubApprovalCard(entry, onApprove);
     const card = el("div", { className: "approval-card", dataset: { decision: entry.decision || "pending" } });
     const EXPIRED = { steering: "Skipped (you steered the run)", stop: "Canceled (the run is stopping)", ended: "Canceled when the run stopped" };
     const heading = entry.decision === "approved" ? "Approved" : entry.decision === "denied" ? "Declined"

@@ -206,6 +206,7 @@ let searchQuery = "";
 let searchTimer = 0;
 let historyReady = false;
 let switchingChat = false;
+let routingGithub = false;
 let changingChats = false;
 let menuChatId = null;
 let dialogChatId = null;
@@ -1927,7 +1928,7 @@ function updateControls() {
   const steering = busyMode === "steer";
   const queueing = busyMode === "queue";
   const sidebarBusy = processingFiles || changingChats || !historyReady;
-  const composerBusy = replying || sidebarBusy || switchingChat;
+  const composerBusy = replying || sidebarBusy || switchingChat || routingGithub;
   const agent = agentMode.checked;
   const started = Boolean(history.length || pendingChatTitle);
   appMode.hidden = started;
@@ -1952,7 +1953,7 @@ function updateControls() {
     composerBusy || choosingWorkspace || (!localCommand && !modelCanReply()) || !hasInput || needsSkillBrief;
   newChatButton.disabled = composerBusy;
   byId("topbar-new").disabled = composerBusy;
-  sidebarContent.inert = sidebarBusy;
+  sidebarContent.inert = sidebarBusy || routingGithub;
   contextButton.disabled = composerBusy;
   newProjectButton.disabled = composerBusy;
   attachButton.disabled = composerBusy;
@@ -1962,7 +1963,7 @@ function updateControls() {
   for (const option of appMode.querySelectorAll("input")) option.disabled = composerBusy || choosingWorkspace;
   workspaceButton.disabled = composerBusy || choosingWorkspace;
   permissionButton.disabled = replying;
-  promptBox.readOnly = (replying && !steering && !queueing) || switchingChat || !historyReady;
+  promptBox.readOnly = (replying && !steering && !queueing) || switchingChat || routingGithub || !historyReady;
   promptBox.maxLength = steering ? 2000 : 40000;
   const otherAction = canSteerNow() ? ` · ${altKeyLabel()}+Return to ${steering ? "queue" : "steer"}` : "";
   promptBox.placeholder = steering ? "Steer this run" + otherAction
@@ -3348,7 +3349,8 @@ function* documentPassages(text) {
   }
 }
 
-function modelMessage({ role, content, files: attached = [], skill, sourceChecked }, evidence = null) {
+function modelMessage({ role, content, files: attached = [], skill, sourceChecked, github }, evidence = null) {
+  if (github) return { role, content: "[Isolated GitHub turn omitted from other model contexts.]" };
   const command = skill && Skills.parse(content);
   const request = command?.name === skill?.name && typeof skill?.instructions === "string"
     ? Skills.prompt({ ...skill, instructions: skill.instructions.slice(0, 4000) }, command.input)
@@ -3406,6 +3408,7 @@ async function requestContext() {
       .slice(0, 3);
     const excerpts = await Promise.all(related.map(async (chat) => {
       const messages = unsavedChats.get(chat.id) || await read("conversations", chat.id);
+      if (messages?.at(-2)?.github || messages?.at(-1)?.github) return "";
       const prompt = messages?.at(-2)?.content;
       const reply = messages?.at(-1)?.content;
       if (!prompt && !reply) return "";
@@ -3440,6 +3443,8 @@ function systemPrompt() {
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   const lines = [
     `You are Pipkin, a helpful, knowledgeable assistant running privately on ${PipkinPlatform.yourDevice} through Ollama (model: ${shortModelName(modelInfo.model) || "local model"}).`,
+    // Small models otherwise take their identity from web results or older replies in the chat.
+    `If asked who you are or which model you run, answer from this message: you are Pipkin, running ${shortModelName(modelInfo.model) || "a local model"}. Don't search the web for questions about yourself, and ignore earlier replies in this chat that named a different model.`,
     `Today is ${today}.`,
     "Use Markdown when it helps: short headings, bullet lists, tables, and fenced code blocks with a language tag. Write math with $...$ or $$...$$.",
     "Be direct and accurate. If you are unsure, say so.",
@@ -3485,14 +3490,21 @@ function compactSourceChunks(source) {
 
 /* scheduleText: the user's own words for this turn. The server uses them to offer schedule_task only when the
    message names a time or repeat ("every Wednesday at 6pm"). */
-function requestChat(messages, think, signal, compact = false, scheduleText = null) {
+/* Questions about Pipkin itself ("who are you", "what model are you using") are answered from the system prompt.
+   A web search for them returns pages about other models, which small models then repeat as their own identity. */
+const MODEL_NAMES = "qwen|llama|gpt|chatgpt|claude|gemini|deepseek|mistral|gemma|phi|kimi|glm";
+const SELF_QUESTION = new RegExp(String.raw`\b(?:who are you|what are you\b|what(?:'s| is) your name|(?:what|which) (?:ai |language |llm )?model (?:are|do|is) (?:you|this)|(?:what|which) (?:llm|ai) are you|(?:what|which) model (?:powers|runs) (?:you|pipkin)|your (?:ai |language )?model\b|(?:are|aren't) you (?:${MODEL_NAMES})\b|you(?:'re| are) (?:${MODEL_NAMES})\b|is this (?:${MODEL_NAMES})\b)`, "i");
+
+function requestChat(messages, think, signal, compact = false, scheduleText = null, githubRoute = null) {
+  const aboutPipkin = !compact && typeof scheduleText === "string" && scheduleText.length < 200 && SELF_QUESTION.test(scheduleText);
   return fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages, think, compact, system: compact ? "" : systemPrompt(), temperature: settings.temperature,
-      web: compact ? "off" : settings.webMode,
-      ...(!compact && scheduleText ? { scheduleText: scheduleText.slice(0, 4000) } : {}),
+      web: compact || aboutPipkin ? "off" : settings.webMode,
+      ...(!compact && scheduleText ? { scheduleText: scheduleText.slice(0, 4000), requestText: scheduleText.slice(0, 40000) } : {}),
+      ...(githubRoute ? { githubRoute: githubRoute.github, githubGeneration: githubRoute.generation } : {}),
     }),
     signal,
   });
@@ -4133,7 +4145,7 @@ function agentHistory() {
   for (let index = start - (start % 2); index + 1 < history.length; index += 2) {
     const user = modelMessage(history[index]).content;
     const assistant = history[index + 1];
-    const reply = assistant.sourceChecked ? withoutSourceMarkers(assistant.content) : assistant.content || "";
+    const reply = modelMessage(assistant).content;
     turnsForModel.push({ role: "user", content: contextExcerpt(user, 3000) }, { role: "assistant", content: reply.slice(0, 4000) });
   }
   return turnsForModel;
@@ -4239,7 +4251,20 @@ async function sendMessage(event, { alternate = false } = {}) {
 
 /** Start a turn from text typed in the composer, or from a queued message (which leaves the composer alone).
     Returns false when the message was not sent. */
+// The server decides from the raw user request, using the same router for Chat and Agent.
+async function routeGithub(text) {
+  if (!text.trim()) return null;
+  const response = await fetch("/api/connectors/github/route", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: text.slice(0, 40000) }),
+  });
+  const data = await response.json();
+  if (!response.ok || typeof data.github !== "boolean" || !Number.isSafeInteger(data.generation)) throw new Error(data.error || "Could not check GitHub routing.");
+  return data;
+}
+
 async function startTurn(text, { queued = false } = {}) {
+  if (routingGithub) return false;
   if (!queued && refreshPasteExcerpts()) updateFiles();
   const draftFiles = queued ? [] : files;
   const command = Skills.parse(text);
@@ -4258,17 +4283,28 @@ async function startTurn(text, { queued = false } = {}) {
     announce(humanize.error, true);
     return false;
   }
-  if (!humanize && Skills.requestedMentions(text).some(({ name }) => name === "github") && (!agentMode.checked || settings.webMode === "off")) {
-    announce("Use Agent mode with Web enabled to read a public GitHub link.", true);
-    return false;
-  }
   const skill = findSkill(command?.name);
   if (command && !skill) {
     announce("Unknown skill /" + command.name + ". Open Skills to see the available commands.", true);
     return false;
   }
   if (!canRunSkill(skill, text)) return false;
-  const continuing = !command && !humanize && !draftFiles.length && text.length <= 2000 ? stoppedRunToContinue() : null;
+  let githubRoute = null;
+  if (!command && !humanize) {
+    const originalChat = chatId;
+    const originalDraft = promptBox.value;
+    routingGithub = true;
+    updateControls();
+    try { githubRoute = await routeGithub(text); }
+    catch (error) { announce(error.message, true); return false; }
+    finally { routingGithub = false; updateControls(); }
+    if (chatId !== originalChat || activeReply || (!queued && promptBox.value !== originalDraft)) return false;
+    if (githubRoute?.github && draftFiles.length) {
+      announce("GitHub requests cannot use local attachments yet. Remove the attachments or work locally first.", true);
+      return false;
+    }
+  }
+  const continuing = !githubRoute?.github && !command && !humanize && !draftFiles.length && text.length <= 2000 ? stoppedRunToContinue() : null;
   const proceed = async () => {
     const attachments = draftFiles;
     if (!queued) {
@@ -4281,7 +4317,7 @@ async function startTurn(text, { queued = false } = {}) {
       await submitTurn(text, [], true, { resume: continuing.checkpointId, steering: text });
       return;
     }
-    await submitTurn(text, attachments, agentMode.checked, { skill, humanize });
+    await submitTurn(text, attachments, agentMode.checked, { skill, humanize, githubRoute });
   };
   if (skill?.source === "workspace" && skill.security?.level === "review" && !trustedWorkspaceSkills.has(skillTrustKey(skill))) {
     openSkillPreviewDialog({
@@ -4324,7 +4360,7 @@ async function resumeWork(checkpointId) {
   await submitTurn("Resume Work", [], true, { resume: checkpointId });
 }
 
-async function submitTurn(text, attachments, useAgent, { resume = null, steering = null, skill = null, modeOverride = null, humanize = null } = {}) {
+async function submitTurn(text, attachments, useAgent, { resume = null, steering = null, skill = null, modeOverride = null, humanize = null, githubRoute = null } = {}) {
   // A title request takes a few seconds and holds the model; let it finish so this turn isn't refused as busy.
   if (titleJob) {
     titleJob.stopRetrying();
@@ -4345,19 +4381,26 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
   const workflow = useAgent ? turnWorkflow(skill, text) : null;
   const starter = skill && !workflow && Skills.starters.some(({ name }) => name === skill.name);
   const tools = Skills.requestedMentions(text);
-  const mode = modeOverride || (starter || (tools.length && !workflow) ? "read" : settings.permission);
+  let githubTurn = false;
+  if (!humanize && !skill && !resume) {
+    try { githubRoute = githubRoute ?? await routeGithub(text); githubTurn = Boolean(githubRoute?.github); }
+    catch (error) { announce(error.message, true); return; }
+  }
+  if (githubTurn) userMessage.github = true;
+  const mode = modeOverride || (starter || (tools.length && !workflow && !githubTurn) ? "read" : settings.permission);
   const skillDisablesWeb = skill?.permissions?.web === false;
-  const web = !workflow && !skillDisablesWeb && settings.webMode !== "off" && (tools.length ? tools.some(({ name }) => name === "github") : !starter);
+  const web = !githubTurn && !workflow && !skillDisablesWeb && settings.webMode !== "off" && !tools.length && !starter;
   if (attachments.length) {
     userMessage.files = attachments;
     if (!text) userMessage.content = "Summarize the attached files.";
   }
   const agentRun = useAgent ? Agent.createRun({
-    workspace: agentWorkspace?.name || null, workspacePath: agentWorkspace?.path || null, mode, web,
-    checkpointId: resume || crypto.randomUUID(),
+    workspace: githubTurn ? null : agentWorkspace?.name || null,
+    workspacePath: githubTurn ? null : agentWorkspace?.path || null, mode, web,
+    checkpointId: githubTurn ? null : resume || crypto.randomUUID(),
   }) : null;
   const evidence = { sources: [], limit: useAgent ? 40000 : Infinity };
-  const currentMessage = humanize ? null : modelMessage(userMessage, evidence);
+  const currentMessage = humanize ? null : githubTurn ? { role: "user", content: text } : modelMessage(userMessage, evidence);
   if (resume) {
     const previous = history.findLast((message) => message.agentRun?.checkpointId === resume);
     evidence.sources = previous?.sources?.filter((source) => source.kind === "attachment") || [];
@@ -4371,7 +4414,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
   const sourceState = (sourceNote) => ({
     sourceChecked: !humanize, sources: [...sources.values()], ...(sourceNote && { sourceNote }),
   });
-  const replyDetails = { model: modelInfo.model, humanized: Boolean(humanize) };
+  const replyDetails = { model: modelInfo.model, humanized: Boolean(humanize), ...(githubTurn && { github: true }) };
   addMessage(userMessage);
   const view = addMessage({ role: "assistant", content: "", agentRun, ...replyDetails, ...sourceState() });
   view.article.classList.add("streaming");
@@ -4405,7 +4448,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
   let scheduleProposal = null;
   let done = false;
   let savedTurn = false;
-  const interrupted = useAgent ? "Work was interrupted. You can resume from the checkpoint."
+  const interrupted = githubTurn ? "GitHub request interrupted. Inspect GitHub before retrying any remote write." : useAgent ? "Work was interrupted. You can resume from the checkpoint."
     : "Reply interrupted. Use Regenerate reply to try again.";
   let stats = null;
   let thinkingStartedAt = null;
@@ -4493,7 +4536,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     }
     if (useAgent) {
       const earlier = compactedContext ? "Summary of older turns\n" + compactedContext.text : "";
-      const notes = [await requestContext(), earlier].filter(Boolean).join("\n\n").slice(0, 6000);
+      const notes = githubTurn ? "" : [await requestContext(), earlier].filter(Boolean).join("\n\n").slice(0, 6000);
       const task = currentMessage.content;
       let lastSeq = 0;
       let lastEventAt = Date.now();
@@ -4511,9 +4554,9 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...(resume ? { resume } : { checkpoint: agentRun.checkpointId }),
+          ...(!githubTurn ? (resume ? { resume } : { checkpoint: agentRun.checkpointId }) : {}),
           ...(resume && steering ? { steering } : {}),
-          workspace: agentWorkspace?.key || null, task, requestText: userMessage.content.slice(0, 40000), context: notes, history: agentHistory(),
+          workspace: agentWorkspace?.key || null, task, requestText: userMessage.content.slice(0, 40000), ...(githubRoute ? { githubRoute: githubRoute.github, githubGeneration: githubRoute.generation } : {}), context: notes, history: githubTurn ? [] : agentHistory(),
           mode, web, think: settings.think && !thinkToggle.hidden,
           ...(workflow ? { workflow, artifact: {
             brief: skill ? Skills.parse(text)?.input || "" : text,
@@ -4521,7 +4564,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
               .map(({ name, text, truncated }) => ({ name, text, truncated: Boolean(truncated) })),
           } } : {}),
           ...(skill?.checks?.length ? { skillChecks: skill.checks, skillName: skill.name } : {}),
-          allowMemory: !workflow && !starter && !tools.length && settings.memoryEnabled, memories: settings.memoryEnabled ? memories.slice(0, 60) : [],
+          allowMemory: !githubTurn && !workflow && !starter && !tools.length && settings.memoryEnabled, memories: !githubTurn && settings.memoryEnabled ? memories.slice(0, 60) : [],
           instructions: settings.instructions.slice(0, 6000), maxSteps: Number(settings.maxSteps) || 24,
           terminal: window.PipkinPanels?.terminalAllowed?.() ? (window.PipkinPanels?.activeTerminalId() || null) : null,
           allowTerminal: window.PipkinPanels?.terminalAllowed?.() ?? true,
@@ -4717,11 +4760,11 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
       return;
     }
 
-    const context = await requestContext();
-    const messages = await prepareChatMessages(currentMessage, context, controller.signal);
+    const context = githubTurn ? "" : await requestContext();
+    const messages = githubTurn ? [currentMessage] : await prepareChatMessages(currentMessage, context, controller.signal);
     announce();
     const think = settings.think && !thinkToggle.hidden;
-    const response = await requestChat(messages, think, controller.signal, false, humanize ? null : text);
+    const response = await requestChat(messages, think, controller.signal, false, humanize ? null : text, githubRoute);
     await readStream(response, (part) => {
       if (part.error) throw new Error(part.error);
       if (part.schedule) {
@@ -4817,7 +4860,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
       }
     }
     view.article.classList.remove("streaming");
-    const expectedWeb = !humanize && (useAgent
+    const expectedWeb = !githubTurn && !humanize && (useAgent
       ? (web && settings.webMode === "on") || agentRun.entries.some((entry) => ["web_search", "web_fetch"].includes(entry.name))
       : settings.webMode === "on" || webSteps.length > 0);
     const sourceNote = expectedWeb && ![...sources.values()].some((source) => source.kind === "page" || source.kind === "search")
@@ -4849,7 +4892,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
         await discardWorkCheckpoints([agentRun.checkpointId]).catch(() => {});
       }
       // Name the chat from its first request; if an earlier attempt failed, a later reply tries again.
-      if (saved && !humanize) {
+      if (saved && !humanize && !githubTurn && !activeReplyHistory[0]?.github) {
         const firstRequest = activeReplyHistory.find((message) => message.role === "user") || userMessage;
         refineChatTitle(runChatId, firstRequest, answer);
       }
@@ -4862,7 +4905,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     } else if (savedTurn) {
       if (agentRun) {
         Agent.finish(agentRun, "stopped", agentRun.runId
-          ? "Work stopped. You can resume from the checkpoint." : "Work stopped before it started.");
+          ? (githubTurn ? "GitHub work stopped. Inspect GitHub before retrying any remote write." : "Work stopped. You can resume from the checkpoint.") : "Work stopped before it started.");
         view.updateResume?.();
         view.activity?.render();
       }
@@ -4994,7 +5037,64 @@ function selectSettingsTab(tab) {
   }
   stopTokenUsageUpdates();
   if (tab.id === "tab-usage") refreshTokenUsage();
+  if (tab.id === "tab-connectors") void githubConnection("status");
 }
+
+async function githubConnection(action) {
+  const status = byId("github-status");
+  const pill = byId("github-status-pill");
+  const card = byId("github-connector-card");
+  const connect = byId("github-connect");
+  const disconnect = byId("github-disconnect");
+  if (connect.disabled) return;
+  connect.disabled = disconnect.disabled = true;
+  status.textContent = action === "connect" ? "Checking GitHub access…" : "Checking connection…";
+  status.dataset.error = "false";
+  let connected = false;
+  try {
+    const response = await fetch("/api/connectors/github/" + action, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action === "connect" ? {
+        repo: byId("github-repo").value.trim(), writes: byId("github-writes").checked,
+      } : {}),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "GitHub connection failed.");
+    const grant = data.connection;
+    connected = Boolean(grant);
+    status.textContent = grant ? `Connected as @${grant.account} · ${grant.repo} · ${grant.writes ? "Reviewed writes enabled" : "Read only"}` : "Not connected.";
+    if (pill) {
+      pill.textContent = grant ? (grant.writes ? "Connected · Writes" : "Connected · Read") : "Not connected";
+      pill.dataset.status = grant ? "active" : "paused";
+    }
+    if (card) card.dataset.state = grant ? "connected" : "disconnected";
+    if (grant) {
+      byId("github-repo").value = grant.repo;
+      byId("github-writes").checked = grant.writes;
+    }
+    if (action === "disconnect") byId("github-writes").checked = false;
+  } catch (error) {
+    status.textContent = error.message || "GitHub connection failed.";
+    status.dataset.error = "true";
+    if (pill) {
+      pill.textContent = "Check setup";
+      pill.dataset.status = "missed";
+    }
+    if (card) card.dataset.state = "disconnected";
+  } finally {
+    connect.disabled = false;
+    disconnect.disabled = !connected;
+  }
+}
+
+byId("github-connect").addEventListener("click", () => githubConnection("connect"));
+byId("github-disconnect").addEventListener("click", () => githubConnection("disconnect"));
+byId("github-repo").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void githubConnection("connect");
+  }
+});
 
 function openSettings(tabId = "tab-general") {
   if (settingsDialog.open) return;

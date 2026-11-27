@@ -195,11 +195,17 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | [v1.3.0](https://github.com/garywu000/pipkin/releases/tag/v1.3.0) | Added a guard against starting new model loads under critical memory pressure, the memory warning banner, and stricter native browser link handling. Included the v1.2.1 development changes for pausing runs, unloading idle models, and recommending context sizes. |
 | [v1.2.0](https://github.com/garywu000/pipkin/releases/tag/v1.2.0) | Redesigned the Mac interface with five palettes and first-launch customization. Added the Harness launcher, live model memory display, and Undo All. |
 
+## GitHub connector (v2.4.1 development preview)
+
+Install GitHub CLI and sign in with `gh auth login --hostname github.com` in your terminal. In Settings › Connected accounts, enter an `owner/repository` and connect it. Enable reviewed writes only if needed. The connection is cleared when the server restarts; select it again to change repositories.
+
+Ask naturally, for example “Create a branch for the README changes,” “Open a pull request,” “Review and merge PR #12,” or “Draft a release v2.4.1.” The `@github` mention remains optional. Chat reads repository data. Agent can propose feature branches, atomic commits of up to eight files (UTF-8 text up to 12 KB each, or files from your workspace up to 2 MB each and 5 MB per commit), pull requests, issue creation and updates, comments, and draft or published releases. In Agent mode with your workspace selected, it can also upload a workspace file up to 100 MB as a release asset, and push existing local commits to a non-default branch of the connected repository (fast-forward only, never a force-push, and only when the folder's `origin` is that repository). Every remote write requires explicit approval, including in Auto mode, and Pipkin rechecks the exact files or commits after you approve. Direct commits and pushes never target the default branch, files containing private keys are refused, and changes to `.github/workflows/` are refused. Merging requires a complete bounded diff review of the current PR and passing reported checks; GitHub still enforces repository rules. Scheduled GitHub actions are outside this preview. Inspect the remote after an uncertain write before retrying. Connector turns use a local model and isolated tools; their messages remain in local chat history and exports.
+
 ## Roadmap
 
 - **Distribution.** Developer ID signing and notarization for Mac builds, plus Windows installer improvements.
 - **Benchmark comparisons.** Publish repeated trials with the same hardware, model, context, and task when comparing single-model and Explorer runs.
-- **Connected accounts.** Read-first access to GitHub and Google Workspace, with reviewed writes.
+- **Connected accounts.** GitHub pilot in the unreleased v2.4.1 dev build; Google Drive and broader local Git transfer are planned.
 - **Extensibility.** More reusable workflows and scheduled work.
 
 Have an idea or a task Pipkin should finish? [Open an issue](https://github.com/garywu000/pipkin/issues).

@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 import urllib.request
 
 import artifacts
+import github_connector
 import platform_os
 import scheduler
 import skills
@@ -1980,6 +1981,20 @@ def system_prompt(workspace, mode, web, memory, memories, instructions, context,
 def describe(name, args):
     args = args if isinstance(args, dict) else {}
     path = str(args.get("path", "."))[:120]
+    if name.startswith("github_"):
+        label = name.replace("github_", "GitHub: ").replace("_", " ")
+        detail_hint = (
+            args.get("path")
+            or args.get("source")
+            or args.get("remote_branch")
+            or args.get("local_branch")
+            or args.get("branch")
+            or args.get("tag")
+            or (f"#{args['number']}" if "number" in args else "")
+            or (f"release #{args['id']}" if "id" in args else "")
+            or (f"{args['head']} → {args['base']}" if "head" in args and "base" in args else "")
+        )
+        return label + (f" · {str(detail_hint)[:100]}" if detail_hint else "")
     if name == "list_files":
         return f"List {path}"
     if name == "search_text":
@@ -2303,7 +2318,8 @@ class Agent:
     def __init__(self, request_model, emit, check, approve, *, workspace=None, mode="ask", web=True,
                  memory=True, max_steps=24, num_ctx=8192, think=False, panels=None, workflow=None, undo=None,
                  allow_shell=True, explore_model=None, max_explore_steps=4, skill_checks=None, skill_name=None,
-                 schedule=None):
+                 schedule=None, github=None):
+        self.github = github
         self.request_model, self.emit, self.check = request_model, emit, check
         self.panels = panels
         self.workflow = workflow
@@ -2320,8 +2336,11 @@ class Agent:
         self.schedule = schedule if workspace is not None and mode != "create" and callable(schedule) else None
         if self.schedule:
             self.tools.append(SCHEDULE_TOOL)
+        if github:
+            self.tools = github.tools
+            self.schedule = None
         self.explore_tools = [t for t in self.tools if t["function"]["name"] not in
-                              WRITE_TOOL_NAMES | {"run_command", "terminal_run", "schedule_task"}]
+                              WRITE_TOOL_NAMES | {"run_command", "terminal_run", "schedule_task", "github_commit_file"} and (not github or t["function"]["name"] in github_connector.READ_NAMES)]
         self.tool_names = {tool["function"]["name"] for tool in self.tools}
         self.seen = set()
         self.counter = 0
@@ -2796,6 +2815,8 @@ class Agent:
             raise ValueError(f"The tool '{name}' is not available right now.")
         if not isinstance(args, dict):
             raise ValueError("Tool arguments must be an object.")
+        if self.github:
+            return self.github.execute(name, args, approve=self.approve, check=getattr(self, "github_check", self.check))
         workspace = self.workspace
         if name == "update_plan":
             steps = args.get("steps")
@@ -3084,6 +3105,12 @@ class Agent:
 
     def run(self, system, history, task, *, stop_requested=lambda: False, take_steering=tuple,
             steering_pending=lambda: False, saved=None, save_checkpoint=None, request_text=None):
+        if self.github:
+            def github_check():
+                self.check()
+                if stop_requested() or steering_pending():
+                    raise ApprovalCancelled()
+            self.github_check = github_check
         saved = saved or {}
         self.save_checkpoint = save_checkpoint
         self.plan = saved.get("plan", [])

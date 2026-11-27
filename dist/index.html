@@ -377,6 +377,7 @@
           <button type="button" role="tab" id="tab-usage" aria-controls="panel-usage" aria-selected="false"><svg class="icon"><use href="#i-list"/></svg>Usage</button>
           <button type="button" role="tab" id="tab-personal" aria-controls="panel-personal" aria-selected="false"><svg class="icon"><use href="#i-brain"/></svg>Personalization</button>
           <button type="button" role="tab" id="tab-agent" aria-controls="panel-agent" aria-selected="false"><svg class="icon"><use href="#i-bot"/></svg>Agent</button>
+          <button type="button" role="tab" id="tab-connectors" aria-controls="panel-connectors" aria-selected="false"><svg class="icon"><use href="#i-globe"/></svg>Connected accounts</button>
           <button type="button" role="tab" id="tab-data" aria-controls="panel-data" aria-selected="false"><svg class="icon"><use href="#i-download"/></svg>Data</button>
         </nav>
         <div class="settings-panels">
@@ -542,6 +543,46 @@
               </div>
               <p class="hint">The agent must finish within this many model turns.</p>
             </div>
+          </section>
+          <section id="panel-connectors" role="tabpanel" aria-labelledby="tab-connectors" hidden>
+            <div class="connector-card" id="github-connector-card" data-state="disconnected">
+              <div class="connector-card-head">
+                <span class="connector-card-icon" aria-hidden="true"><svg class="icon"><use href="#i-globe"/></svg></span>
+                <div class="connector-card-title">
+                  <strong>GitHub</strong>
+                  <p>Uses your local GitHub CLI sign-in (<code>gh auth login --hostname github.com</code>) scoped to one repository.</p>
+                </div>
+                <span id="github-status-pill" class="task-status-pill" data-status="paused">Not connected</span>
+              </div>
+              <div class="connector-card-body">
+                <label class="field">
+                  <span>Repository <small>(owner/name)</small></span>
+                  <input id="github-repo" type="text" maxlength="140" placeholder="owner/repository" autocomplete="off" spellcheck="false">
+                </label>
+                <label class="connector-toggle-row">
+                  <div>
+                    <strong>Allow reviewed repository writes in Agent mode</strong>
+                    <small>Every write — branches, commits, PRs, merges, issues, releases, assets, and pushes — requires your approval.</small>
+                  </div>
+                  <span class="switch"><input id="github-writes" type="checkbox"><span></span><span class="sr-only">Allow reviewed GitHub writes</span></span>
+                </label>
+                <div class="connector-caps" aria-label="Supported GitHub capabilities">
+                  <span class="connector-cap">Branches &amp; PRs</span>
+                  <span class="connector-cap">Text &amp; binary commits</span>
+                  <span class="connector-cap">Issues &amp; reviews</span>
+                  <span class="connector-cap">Releases &amp; assets</span>
+                  <span class="connector-cap">Fast-forward Git push</span>
+                </div>
+              </div>
+              <div class="connector-card-foot">
+                <p id="github-status" class="connector-status" role="status">Not connected.</p>
+                <div class="connector-actions">
+                  <button id="github-disconnect" class="button small" type="button" disabled>Disconnect</button>
+                  <button id="github-connect" class="button small accent" type="button">Connect / test</button>
+                </div>
+              </div>
+            </div>
+            <p class="hint connector-footnote">Ask naturally in Chat (read-only) or Agent mode (reviewed writes), or mention <code>@github</code>. Commits and pushes target unprotected non-default branches. Say “local workspace” for local-only edits. Reconnect after restarting Pipkin.</p>
           </section>
           <section id="panel-data" role="tabpanel" aria-labelledby="tab-data" hidden>
             <div class="setting">

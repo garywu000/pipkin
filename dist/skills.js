@@ -80,8 +80,8 @@
     { name: "schedule", icon: "clock", description: "View scheduled tasks and background inbox." },
   ];
   const mentions = [
-    { name: "github", icon: "globe", description: "Public GitHub links in Work", instructions:
-      "Use the public GitHub link the user supplies for this task. Ask for the link when it is missing. Cite the public page and report which information you can verify." },
+    { name: "github", icon: "globe", description: "Selected connected GitHub repository", instructions:
+      "Use the connected GitHub repository. Cite the returned source links. Any remote write needs explicit approval in Agent mode." },
     { name: "gmail", icon: "note", description: "Draft a message locally", instructions:
       "Prepare a Gmail draft with a subject, body, and any recipients the user supplied. Present it for review in chat." },
     { name: "doc", icon: "file", description: "Use an attached document", instructions:
