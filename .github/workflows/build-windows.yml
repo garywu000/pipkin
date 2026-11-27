@@ -25,7 +25,7 @@ jobs:
 
       - name: Verify Python syntax, JS syntax, unit tests, and benchmarks on macOS
         run: |
-          python3 -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py speech.py
+          python3 -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py speech.py natural_voice.py
           for f in dist/*.js; do node --check "$f"; done
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
           PYTHONDONTWRITEBYTECODE=1 python3 benchmarks/run.py
@@ -49,7 +49,7 @@ jobs:
       - name: Verify Python syntax, JS syntax, unit tests, and benchmarks on Windows
         shell: pwsh
         run: |
-          python -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py speech.py
+          python -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py speech.py natural_voice.py
           Get-ChildItem dist\*.js | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
           $env:PYTHONDONTWRITEBYTECODE = "1"
           python -m unittest discover -s tests
@@ -78,6 +78,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item "$src\build\bin\Release\whisper-cli.exe" windows\whisper-cli.exe
           Copy-Item "$src\LICENSE" windows\whisper.cpp-LICENSE.txt
+
+      - name: Build the natural voice helper (sherpa-onnx, pinned)
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:RUNNER_TEMP "sherpa-onnx"
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v2.0.1 https://github.com/k2-fsa/sherpa-onnx.git $src
+          if ((git -C $src rev-parse HEAD) -ne "af2d8d81dbfa61c4cea4c568da78f3982edca005") { throw "sherpa-onnx v2.0.1 does not match the pinned commit." }
+          cmake -S $src -B "$src\build" -DBUILD_SHARED_LIBS=ON -DSHERPA_ONNX_ENABLE_C_API=ON -DSHERPA_ONNX_ENABLE_TTS=ON `
+            -DSHERPA_ONNX_ENABLE_BINARY=OFF -DSHERPA_ONNX_ENABLE_PORTAUDIO=OFF -DSHERPA_ONNX_ENABLE_WEBSOCKET=OFF `
+            -DSHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION=OFF -DSHERPA_ONNX_ENABLE_PYTHON=OFF -DSHERPA_ONNX_ENABLE_TESTS=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$src\build" --config Release --target sherpa-onnx-c-api -j 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force windows\tts | Out-Null
+          Get-ChildItem "$src\build" -Recurse -Include sherpa-onnx-c-api.dll,sherpa-onnx-c-api.lib,onnxruntime.dll | ForEach-Object { Copy-Item $_.FullName windows\tts\ -Force }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" && cl /nologo /O2 /I`"$src`" tts\pipkin-tts.c /Fe:windows\tts\pipkin-tts.exe /link windows\tts\sherpa-onnx-c-api.lib"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path windows\tts\onnxruntime.dll)) { throw "onnxruntime.dll was not produced." }
+          Copy-Item "$src\LICENSE" windows\tts\sherpa-onnx-LICENSE.txt
+          Get-ChildItem "$src\build\_deps" -Recurse -Filter LICENSE | Where-Object { $_.FullName -match "onnxruntime" } | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName windows\tts\onnxruntime-LICENSE.txt }
 
       - name: Add Pipkin's Google sign-in client
         shell: pwsh

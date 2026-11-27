@@ -61,8 +61,12 @@ def engine_path():
     override = os.environ.get("PIPKIN_WHISPER_CLI")
     if override and Path(override).is_file():
         return Path(override)
-    path = Path(__file__).with_name("whisper-cli.exe" if os.name == "nt" else "whisper-cli")
-    return path if path.is_file() else None
+    name = "whisper-cli.exe" if os.name == "nt" else "whisper-cli"
+    root = Path(__file__).resolve().parent
+    for path in (root / name, root / "build" / "voice-runtime" / name):
+        if path.is_file():
+            return path
+    return None
 
 
 def no_window_flags():

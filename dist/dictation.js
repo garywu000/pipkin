@@ -197,6 +197,10 @@
   /* ---------- Recording ---------- */
   async function start() {
     if (state !== "idle") return;
+    if (window.PipkinVoice?.active) {
+      deps.announce("End the conversation before starting dictation.", true);
+      return;
+    }
     const run = ++generation;
     selection = { start: deps.promptBox.selectionStart, end: deps.promptBox.selectionEnd };
     state = "starting";

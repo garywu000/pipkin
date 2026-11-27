@@ -20,7 +20,7 @@ dotnet publish (Join-Path $scriptDir "PipkinWindows.csproj") `
     -o $outDir
 
 Write-Host "Bundling Python backend and web UI..."
-foreach ($file in @("server.py", "agent.py", "artifacts.py", "platform_os.py", "skills.py", "scheduler.py", "updater.py", "github_connector.py", "github_workflows.py", "drive_connector.py", "speech.py")) {
+foreach ($file in @("server.py", "agent.py", "artifacts.py", "platform_os.py", "skills.py", "scheduler.py", "updater.py", "github_connector.py", "github_workflows.py", "drive_connector.py", "speech.py", "natural_voice.py")) {
     Copy-Item (Join-Path $repoRoot $file) -Destination $outDir -Force
 }
 Copy-Item (Join-Path $repoRoot "dist") -Destination (Join-Path $outDir "dist") -Recurse -Force
@@ -31,6 +31,16 @@ if (Test-Path $googleClient) {
     Copy-Item $googleClient -Destination $outDir -Force
 } else {
     Write-Warning "windows\google-client.json not found: Google sign-in will offer only the Advanced own-client path."
+}
+
+# The natural voice helper for conversation mode (built by CI from pinned sherpa-onnx source).
+$tts = Join-Path $scriptDir "tts"
+if (Test-Path (Join-Path $tts "pipkin-tts.exe")) {
+    foreach ($file in @("pipkin-tts.exe", "sherpa-onnx-c-api.dll", "onnxruntime.dll")) { Copy-Item (Join-Path $tts $file) -Destination $outDir -Force }
+    New-Item -ItemType Directory -Force (Join-Path $outDir "licenses") | Out-Null
+    Get-ChildItem $tts -Filter "*-LICENSE.txt" | ForEach-Object { Copy-Item $_.FullName (Join-Path $outDir "licenses") -Force }
+} else {
+    Write-Warning "windows\tts\pipkin-tts.exe not found: conversation mode will use system voices."
 }
 
 # The speech engine for dictation (built by CI from pinned whisper.cpp source).

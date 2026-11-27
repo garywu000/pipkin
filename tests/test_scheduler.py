@@ -1138,6 +1138,32 @@ class ChatScheduleTest(unittest.TestCase):
         self.assertEqual(calls[1:], [("plain",), ("plain",)])
 
 
+    def test_voice_chat_never_routes_tools(self):
+        import run as bench
+        import server
+        calls = []
+
+        def plain(handler, messages, think, compact=False, system="", temperature=None):
+            calls.append(messages[-1]["content"])
+            handler.send_json(200, {"ok": True})
+
+        text = "Every Wednesday at 6 pm, push to GitHub and read Google Drive."
+        payload = {"messages": [{"role": "user", "content": text}], "voice": True}
+        with patch.object(server.ChatHandler, "relay_chat", plain), \
+                patch.object(server, "connector_routes") as route, \
+                patch.object(server.ChatHandler, "relay_chat_with_web") as tools, \
+                patch.object(server, "SESSIONS"):
+            self.assertEqual(bench.post("/api/chat", payload), {"ok": True})
+            for extra in ({"web": "always"}, {"compact": True}, {"scheduleText": text},
+                          {"requestText": text}, {"githubRoute": False}, {"driveRoute": False},
+                          {"githubGeneration": 0}, {"driveGeneration": 0}, {"voice": "true"}):
+                with self.subTest(extra=extra), self.assertRaisesRegex(RuntimeError, "HTTP 400"):
+                    bench.post("/api/chat", dict(payload, **extra))
+            route.assert_not_called()
+            tools.assert_not_called()
+        self.assertEqual(calls, [text])
+
+
 class RunHistoryTest(unittest.TestCase):
     """Each task keeps a History of its runs; every run keeps its timeline so it can open as a chat."""
 

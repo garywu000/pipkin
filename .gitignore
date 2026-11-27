@@ -9,3 +9,4 @@ windows/whisper-cli.exe
 windows/whisper.cpp-LICENSE.txt
 google-client.json
 windows/google-client.json
+windows/tts/

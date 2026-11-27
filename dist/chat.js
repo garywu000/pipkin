@@ -1845,6 +1845,7 @@ async function selectChat(id, projectId = null) {
     promptBox.focus();
     return;
   }
+  window.PipkinVoice?.close();
   switchingChat = true;
   updateControls();
   try {
@@ -3500,14 +3501,15 @@ function compactSourceChunks(source) {
 const MODEL_NAMES = "qwen|llama|gpt|chatgpt|claude|gemini|deepseek|mistral|gemma|phi|kimi|glm";
 const SELF_QUESTION = new RegExp(String.raw`\b(?:who are you|what are you\b|what(?:'s| is) your name|(?:what|which) (?:ai |language |llm )?model (?:are|do|is) (?:you|this)|(?:what|which) (?:llm|ai) are you|(?:what|which) model (?:powers|runs) (?:you|pipkin)|your (?:ai |language )?model\b|(?:are|aren't) you (?:${MODEL_NAMES})\b|you(?:'re| are) (?:${MODEL_NAMES})\b|is this (?:${MODEL_NAMES})\b)`, "i");
 
-function requestChat(messages, think, signal, compact = false, scheduleText = null, githubRoute = null) {
+function requestChat(messages, think, signal, compact = false, scheduleText = null, githubRoute = null, voice = false) {
   const aboutPipkin = !compact && typeof scheduleText === "string" && scheduleText.length < 200 && SELF_QUESTION.test(scheduleText);
   return fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      messages, think, compact, system: compact ? "" : systemPrompt(), temperature: settings.temperature,
-      web: compact || aboutPipkin ? "off" : settings.webMode,
+      messages, think, compact, system: compact ? "" : systemPrompt() + (voice ? "\nFor this spoken conversation, reply directly and concisely in natural spoken prose (1–4 short sentences unless asked for detail). Avoid markdown tables, bullet lists, code fences, or emojis. Do not claim to perform external actions." : ""), temperature: settings.temperature,
+      web: compact || aboutPipkin || voice ? "off" : settings.webMode,
+      ...(voice ? { voice: true } : {}),
       ...(!compact && scheduleText ? { scheduleText: scheduleText.slice(0, 4000), requestText: scheduleText.slice(0, 40000) } : {}),
       ...(githubRoute ? { githubRoute: githubRoute.github, githubGeneration: githubRoute.generation, driveRoute: githubRoute.drive, driveGeneration: githubRoute.driveGeneration } : {}),
     }),
@@ -4270,6 +4272,7 @@ async function routeGithub(text) {
 
 async function startTurn(text, { queued = false } = {}) {
   if (routingGithub) return false;
+  window.PipkinVoice?.close();
   if (!queued && refreshPasteExcerpts()) updateFiles();
   const draftFiles = queued ? [] : files;
   const command = Skills.parse(text);
@@ -4366,27 +4369,32 @@ async function resumeWork(checkpointId) {
 }
 
 /* Conversation mode (dist/voice.js) watches one turn's reply as it streams, to speak it. */
-let replyObserver = null;
-function sendVoiceTurn(text, observer) {
-  if (activeReply || routingGithub) throw new Error("Pipkin is busy with another reply.");
-  replyObserver = observer;
-  // Voice is Chat only: never Agent mode, skills, connectors' writes or approvals. end() may fire twice (the
-  // stream's own end, then this fallback for turns that returned early); the observer ignores the second.
-  return submitTurn(text, [], false).finally(() => {
-    if (replyObserver === observer) replyObserver = null;
-    observer.end?.(null, true);
-  });
+function voiceBusyReason() {
+  if (!modelCanReply()) return "Start Ollama or wait for the model to finish connecting before starting a conversation.";
+  if (activeReply || routingGithub || queueFor(chatId)?.items.length) return "Finish the current reply before starting a conversation.";
+  if (!historyReady || switchingChat || changingChats || processingFiles) return "Wait a moment for Pipkin to finish loading, then try again.";
+  return null;
 }
 
-async function submitTurn(text, attachments, useAgent, { resume = null, steering = null, skill = null, modeOverride = null, humanize = null, githubRoute = null } = {}) {
-  const observer = replyObserver;
-  replyObserver = null;
+function voiceBusy() {
+  return Boolean(voiceBusyReason());
+}
+
+function sendVoiceTurn(text, observer, signal) {
+  const reason = voiceBusyReason();
+  if (reason) throw new Error(reason);
+  return submitTurn(text, [], false, { observer, voiceSignal: signal }).finally(() => observer.end?.(null, true));
+}
+
+async function submitTurn(text, attachments, useAgent, { resume = null, steering = null, skill = null, modeOverride = null, humanize = null, githubRoute = null, observer = null, voiceSignal = null } = {}) {
+  const voice = Boolean(voiceSignal);
   // A title request takes a few seconds and holds the model; let it finish so this turn isn't refused as busy.
   if (titleJob) {
     titleJob.stopRetrying();
     await titleJob.done;
   }
-  useAgent = useAgent && !humanize;
+  if (voice && (voiceSignal.aborted || voiceBusy())) return;
+  useAgent = useAgent && !humanize && !voice;
   const userMessage = { role: "user", content: text };
   if (skill) {
     userMessage.skill = {
@@ -4400,7 +4408,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
   }
   const tools = Skills.requestedMentions(text);
   let githubTurn = false;
-  if (!humanize && !skill && !resume) {
+  if (!voice && !humanize && !skill && !resume) {
     try { githubRoute = githubRoute ?? await routeGithub(text); githubTurn = Boolean(githubRoute?.github || githubRoute?.drive); }
     catch (error) { announce(error.message, true); return; }
   }
@@ -4441,6 +4449,9 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
   if (!useAgent) view.body.replaceChildren(el("span", { className: "typing" }, el("i"), el("i"), el("i")));
   syncTurns();
   const controller = new AbortController();
+  const abortVoice = () => controller.abort();
+  voiceSignal?.addEventListener("abort", abortVoice, { once: true });
+  if (voiceSignal?.aborted) abortVoice();
   activeReply = controller;
   const runChatId = chatId || crypto.randomUUID();
   if (!chatId) chatId = runChatId;
@@ -4784,8 +4795,8 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     const context = githubTurn ? "" : await requestContext();
     const messages = githubTurn ? [currentMessage] : await prepareChatMessages(currentMessage, context, controller.signal);
     announce();
-    const think = settings.think && !thinkToggle.hidden;
-    const response = await requestChat(messages, think, controller.signal, false, humanize ? null : text, githubRoute);
+    const think = !voice && settings.think && !thinkToggle.hidden;
+    const response = await requestChat(messages, think, controller.signal, false, humanize || voice ? null : text, githubRoute, voice);
     await readStream(response, (part) => {
       if (part.error) throw new Error(part.error);
       if (part.schedule) {
@@ -4874,7 +4885,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     if (error.name === "AbortError") announce("Reply stopped.");
     else announce(error.message, true);
   } finally {
-    if (observer) queueMicrotask(() => observer.end?.(answer, turnFailed));
+    voiceSignal?.removeEventListener("abort", abortVoice);
     paintClosed = true;
     cancelAnimationFrame(frame);
     clearTimeout(paintTimer);
@@ -4889,7 +4900,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
       }
     }
     view.article.classList.remove("streaming");
-    const expectedWeb = !githubTurn && !humanize && (useAgent
+    const expectedWeb = !voice && !githubTurn && !humanize && (useAgent
       ? (web && settings.webMode === "on") || agentRun.entries.some((entry) => ["web_search", "web_fetch"].includes(entry.name))
       : settings.webMode === "on" || webSteps.length > 0);
     const sourceNote = expectedWeb && ![...sources.values()].some((source) => source.kind === "page" || source.kind === "search")
@@ -4975,6 +4986,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     updateControls();
     promptBox.focus({ preventScroll: true });
     continueQueue(runChatId, !turnFailed && Boolean(answer.trim()) && (!agentRun || agentRun.state === "complete"));
+    observer?.end?.(answer, turnFailed);
   }
 }
 
@@ -7398,6 +7410,7 @@ window.PipkinVoice?.init({
   promptBox, composer, openSettings, announce, saveSettings,
   getSettings: () => settings,
   isMac: PipkinPlatform.isMac,
-  send: (text, observer) => sendVoiceTurn(text, observer),
-  stopReply: () => activeReply?.abort(),
+  isBusy: voiceBusy,
+  busyReason: voiceBusyReason,
+  send: sendVoiceTurn,
 });

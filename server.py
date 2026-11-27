@@ -2,6 +2,7 @@
 """Serve the local Qwen chat page and relay its requests to Ollama."""
 
 import argparse
+import atexit
 import base64
 import datetime
 import binascii
@@ -42,6 +43,7 @@ import updater
 import github_connector
 import drive_connector
 import speech
+import natural_voice
 from agent import (
     FILE_FLAGS, PERMISSION_MODES, SCHEDULE_NOTE, SCHEDULE_TOOL, SOURCE_GUIDANCE, WEB_TOOLS, Agent, AgentStopped,
     ApprovalCancelled, Sources,
@@ -70,6 +72,17 @@ DEFAULT_MODEL = "qwen3:8b"
 CONTEXT_SIZES = (4096, 8192, 16384, 32768, 65536)
 SETTINGS_FILE = platform_os.app_data_dir() / "settings.json"
 SPEECH = speech.Speech(SETTINGS_FILE.parent / "speech")
+NATURAL_VOICE = natural_voice.NaturalVoice(SETTINGS_FILE.parent / "speech")
+
+
+def _close_idle_voice():
+    while True:
+        time.sleep(30)
+        NATURAL_VOICE.close_if_idle()
+
+
+Thread(target=_close_idle_voice, daemon=True, name="natural-voice-idle").start()
+atexit.register(NATURAL_VOICE.close)
 UPDATER = updater.Updater(SETTINGS_FILE.parent, root=updater.install_root())
 USAGE_FILE = SETTINGS_FILE.with_name("usage.sqlite3")
 SETTINGS_LOCK = Lock()
@@ -1940,6 +1953,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         ):
             self.send_json(400, {"error": "Invalid request length."})
             return
+        if self.path.startswith("/api/voice/natural/"):
+            self.natural_voice_request(self.path.removeprefix("/api/voice/natural/"))
+            return
         if self.path.startswith("/api/dictation/"):
             self.dictation_request(self.path.removeprefix("/api/dictation/"))
             return
@@ -2053,12 +2069,16 @@ class ChatHandler(BaseHTTPRequestHandler):
             messages = payload["messages"]
             think = payload.get("think", False)
             compact = payload.get("compact", False)
+            voice = payload.get("voice", False)
             system = payload.get("system", "")
             temperature = payload.get("temperature")
             web = payload.get("web", "off")
             if not isinstance(think, bool) or not isinstance(compact, bool) or not isinstance(messages, list) or not messages:
                 raise ValueError()
-            if web not in WEB_MODES:
+            if web not in WEB_MODES or not isinstance(voice, bool):
+                raise ValueError()
+            if voice and (compact or web != "off" or any(payload.get(key) is not None for key in
+                          ("scheduleText", "requestText", "githubRoute", "githubGeneration", "driveRoute", "driveGeneration"))):
                 raise ValueError()
             if not isinstance(system, str) or len(system) > 30_000:
                 raise ValueError()
@@ -2110,7 +2130,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             # Chat can propose a scheduled task too, but the tool is offered only when the message itself names a time
             # or repeat ("every Wednesday at 6pm"), so ordinary chats never see it.
             hint = None if compact or not schedule_text else scheduler_module.schedule_hint(schedule_text, datetime.datetime.now())
-            routes = connector_routes(github_text)
+            routes = {"drive": False, "github": False} if voice else connector_routes(github_text)
             use_drive = drive_route if drive_route is not None else routes["drive"]
             use_github = github_route if github_route is not None else routes["github"]
             if not compact and use_drive and use_github:
@@ -2141,6 +2161,46 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(503, {"error": str(error)})
         finally:
             GENERATION.release()
+
+    def natural_voice_request(self, action):
+        """Conversation mode's natural voice: the optional voice pack, and one sentence of speech per request."""
+        try:
+            payload = self.read_json(8000)
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid voice request.")
+            if action == "status":
+                self.send_json(200, NATURAL_VOICE.status())
+            elif action == "download":
+                self.send_json(200, NATURAL_VOICE.start_download())
+            elif action == "cancel":
+                self.send_json(200, NATURAL_VOICE.cancel_download())
+            elif action == "warm":
+                NATURAL_VOICE.warm(payload.get("voice", natural_voice.DEFAULT_VOICE))
+                self.send_json(200, {"ok": True})
+            elif action == "remove":
+                self.send_json(200, NATURAL_VOICE.remove())
+            elif action == "speak":
+                def check():
+                    if select([self.connection], [], [], 0)[0] and not self.connection.recv(1, MSG_PEEK):
+                        raise AgentStopped()
+
+                audio = NATURAL_VOICE.speak(payload.get("text"), payload.get("voice", natural_voice.DEFAULT_VOICE),
+                                            payload.get("speed", 1.0), check=check)
+                self.headers_for(200, "audio/wav", len(audio))
+                self.wfile.write(audio)
+            else:
+                self.send_json(404, {"error": "Unknown voice request."})
+        except AgentStopped:
+            pass
+        except ValueError as error:
+            self.send_json(400, {"error": str(error) or "Invalid voice request."})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except OSError:
+            try:
+                self.send_json(503, {"error": "The natural voice isn't available right now."})
+            except OSError:
+                pass
 
     def dictation_request(self, action):
         """Local dictation: model downloads the user asked for, transcription, and optional tidy-up."""

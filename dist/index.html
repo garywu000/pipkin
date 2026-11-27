@@ -669,37 +669,57 @@
             <p class="hint connector-footnote">Ask naturally in Chat (read-only) or Agent mode (reviewed writes), or mention <code>@github</code>. Commits and pushes target unprotected non-default branches. Say “local workspace” for local-only edits.</p>
           </section>
           <section id="panel-voice" role="tabpanel" aria-labelledby="tab-voice" hidden>
-            <div id="voice-settings">
-              <div class="setting stack">
-                <div><strong>Dictation model</strong><p id="voice-engine-note">Checking the speech engine…</p></div>
-                <div id="voice-models" class="voice-models"></div>
+            <div id="voice-settings" class="voice-settings-cards">
+              <div class="connector-card voice-card">
+                <div class="connector-card-head">
+                  <span class="connector-card-icon" aria-hidden="true"><svg class="icon"><use href="#i-mic"/></svg></span>
+                  <div class="connector-card-title">
+                    <strong>Dictation</strong>
+                    <p id="voice-engine-note">Checking the speech engine…</p>
+                  </div>
+                </div>
+                <div class="connector-card-body">
+                  <div id="voice-models" class="voice-models"></div>
+                  <div class="setting">
+                    <div><strong>Language</strong><p id="voice-language-note">Pick your language if detection guesses wrong.</p></div>
+                    <span class="select-wrap"><select id="voice-language" aria-label="Dictation language"></select><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></span>
+                  </div>
+                  <div class="setting">
+                    <div><strong>Advanced mode</strong><p>Show each transcript in an editable preview before it goes into the message box, with an optional tidy-up by your local model.</p></div>
+                    <label class="switch"><input id="voice-advanced" type="checkbox"><span></span><span class="sr-only">Advanced dictation mode</span></label>
+                  </div>
+                  <div id="voice-tidy-row" class="setting" hidden>
+                    <div><strong>Tidy up automatically</strong><p>Your local chat model fixes punctuation and drops filler words. If it would change a name, number or “not”, Pipkin keeps your exact words. You can switch back to “As spoken” before inserting.</p></div>
+                    <label class="switch"><input id="voice-tidy" type="checkbox"><span></span><span class="sr-only">Tidy up automatically</span></label>
+                  </div>
+                </div>
+                <p class="hint voice-card-foot">Hold the mic button beside Send to talk and release to finish, or click it to start and again to stop. Right-click it to switch models. <span id="voice-mode-hint"></span></p>
               </div>
-              <div class="setting">
-                <div><strong>Language</strong><p id="voice-language-note">Pick your language if detection guesses wrong.</p></div>
-                <span class="select-wrap"><select id="voice-language" aria-label="Dictation language"></select><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></span>
-              </div>
-              <div class="setting">
-                <div><strong>Advanced mode</strong><p>Show each transcript in an editable preview before it goes into the message box, with an optional tidy-up by your local model.</p></div>
-                <label class="switch"><input id="voice-advanced" type="checkbox"><span></span><span class="sr-only">Advanced dictation mode</span></label>
-              </div>
-              <div id="voice-tidy-row" class="setting" hidden>
-                <div><strong>Tidy up automatically</strong><p>Your local chat model fixes punctuation and drops filler words. If it would change a name, number or “not”, Pipkin keeps your exact words. You can switch back to “As spoken” before inserting.</p></div>
-                <label class="switch"><input id="voice-tidy" type="checkbox"><span></span><span class="sr-only">Tidy up automatically</span></label>
-              </div>
-              <div class="setting">
-                <div><strong>Conversation mode <span class="beta-tag">Beta</span></strong><p>Talk with Pipkin hands-free: it listens, answers in Chat, and reads the reply aloud with a voice on this computer. It never runs Agent work or approves anything by voice.</p></div>
-                <label class="switch"><input id="voice-conversation" type="checkbox"><span></span><span class="sr-only">Conversation mode</span></label>
-              </div>
-              <div id="voice-speaker-row" class="setting" hidden>
-                <div><strong>Pipkin's voice</strong><p id="voice-speaker-note"></p></div>
-                <div class="voice-speaker-controls">
-                  <span class="select-wrap"><select id="voice-speaker" aria-label="Pipkin's voice"></select><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></span>
-                  <span class="select-wrap voice-rate-wrap"><select id="voice-rate" aria-label="Speaking speed"><option value="0.85">Slower</option><option value="1">Normal</option><option value="1.15">Faster</option><option value="1.3">Fastest</option></select><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></span>
-                  <label class="voice-volume-label" title="Volume"><svg class="icon"><use href="#i-speak"/></svg><input id="voice-volume" type="range" min="0" max="100" step="5" aria-label="Voice volume"></label>
-                  <button id="voice-preview" class="button small" type="button">Preview</button>
+              <div class="connector-card voice-card">
+                <div class="connector-card-head">
+                  <span class="connector-card-icon" aria-hidden="true"><svg class="icon"><use href="#i-speak"/></svg></span>
+                  <div class="connector-card-title">
+                    <strong>Conversation mode <span class="beta-tag">Beta</span></strong>
+                    <p>Talk hands-free with on-device speech recognition and playback. Your chat model receives the transcript; Agent actions and web tools stay off.</p>
+                  </div>
+                  <label class="switch"><input id="voice-conversation" type="checkbox"><span></span><span class="sr-only">Conversation mode</span></label>
+                </div>
+                <div id="voice-conversation-body" class="connector-card-body">
+                  <div id="voice-natural-row" class="setting" hidden>
+                    <div><strong>Natural voice</strong><p id="voice-natural-note">Checking the natural voice…</p></div>
+                    <div id="voice-natural-actions" class="voice-model-actions"></div>
+                  </div>
+                  <div id="voice-speaker-row" class="setting stack" hidden>
+                    <div><strong>Pipkin's voice</strong><p id="voice-speaker-note"></p></div>
+                    <div class="voice-speaker-controls">
+                      <span class="select-wrap voice-speaker-select"><select id="voice-speaker" aria-label="Pipkin's voice"></select><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></span>
+                      <span class="select-wrap voice-rate-wrap"><select id="voice-rate" aria-label="Speaking speed"><option value="0.85">Slower</option><option value="1">Normal</option><option value="1.15">Faster</option><option value="1.3">Fastest</option></select><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></span>
+                      <label class="voice-volume-label" title="Volume"><svg class="icon"><use href="#i-speak"/></svg><input id="voice-volume" type="range" min="0" max="100" step="5" aria-label="Voice volume"></label>
+                      <button id="voice-preview" class="button small" type="button">Preview</button>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <p class="hint">Hold the mic button beside Send to talk and release to finish, or click it to start and again to stop. Right-click it to switch models. <span id="voice-mode-hint"></span></p>
             </div>
           </section>
           <section id="panel-data" role="tabpanel" aria-labelledby="tab-data" hidden>
@@ -812,6 +832,7 @@
             <strong>Pipkin</strong>
             <span id="voice-timer" class="voice-timer">0:00</span>
             <span class="voice-beta">Beta</span>
+            <button id="voice-active-pill" class="voice-active-pill" type="button" title="Change Pipkin's voice" hidden></button>
             <div class="voice-stage-controls">
               <button id="voice-mute" class="voice-control" type="button" aria-pressed="false" aria-label="Pause the microphone" title="Pause the microphone"><svg class="icon on"><use href="#i-mic"/></svg><svg class="icon off"><use href="#i-mic-off"/></svg></button>
               <button id="voice-speaker-toggle" class="voice-control" type="button" aria-pressed="true" aria-label="Pipkin's voice on" title="Turn Pipkin's voice off (captions only)"><svg class="icon on"><use href="#i-speak"/></svg><svg class="icon off"><use href="#i-speaker-off"/></svg></button>
@@ -822,11 +843,17 @@
           </div>
           <div class="voice-stage-body">
             <button id="voice-orb" class="voice-orb" type="button" aria-label="Conversation status"><canvas id="voice-canvas" width="440" height="440" aria-hidden="true"></canvas></button>
-            <p id="voice-phase" class="voice-phase" role="status" aria-live="polite">Listening. Ask anything.</p>
-            <p id="voice-you" class="voice-you" hidden></p>
-            <p id="voice-pipkin" class="voice-pipkin" hidden><span id="voice-said"></span><span id="voice-upcoming"></span></p>
-            <p id="voice-no-voice" class="voice-hint" hidden>No on-device voice is available, so replies appear as text.</p>
-            <p class="voice-stage-hint">Tap the orb or press Space to interrupt · Esc to end · Chat only, nothing leaves this computer</p>
+            <div class="voice-status-row">
+              <p id="voice-phase" class="voice-phase" role="status" aria-live="polite">Listening. Ask anything.</p>
+              <button id="voice-action" class="voice-action-pill" type="button" hidden></button>
+            </div>
+            <div class="voice-captions">
+              <p id="voice-you" class="voice-you" hidden></p>
+              <p id="voice-pipkin" class="voice-pipkin" hidden><span id="voice-said"></span><span id="voice-upcoming"></span></p>
+              <p id="voice-notice" class="voice-hint voice-notice" role="status" hidden></p>
+              <p id="voice-no-voice" class="voice-hint" hidden>No on-device voice is available, so replies appear as text.</p>
+            </div>
+            <p class="voice-stage-hint">Tap the orb or press Space to send or interrupt · Esc to end · Speech recognition and playback run on this device</p>
           </div>
         </div>
         <div class="composer-box">

@@ -221,7 +221,7 @@ Ask naturally, for example “Create a branch for the README changes,” “Open
 
 - **Distribution.** Developer ID signing and notarization for Mac builds, plus Windows installer improvements.
 - **Benchmark comparisons.** Publish repeated trials with the same hardware, model, context, and task when comparing single-model and Explorer runs.
-- **Dictation.** Local speech-to-text in the v2.6.0 beta. Conversational voice is planned next.
+- **Dictation and conversation (v2.6.0 beta).** Enable Conversation mode in Settings → Voice, install a dictation model, then use the waveform button beside Send. Speech recognition and playback run on-device; the selected chat model receives the transcript and conversation context. Voice turns use Chat without web, scheduling or connector tools. The optional 132 MB Kokoro pack supplies eight English voices, with system voices or captions as fallback. Pause the mic, tap the orb to interrupt, or press Esc to end. On macOS, developers can prepare the ignored local runtime with `mkdir -p build/voice-runtime`, `sh shell/build-whisper.sh build/voice-runtime/whisper-cli` and `sh shell/build-tts.sh build/voice-runtime`.
 - **Connected accounts.** GitHub connector in the v2.4.1 beta; Google Drive (Docs, Sheets, Slides) in the v2.6.0 beta. Calendar and Gmail reads and local Git transfer remain planned.
 - **Extensibility.** More reusable workflows and scheduled work.
 
