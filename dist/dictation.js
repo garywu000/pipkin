@@ -695,5 +695,13 @@
     refresh: () => deps && refreshStatus().then(schedulePoll),
     sync: () => deps && syncButton(),
     get active() { return state !== "idle"; },
+    // Shared with conversation mode (voice.js): the same local engine, model and language.
+    ready: () => Boolean(deps) && ready(),
+    ensureStatus: () => (status ? Promise.resolve(status) : refreshStatus()),
+    async transcribe(chunks, rate, signal) {
+      const pcm = await toPcm16(chunks, rate);
+      const { model, language } = prefs();
+      return (await post("transcribe", { model, language, audio: base64(pcm) }, signal)).text || "";
+    },
   };
 })();

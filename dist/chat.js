@@ -175,6 +175,7 @@ const defaultSettings = {
   permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat", busySend: "steer",
   sidebarCollapsed: false, sidebarWidth: 268,
   dictationModel: "base", dictationLanguage: "auto", dictationTidy: false, dictationAdvanced: false,
+  voiceConversation: false, voiceName: "", voiceRate: 1,
 };
 const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
 let settings = { ...defaultSettings, ...readLocal(settingsKey, {}) };
@@ -4364,7 +4365,22 @@ async function resumeWork(checkpointId) {
   await submitTurn("Resume Work", [], true, { resume: checkpointId });
 }
 
+/* Conversation mode (dist/voice.js) watches one turn's reply as it streams, to speak it. */
+let replyObserver = null;
+function sendVoiceTurn(text, observer) {
+  if (activeReply || routingGithub) throw new Error("Pipkin is busy with another reply.");
+  replyObserver = observer;
+  // Voice is Chat only: never Agent mode, skills, connectors' writes or approvals. end() may fire twice (the
+  // stream's own end, then this fallback for turns that returned early); the observer ignores the second.
+  return submitTurn(text, [], false).finally(() => {
+    if (replyObserver === observer) replyObserver = null;
+    observer.end?.(null, true);
+  });
+}
+
 async function submitTurn(text, attachments, useAgent, { resume = null, steering = null, skill = null, modeOverride = null, humanize = null, githubRoute = null } = {}) {
+  const observer = replyObserver;
+  replyObserver = null;
   // A title request takes a few seconds and holds the model; let it finish so this turn isn't refused as busy.
   if (titleJob) {
     titleJob.stopRetrying();
@@ -4830,6 +4846,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
           view.summaryLabel.textContent = "Thought";
         }
         paint(() => answer);
+        observer?.delta?.(answer);
       }
       if (part.done) {
         done = true;
@@ -4857,6 +4874,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     if (error.name === "AbortError") announce("Reply stopped.");
     else announce(error.message, true);
   } finally {
+    if (observer) queueMicrotask(() => observer.end?.(answer, turnFailed));
     paintClosed = true;
     cancelAnimationFrame(frame);
     clearTimeout(paintTimer);
@@ -5052,7 +5070,7 @@ function selectSettingsTab(tab) {
   stopTokenUsageUpdates();
   if (tab.id === "tab-usage") refreshTokenUsage();
   if (tab.id === "tab-connectors") { void githubConnection("status"); void driveConnection("status"); }
-  if (tab.id === "tab-voice") void window.PipkinDictation?.refresh();
+  if (tab.id === "tab-voice") { void window.PipkinDictation?.refresh(); window.PipkinVoice?.renderSettings(); }
 }
 
 async function githubConnection(action) {
@@ -7373,4 +7391,13 @@ window.PipkinDictation?.init({
   isMac: PipkinPlatform.isMac,
   shortcutParts: () => formatShortcutParts(shortcutMap().dictate),
   onInserted: () => { updateControls(); updateTokenMeter(); },
+});
+
+/* Conversation mode (dist/voice.js, beta): hands-free Chat turns, read aloud with on-device voices. */
+window.PipkinVoice?.init({
+  promptBox, composer, openSettings, announce, saveSettings,
+  getSettings: () => settings,
+  isMac: PipkinPlatform.isMac,
+  send: (text, observer) => sendVoiceTurn(text, observer),
+  stopReply: () => activeReply?.abort(),
 });

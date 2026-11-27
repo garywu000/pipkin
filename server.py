@@ -455,6 +455,7 @@ STATIC_FILES = {
     "/vendor/xterm-addon-webgl.js": ("vendor/xterm-addon-webgl.js", "text/javascript; charset=utf-8"),
     "/vendor/xterm.css": ("vendor/xterm.css", "text/css; charset=utf-8"),
     "/dictation.js": ("dictation.js", "text/javascript; charset=utf-8"),
+    "/voice.js": ("voice.js", "text/javascript; charset=utf-8"),
     "/dictation-worklet.js": ("dictation-worklet.js", "text/javascript; charset=utf-8"),
 }
 
