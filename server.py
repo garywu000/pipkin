@@ -2199,6 +2199,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise AgentStopped()
 
         try:
+            # Load through the session manager so the status pill, memory protection and idle unload all see it.
+            SESSIONS.ensure_loaded()
             messages = [{"role": "system", "content": speech.CLEAN_INSTRUCTIONS},
                         {"role": "user", "content": "Dictated text:\n" + text.strip()}]
             reply = self.agent_step(messages, [], False, check, lambda *_args, **_fields: None,
@@ -2211,9 +2213,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.send_json(200, {"text": text, "kept": True})
         except (AgentStopped, BrokenPipeError, ConnectionResetError):
             pass
-        except (ValueError, KeyError, TypeError, AttributeError, OSError, http.client.HTTPException, ModelGlitch):
+        except (ValueError, KeyError, TypeError, AttributeError, OSError, http.client.HTTPException, ModelGlitch) as error:
+            reason = str(error) if isinstance(error, ValueError) and ("memory" in str(error).lower() or "Ollama" in str(error)) else ""
             try:
-                self.send_json(503, {"error": "Couldn't tidy this up. The original text is unchanged."})
+                self.send_json(503, {"error": (reason + " " if reason else "") + "Couldn't tidy this up. The original text is unchanged."})
             except OSError:
                 pass
         finally:
@@ -2231,7 +2234,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.send_json(200, connector_routes(request))
                 return
             if action == "start":
-                result = DRIVE.start(payload.get("client"), payload.get("writes", False))
+                result = DRIVE.start(payload.get("client"), payload.get("writes", False),
+                                     picker=payload.get("picker", False), add=payload.get("add", False))
+            elif action == "forget":
+                result = DRIVE.forget_item(payload.get("id"))
+            elif action == "writes":
+                result = DRIVE.set_writes(payload.get("writes"))
             elif action == "browse":
                 result = DRIVE.browse(
                     payload.get("parent", "root"),

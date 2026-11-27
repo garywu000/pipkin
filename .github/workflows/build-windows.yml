@@ -79,6 +79,13 @@ jobs:
           Copy-Item "$src\build\bin\Release\whisper-cli.exe" windows\whisper-cli.exe
           Copy-Item "$src\LICENSE" windows\whisper.cpp-LICENSE.txt
 
+      - name: Add Pipkin's Google sign-in client
+        shell: pwsh
+        env:
+          GOOGLE_CLIENT_JSON: ${{ secrets.PIPKIN_GOOGLE_CLIENT_JSON }}
+        run: |
+          if ($env:GOOGLE_CLIENT_JSON) { [IO.File]::WriteAllText("windows\google-client.json", $env:GOOGLE_CLIENT_JSON) }
+
       - name: Build self-contained Pipkin Windows package
         shell: pwsh
         run: ./windows/build-windows.ps1

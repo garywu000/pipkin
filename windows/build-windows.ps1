@@ -25,6 +25,14 @@ foreach ($file in @("server.py", "agent.py", "artifacts.py", "platform_os.py", "
 }
 Copy-Item (Join-Path $repoRoot "dist") -Destination (Join-Path $outDir "dist") -Recurse -Force
 
+# Pipkin's own Google sign-in client (CI writes it from a repository secret; never committed).
+$googleClient = Join-Path $scriptDir "google-client.json"
+if (Test-Path $googleClient) {
+    Copy-Item $googleClient -Destination $outDir -Force
+} else {
+    Write-Warning "windows\google-client.json not found: Google sign-in will offer only the Advanced own-client path."
+}
+
 # The speech engine for dictation (built by CI from pinned whisper.cpp source).
 $engine = Join-Path $scriptDir "whisper-cli.exe"
 if (Test-Path $engine) {

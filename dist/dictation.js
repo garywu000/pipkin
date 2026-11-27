@@ -39,7 +39,9 @@
     return {
       model,
       language: LANGUAGE_NAMES[settings.dictationLanguage] ? settings.dictationLanguage : "auto",
-      tidy: settings.dictationTidy === true,
+      // Simple mode (the default) puts the words straight into the message box; Advanced adds the preview and tidy-up.
+      advanced: settings.dictationAdvanced === true,
+      tidy: settings.dictationAdvanced === true && settings.dictationTidy === true,
     };
   };
 
@@ -185,6 +187,8 @@
       },
     }));
     items.push({ icon: "globe", label: "Language", detail: LANGUAGE_NAMES[current.language], onSelect: () => deps.openSettings("tab-voice") });
+    items.push({ icon: "sparkle", label: "Advanced mode", detail: current.advanced ? "Preview and tidy before inserting" : "Off · words go straight into the box",
+      checked: current.advanced, onSelect: () => { deps.saveSettings({ dictationAdvanced: !current.advanced }); renderSettings(); } });
     items.push({ icon: "settings", label: "Voice settings…", detail: needsModel ? "Download a speech model to start" : "Models, language and tidy-up",
       onSelect: () => deps.openSettings("tab-voice") });
     deps.openPopover(button(), items);
@@ -321,10 +325,17 @@
       const pcm = await toPcm16(taken.chunks, taken.context.sampleRate);
       taken.chunks.length = 0;
       transcribeController = new AbortController();
-      const { model, language, tidy } = prefs();
+      const { model, language, tidy, advanced } = prefs();
       const data = await post("transcribe", { model, language, audio: base64(pcm) }, transcribeController.signal);
       if (run !== generation) return;
       if (!data.text) throw new Error("Didn't catch any words. Try again a little closer to the microphone.");
+      if (!advanced) {
+        state = "idle";
+        renderBar();
+        placeText(data.text);
+        syncButton();
+        return;
+      }
       const modelLabel = status?.models.find((m) => m.id === model)?.label || model;
       showPreview(data.text, { seconds, modelLabel });
       if (tidy) void tidyUp();
@@ -496,6 +507,15 @@
     if (!preview) return;
     const text = (preview.edited[preview.view] || "").trim();
     if (!text) return;
+    placeText(text);
+    preview = null;
+    state = "idle";
+    renderPreview();
+    syncButton();
+  }
+
+  /* Put text into the message box where the cursor was when dictation started. Never sends. */
+  function placeText(text) {
     const box = deps.promptBox;
     const start = Math.min(selection?.start ?? box.value.length, box.value.length);
     const end = Math.min(Math.max(selection?.end ?? start, start), box.value.length);
@@ -510,10 +530,7 @@
       box.setRangeText(insertText, start, end, "end");
       box.dispatchEvent(new Event("input", { bubbles: true }));
     }
-    preview = null;
-    state = "idle";
-    renderPreview();
-    syncButton();
+    selection = { start: box.selectionStart, end: box.selectionEnd };
     deps.onInserted();
   }
 
@@ -597,7 +614,12 @@
     const englishOnly = status?.models.find((m) => m.id === current.model)?.englishOnly;
     language.disabled = Boolean(englishOnly);
     byId("voice-language-note").textContent = englishOnly ? "Fast English always transcribes English." : "Pick your language if detection guesses wrong.";
-    byId("voice-tidy").checked = current.tidy;
+    byId("voice-advanced").checked = current.advanced;
+    byId("voice-tidy").checked = deps.getSettings().dictationTidy === true;
+    byId("voice-tidy-row").hidden = !current.advanced;
+    byId("voice-mode-hint").textContent = current.advanced
+      ? "Advanced: each transcript opens in a preview you can edit, tidy, and then Insert. Dictation never sends anything."
+      : "Simple: your words go straight into the message box when you finish talking. Review and send as usual — dictation never sends anything.";
   }
 
   /* ---------- Setup ---------- */
@@ -643,6 +665,11 @@
     });
     byId("voice-language").addEventListener("change", (event) => deps.saveSettings({ dictationLanguage: event.target.value }));
     byId("voice-tidy").addEventListener("change", (event) => deps.saveSettings({ dictationTidy: event.target.checked }));
+    byId("voice-advanced").addEventListener("change", (event) => {
+      deps.saveSettings({ dictationAdvanced: event.target.checked });
+      if (!event.target.checked && state === "preview") discardPreview();
+      renderSettings();
+    });
     // Escape cancels a recording (or closes the preview) before Pipkin's own Escape handling sees it.
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || document.querySelector("dialog[open]")) return;

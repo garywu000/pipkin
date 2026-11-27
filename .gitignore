@@ -7,3 +7,5 @@ windows/obj/
 windows/dist/
 windows/whisper-cli.exe
 windows/whisper.cpp-LICENSE.txt
+google-client.json
+windows/google-client.json

@@ -37,6 +37,14 @@ xcrun clang -fobjc-arc -O2 -mmacosx-version-min=12.0 -framework AppKit -framewor
   "$repo/read-pdf.m" -o "$resources/read-pdf"
 sh "$here/build.sh" "$app"
 sh "$here/build-whisper.sh" "$resources/whisper-cli"
+# Pipkin's own Google sign-in client: kept in the maintainer's Keychain (base64 of the Desktop client JSON), never in git.
+if google_client="$(/usr/bin/security find-generic-password -s pipkin-google-client -w 2>/dev/null)"; then
+  printf '%s' "$google_client" | /usr/bin/base64 -D > "$resources/google-client.json"
+  /usr/bin/python3 -c "import json,sys; d=json.load(open(sys.argv[1]))['installed']; assert d['client_id'].endswith('.apps.googleusercontent.com') and d['client_secret']" "$resources/google-client.json"
+  echo "Google sign-in: included"
+else
+  echo "Google sign-in: not configured (Advanced own-client only)"
+fi
 /usr/bin/codesign --force --sign - "$resources/whisper-cli"
 /usr/bin/codesign --force --sign - "$picker"
 /usr/bin/codesign --force --sign - "$resources/read-pdf"

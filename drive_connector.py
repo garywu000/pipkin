@@ -27,6 +27,10 @@ from github_connector import NoRedirect, file_path, tool
 
 READ_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 WRITE_SCOPE = "https://www.googleapis.com/auth/drive"
+# Pipkin's own sign-in: access only to what the user picks in Google's picker (or Pipkin creates). Non-sensitive,
+# so it needs no Google security review, unlike the whole-Drive scopes above (used with your own client JSON).
+FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+SCOPES = (READ_SCOPE, WRITE_SCOPE, FILE_SCOPE)
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 FOLDER = "application/vnd.google-apps.folder"
@@ -415,6 +419,31 @@ def _validate_client_dict(client):
     return client_id, secret
 
 
+def builtin_client():
+    """Pipkin's own Desktop OAuth client, added to release builds from the maintainer's Keychain / CI secret
+    (google-client.json beside this file). Installed-app client secrets aren't confidential (PKCE protects the flow),
+    but they stay out of the public repository. Returns (client_id, secret) or None."""
+    override = os.environ.get("PIPKIN_GOOGLE_CLIENT")
+    path = Path(override) if override else Path(__file__).with_name("google-client.json")
+    try:
+        if not path.is_file() or path.stat().st_size > 12000:
+            return None
+        return _validate_client_dict(json.loads(path.read_text("utf-8")))
+    except (OSError, ValueError):
+        return None
+
+
+def picked_ids(values):
+    """The comma-separated picked_file_ids Google's picker appends to the OAuth redirect."""
+    raw = values.get("picked_file_ids", [""])
+    if len(raw) != 1:
+        raise ValueError("Unexpected picker response.")
+    ids = [item for item in raw[0].split(",") if item]
+    if len(ids) > MAX_ALLOWED_FILES:
+        raise ValueError(f"Pick up to {MAX_ALLOWED_FILES} files or folders at a time.")
+    return [resource_id(item) for item in ids]
+
+
 class Connection:
     def __init__(self, api_factory=API, token_request=request_json, store=None):
         self._lock = threading.RLock()
@@ -440,7 +469,7 @@ class Connection:
         oauth = saved.get("oauth")
         if (isinstance(oauth, dict) and isinstance(oauth.get("refresh"), str)
                 and isinstance(oauth.get("client_id"), str) and isinstance(oauth.get("secret"), str)
-                and oauth.get("scope") in (READ_SCOPE, WRITE_SCOPE)):
+                and oauth.get("scope") in SCOPES):
             expires_at = oauth.get("expiresAt", 0)
             remaining = max(0.0, float(expires_at) - time.time()) if isinstance(expires_at, (int, float)) else 0.0
             self._oauth = {
@@ -452,6 +481,13 @@ class Connection:
                 "scope": oauth["scope"],
             }
         grant = saved.get("grant")
+        if self._oauth and isinstance(grant, dict) and grant.get("mode") == "picked":
+            items = [{"id": str(i["id"]), "name": str(i.get("name", i["id"])), "mimeType": str(i.get("mimeType", ""))}
+                     for i in (grant.get("items") or [])[:MAX_ALLOWED_FILES]
+                     if isinstance(i, dict) and isinstance(i.get("id"), str) and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", i["id"])]
+            if items and isinstance(grant.get("accountId"), str):
+                self._grant = self._picked_grant(items, grant.get("account"), grant["accountId"], bool(grant.get("writes")))
+            return
         if (self._oauth and isinstance(grant, dict) and isinstance(grant.get("folder"), str)
                 and isinstance(grant.get("accountId"), str)):
             restored = {
@@ -502,7 +538,10 @@ class Connection:
                 "signedIn": bool(self._oauth),
                 "pending": bool(self._pending),
                 "error": self._error,
-                "writeScope": bool(self._oauth and self._oauth["scope"] == WRITE_SCOPE),
+                "writeScope": bool(self._oauth and (self._oauth["scope"] == WRITE_SCOPE or (
+                    self._oauth["scope"] == FILE_SCOPE and self._grant and self._grant.get("writes")))),
+                "mode": "picked" if self._oauth and self._oauth["scope"] == FILE_SCOPE else "folder",
+                "builtinClient": builtin_client() is not None,
                 "hasSavedClient": bool(self._saved_client),
                 "persisted": bool(getattr(self._store, "persistent", False)),
             }
@@ -519,11 +558,21 @@ class Connection:
         with self._lock:
             return {"drive": requested(text, bool(self._grant)), "generation": self._generation}
 
-    def start(self, client=None, writes=False):
-        if type(writes) is not bool:
+    def start(self, client=None, writes=False, *, picker=False, add=False):
+        """Open Google sign-in in the browser. picker=True uses Pipkin's own client with Google's file picker
+        (drive.file); otherwise the user's own Desktop client JSON with a whole-Drive scope."""
+        if type(writes) is not bool or type(picker) is not bool or type(add) is not bool:
             raise ValueError("Invalid write permission flag.")
+        previous = None
         with self._lock:
-            if client is None:
+            if picker:
+                client = builtin_client()
+                if client is None:
+                    raise ValueError("This build of Pipkin doesn't include Google sign-in. Use your own client under Advanced.")
+                client_id, secret = client
+                if add and self._grant and self._grant.get("mode") == "picked":
+                    previous = dict(self._grant)
+            elif client is None:
                 if not self._saved_client:
                     raise ValueError("Use a Google Cloud Desktop OAuth client JSON file.")
                 client_id = self._saved_client["client_id"]
@@ -533,7 +582,7 @@ class Connection:
         state = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(64)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-        scope = WRITE_SCOPE if writes else READ_SCOPE
+        scope = FILE_SCOPE if picker else WRITE_SCOPE if writes else READ_SCOPE
         connection = self
 
         class Callback(http.server.BaseHTTPRequestHandler):
@@ -563,13 +612,18 @@ class Connection:
                         response = connection._token_request(TOKEN_URL, method="POST", form=True, data={
                             "client_id": client_id, "client_secret": secret, "code": code[0],
                             "code_verifier": verifier, "redirect_uri": redirect, "grant_type": "authorization_code"})
+                        chosen = picked_ids(values) if picker else None
                         connection._oauth = connection._token(response, scope, client_id, secret)
-                        connection._saved_client = {"client_id": client_id, "secret": secret}
+                        if picker:
+                            connection._grant_from_pick(chosen, writes, previous)
+                        else:
+                            connection._saved_client = {"client_id": client_id, "secret": secret}
                         connection._persist()
-                    except (ValueError, TypeError, KeyError):
-                        connection._error = "Google authorization failed. Check consent, client settings and requested permissions."
+                    except (ValueError, TypeError, KeyError) as problem:
+                        connection._error = (str(problem) if picker and str(problem).startswith("Pick") else
+                                             "Google authorization failed. Check consent, client settings and requested permissions.")
                     connection._pending = None
-                body = b"Authorization finished. Return to Pipkin Settings."
+                body = "Done. You can close this tab and return to Pipkin.".encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
                 self.send_header("Cache-Control", "no-store")
@@ -582,14 +636,17 @@ class Connection:
                 raise ValueError("Authorization is already pending. Disconnect to cancel it.")
             listener = http.server.HTTPServer(("127.0.0.1", 0), Callback)
             listener.timeout = 0.5
+            saved_client = self._saved_client
             self.disconnect(forget_client=False)
-            self._saved_client = {"client_id": client_id, "secret": secret}
+            self._saved_client = saved_client if picker else {"client_id": client_id, "secret": secret}
             self._pending = state
         redirect = f"http://127.0.0.1:{listener.server_port}/oauth/callback"
         url = AUTH_URL + "?" + urllib.parse.urlencode({
             "client_id": client_id, "redirect_uri": redirect, "response_type": "code",
             "scope": scope, "state": state, "code_challenge": challenge,
-            "code_challenge_method": "S256", "access_type": "offline", "prompt": "consent"})
+            "code_challenge_method": "S256", "access_type": "offline", "prompt": "consent",
+            # Google's picker for desktop apps rides on the same authorization request.
+            **({"trigger_onepick": "true", "allow_multiple": "true", "allow_folder_selection": "true"} if picker else {})})
 
         def listen():
             deadline = time.monotonic() + 180
@@ -617,9 +674,10 @@ class Connection:
         if not isinstance(response, dict):
             raise ValueError("Invalid token response.")
         scopes = response.get("scope", scope if previous else "")
-        if not isinstance(scopes, str) or scope not in scopes.split() or any(s not in (READ_SCOPE, WRITE_SCOPE) for s in scopes.split()):
+        granted = scopes.split() if isinstance(scopes, str) else []
+        if scope not in granted or any(s not in SCOPES for s in granted):
             raise ValueError("Google did not grant the expected permission.")
-        if scope == READ_SCOPE and WRITE_SCOPE in scopes.split():
+        if (scope == READ_SCOPE and WRITE_SCOPE in granted) or (scope == FILE_SCOPE and set(granted) != {FILE_SCOPE}):
             raise ValueError("Google returned excessive permissions.")
         access = response.get("access_token")
         refresh = response.get("refresh_token", previous)
@@ -644,6 +702,61 @@ class Connection:
                 self._persist()
             return self._oauth["access"]
 
+    @staticmethod
+    def _picked_grant(items, account, account_id, writes):
+        folder = next((i for i in items if i["mimeType"] == FOLDER), None)
+        return {"mode": "picked", "items": items, "folder": folder["id"] if folder else None,
+                "folderName": folder["name"] if folder else "Picked files", "account": account,
+                "accountId": account_id, "writes": writes}
+
+    def _grant_from_pick(self, ids, writes, previous=None):
+        """Build the grant from what the user picked in Google's picker (called with the lock held)."""
+        api = self._api_factory(self)
+        account = api.call("about", query={"fields": "user(displayName,emailAddress,permissionId)"})["user"]
+        if not isinstance(account.get("permissionId"), str) or not account["permissionId"]:
+            raise ValueError("Could not verify Google account.")
+        items = []
+        if previous and previous.get("accountId") == account["permissionId"]:
+            items = [dict(i) for i in previous.get("items", [])]
+        known = {i["id"] for i in items}
+        for ident in ids:
+            if ident in known:
+                continue
+            meta = api.call("files/" + ident, query={"fields": FIELDS})
+            if meta.get("id") != ident or meta.get("trashed") or meta.get("mimeType") == SHORTCUT:
+                continue
+            items.append({"id": ident, "name": meta.get("name") or ident, "mimeType": meta.get("mimeType", "")})
+            known.add(ident)
+        if not items:
+            raise ValueError("Pick at least one file or folder for Pipkin to use.")
+        self._generation += 1
+        self._grant = self._picked_grant(items[:MAX_ALLOWED_FILES], account.get("emailAddress"), account["permissionId"], writes)
+
+    def forget_item(self, ident):
+        ident = resource_id(ident)
+        with self._lock:
+            if not self._grant or self._grant.get("mode") != "picked":
+                raise ValueError("Nothing picked to remove.")
+            items = [i for i in self._grant["items"] if i["id"] != ident]
+            if not items:
+                self.disconnect(forget_client=False)
+                return self.state()
+            g = self._grant
+            self._grant = self._picked_grant(items, g["account"], g["accountId"], g["writes"])
+            self._generation += 1
+            self._persist()
+            return self.state()
+
+    def set_writes(self, writes):
+        if type(writes) is not bool:
+            raise ValueError("Invalid write permission flag.")
+        with self._lock:
+            if self._grant and self._grant.get("mode") == "picked":
+                self._grant = dict(self._grant, writes=writes)
+                self._generation += 1
+                self._persist()
+            return self.state()
+
     def browse(self, parent="root", query=None, page=None, *, include_files=True):
         """List folders (and optionally files) in My Drive so Settings can pick a folder or specific files."""
         parent_id = "root" if not parent or parent == "root" else folder_id(parent)
@@ -651,6 +764,8 @@ class Connection:
         with self._lock:
             if not self._oauth:
                 raise ValueError("Sign in to Google first.")
+            if self._oauth["scope"] == FILE_SCOPE:
+                raise ValueError("With Pipkin's Google sign-in, choose files and folders in Google's picker.")
             api = self._api_factory(self)
             parent_name = "My Drive"
             grandparent = None
@@ -704,6 +819,8 @@ class Connection:
         with self._lock:
             if not self._oauth:
                 raise ValueError("Sign in to Google first.")
+            if self._oauth["scope"] == FILE_SCOPE:
+                raise ValueError("With Pipkin's Google sign-in, choose files and folders in Google's picker.")
             api = self._api_factory(self)
             account = api.call("about", query={"fields": "user(displayName,emailAddress,permissionId)"})["user"]
             item = api.call("files/" + folder, query={"fields": FIELDS})
@@ -751,8 +868,11 @@ class Connection:
             account = api.call("about", query={"fields": "user(permissionId)"})
             if account.get("user", {}).get("permissionId") != grant["accountId"]:
                 raise ValueError("Google account changed. Reconnect in Settings.")
+            if grant.get("mode") == "picked":
+                grant["items"] = [dict(i) for i in self._grant["items"]]
             turn = Turn(self, self._generation, api, grant, journal)
-            turn._inside(grant["folder"], folder=True)
+            if grant.get("folder") and grant.get("mode") != "picked":
+                turn._inside(grant["folder"], folder=True)
             return turn
 
 
@@ -1105,9 +1225,19 @@ class Turn:
         self.workspace_resolver = None
         allowed = grant.get("allowedFiles")
         self._allowed_ids = {f["id"] for f in allowed} if allowed else None
+        # Pipkin's own sign-in: allowed = what the user picked, plus anything inside a picked folder.
+        self._picked = {i["id"] for i in grant.get("items", [])} if grant.get("mode") == "picked" else None
 
     @property
     def guidance(self):
+        if self._picked is not None:
+            listing = ", ".join(f"{i['name']} ({'folder' if i['mimeType'] == FOLDER else i['mimeType'] or 'file'}, ID {i['id']})"
+                                for i in self.grant["items"][:25])
+            return (GUIDANCE + "\nThe user picked these Google Drive items for Pipkin: " + listing
+                    + ". Only picked files (and files Pipkin created) can be read or edited. A picked folder is a place to "
+                    "create new files; files already inside it are not visible unless the user picked them too. If the user "
+                    "asks about a file that isn't listed, tell them to add it with 'Add files or folders' in Settings › "
+                    "Connected accounts. Call drive_list without a folder to see the picked items.")
         extra = (f"\nSelected folder: {json.dumps(self.grant['folderName'], ensure_ascii=False)} "
                  f"(ID: {json.dumps(self.grant['folder'])}; omit folder/parent to target it directly)")
         if self.grant.get("allowedFiles"):
@@ -1117,6 +1247,8 @@ class Turn:
 
     def _resolve_parent(self, value):
         if value is None:
+            if not self.grant.get("folder"):
+                raise ValueError("No folder was picked. Pick a folder in Settings › Connected accounts, then try again.")
             return self.grant["folder"]
         if isinstance(value, str):
             stripped = value.strip()
@@ -1160,8 +1292,38 @@ class Turn:
                 raise ValueError("Google Drive call limit reached.")
             return self.api.call(*args, **clean)
 
+    def _inside_picked(self, ident, folder=False):
+        seen = set()
+        first = None
+        for _ in range(20):
+            if ident in seen:
+                break
+            seen.add(ident)
+            try:
+                item = self._call("files/" + ident, query={"fields": FIELDS})
+            except DriveHTTPError:
+                break  # Pipkin can't see this item (or its parent): it wasn't picked.
+            if (item.get("id") != ident or item.get("trashed") or item.get("driveId")
+                    or item.get("mimeType") == SHORTCUT):
+                break
+            if first is None:
+                first = item
+                if folder and item.get("mimeType") != FOLDER:
+                    break
+            elif item.get("mimeType") != FOLDER:
+                break
+            if ident in self._picked:
+                return first
+            parents = item.get("parents", [])
+            if len(parents) != 1:
+                break
+            ident = resource_id(parents[0])
+        raise ValueError("That isn't one of the files or folders you picked for Pipkin. Add it in Settings › Connected accounts.")
+
     def _inside(self, ident, folder=False):
         ident = resource_id(ident)
+        if self._picked is not None:
+            return self._inside_picked(ident, folder)
         root = self.grant["folder"]
         seen = set()
         first = None
@@ -1670,6 +1832,18 @@ class Turn:
                 name in WRITE_NAMES and self.grant["writes"] and approve)):
             raise ValueError("Google Drive operation is not authorized.")
         check()
+        if name in ("drive_list", "drive_search") and self._picked is not None and not args.get("folder"):
+            term = bounded_text(args.get("query"), 200) if args.get("query") else None
+            if name == "drive_search" and not term:
+                raise ValueError("Specify part of a file name.")
+            matches = [{**i, "url": file_url(i["id"])} for i in self.grant["items"]
+                       if not term or term.casefold() in i["name"].casefold()]
+            if name == "drive_search":
+                for item in self.grant["items"]:
+                    if item["mimeType"] == FOLDER:
+                        found = json.loads(self._search(item["id"], term, check).split("\n", 1)[1])["files"]
+                        matches.extend(f for f in found if f["id"] not in {m["id"] for m in matches})
+            return self._result({"files": matches[:30], "picked": True})
         if name in ("drive_list", "drive_search"):
             parent = self._resolve_parent(args.get("folder"))
             term = bounded_text(args.get("query"), 200) if args.get("query") else None

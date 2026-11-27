@@ -174,7 +174,7 @@ const defaultSettings = {
   memoryEnabled: true, protectMemory: true, allowShell: false, exploreModel: "", shortcuts: {},
   permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat", busySend: "steer",
   sidebarCollapsed: false, sidebarWidth: 268,
-  dictationModel: "base", dictationLanguage: "auto", dictationTidy: false,
+  dictationModel: "base", dictationLanguage: "auto", dictationTidy: false, dictationAdvanced: false,
 };
 const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
 let settings = { ...defaultSettings, ...readLocal(settingsKey, {}) };
@@ -7243,7 +7243,9 @@ async function driveConnection(action, extraPayload = null) {
   let data = null;
   try {
     let payload = extraPayload ? { ...extraPayload } : {};
-    if (action === "start") {
+    if (action === "start" && payload.picker) {
+      payload = { picker: true, add: Boolean(payload.add), writes: byId("drive-writes").checked };
+    } else if (action === "start") {
       const file = byId("drive-client").files[0];
       if (file) {
         if (file.size > 12000) throw new Error("Choose your Desktop OAuth client JSON file (under 12 KB).");
@@ -7264,15 +7266,19 @@ async function driveConnection(action, extraPayload = null) {
     if (!response.ok) throw new Error(data.error || "Google Drive connection failed.");
     driveState = data;
     const grant = data.connection;
-    const scopeNote = grant?.allowedFiles?.length ? ` · ${grant.allowedFiles.length} file${grant.allowedFiles.length === 1 ? "" : "s"}` : "";
+    const picked = data.mode === "picked";
+    const scopeNote = picked && grant ? ` · ${grant.items.length} picked item${grant.items.length === 1 ? "" : "s"}`
+      : grant?.allowedFiles?.length ? ` · ${grant.allowedFiles.length} file${grant.allowedFiles.length === 1 ? "" : "s"}` : "";
     status.dataset.error = data.error ? "true" : "false";
     status.textContent = data.error || (grant
-      ? `Connected as ${grant.account} · ${grant.folderName}${scopeNote} · ${grant.writes ? "Reviewed writes" : "Read only"}`
-      : data.pending ? "Complete Google authorization in your browser…"
+      ? `Connected as ${grant.account}${picked ? "" : " · " + grant.folderName}${scopeNote} · ${grant.writes ? "Reviewed writes" : "Read only"}`
+      : data.pending ? "Finish signing in and picking files in your browser…"
+      : data.signedIn && picked ? "Signed in. Choose files or folders for Pipkin."
       : data.signedIn ? "Signed in. Browse My Drive or paste a folder ID to select your scope."
       : "Not connected.");
     card.dataset.state = grant ? "connected" : "disconnected";
-    byId("drive-status-pill").textContent = grant ? "Connected" : data.pending ? "Signing in" : data.signedIn ? "Select folder" : "Not connected";
+    renderDriveEasy(data);
+    byId("drive-status-pill").textContent = grant ? "Connected" : data.pending ? "Signing in" : data.signedIn ? (picked ? "Pick files" : "Select folder") : "Not connected";
     byId("drive-status-pill").dataset.status = grant ? "active" : "paused";
     if (data.hasSavedClient) {
       clientLabel.textContent = data.persisted
@@ -7281,7 +7287,7 @@ async function driveConnection(action, extraPayload = null) {
     } else {
       clientLabel.textContent = "Choose your downloaded Google Desktop OAuth JSON file.";
     }
-    if (grant) byId("drive-folder").value = grant.folder;
+    if (grant && !picked) byId("drive-folder").value = grant.folder;
     if (data.signedIn) byId("drive-writes").checked = Boolean(data.writeScope);
     if (!data.signedIn) {
       byId("drive-picker").hidden = true;
@@ -7298,9 +7304,36 @@ async function driveConnection(action, extraPayload = null) {
     signin.disabled = Boolean(st?.pending);
     signin.textContent = st?.signedIn ? "Re-authorize" : "Sign in with Google";
     select.disabled = !st?.signedIn;
-    browse.disabled = !st?.signedIn;
+    browse.disabled = !st?.signedIn || st?.mode === "picked";
     disconnect.disabled = !(st?.signedIn || st?.pending || st?.hasSavedClient);
+    byId("drive-pick").disabled = Boolean(st?.pending);
   }
+}
+
+/* Pipkin's own Google sign-in: Google's picker chooses exactly what Pipkin may use. */
+function renderDriveEasy(data) {
+  const easy = byId("drive-easy");
+  const advanced = byId("drive-advanced");
+  if (!data.builtinClient) {
+    // A build without Pipkin's Google client (a dev copy): only the bring-your-own-client path works.
+    easy.hidden = true;
+    advanced.open = true;
+    byId("drive-intro").textContent = "Connect your Google Cloud Desktop OAuth client. Your sign-in is kept in your OS Keychain until Disconnect.";
+    return;
+  }
+  easy.hidden = false;
+  const grant = data.mode === "picked" ? data.connection : null;
+  const list = byId("drive-picked");
+  list.hidden = !grant;
+  list.replaceChildren(...(grant?.items || []).map((item) => el("div", { className: "drive-picked-row", role: "listitem" },
+    icon(item.mimeType === "application/vnd.google-apps.folder" ? "folder" : "file"),
+    el("span", { className: "drive-picker-name", text: item.name }),
+    el("button", { type: "button", className: "icon-button", title: `Stop using ${item.name}`, "aria-label": `Stop using ${item.name}`,
+      onclick: () => driveConnection("forget", { id: item.id }) }, icon("x")))));
+  byId("drive-pick").querySelector("span").textContent = grant ? "Add files or folders…" : "Sign in with Google";
+  byId("drive-pick-note").textContent = grant
+    ? "Pick more in Google's picker. Remove any with ×. Files in a picked folder aren't readable unless you pick them too."
+    : "Google opens in your browser. Pick files to read or edit; a folder only lets Pipkin save new files there.";
 }
 byId("drive-client-btn").addEventListener("click", () => byId("drive-client").click());
 byId("drive-client").addEventListener("change", () => {
@@ -7308,6 +7341,10 @@ byId("drive-client").addEventListener("change", () => {
   if (file) byId("drive-client-label").textContent = `Selected: ${file.name}`;
 });
 byId("drive-start").addEventListener("click", () => driveConnection("start"));
+byId("drive-pick").addEventListener("click", () => driveConnection("start", { picker: true, add: driveState?.mode === "picked" && Boolean(driveState?.connection) }));
+byId("drive-writes").addEventListener("change", (event) => {
+  if (driveState?.mode === "picked" && driveState?.connection) void driveConnection("writes", { writes: event.target.checked });
+});
 byId("drive-select").addEventListener("click", () => driveConnection("select"));
 byId("drive-disconnect").addEventListener("click", () => driveConnection("disconnect"));
 byId("drive-browse").addEventListener("click", () => {

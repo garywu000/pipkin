@@ -3153,3 +3153,23 @@ a.button { text-decoration: none; }
 @media (prefers-reduced-motion: reduce) {
   .mic-button.recording, .dictation-dot, .mic-button.transcribing .icon, .dictation-bar, .dictation-preview { animation: none; }
 }
+
+/* Google Drive: one-click sign-in with Google's picker, advanced own-client path tucked away. */
+.drive-easy { display: grid; gap: 10px; }
+.drive-easy-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.drive-easy-actions .button { display: inline-flex; align-items: center; gap: 7px; }
+.drive-easy-actions .button .icon { width: 16px; height: 16px; }
+.drive-easy-actions small { font-size: .78rem; color: var(--muted); }
+.drive-picked { display: grid; gap: 4px; padding: 6px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--rule); max-height: 220px; overflow-y: auto; }
+.drive-picked-row { display: flex; align-items: center; gap: 8px; padding: 5px 4px 5px 9px; border-radius: 9px; background: var(--surface); font-size: .84rem; color: var(--ink); }
+.drive-picked-row > .icon { width: 15px; height: 15px; color: var(--muted); flex: none; }
+.drive-picked-row .icon-button { width: 26px; height: 26px; flex: none; }
+.drive-advanced { border-top: 1px solid var(--rule); padding-top: 10px; }
+.drive-advanced > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: .84rem; font-weight: 560; color: var(--ink-2); }
+.drive-advanced > summary::-webkit-details-marker { display: none; }
+.drive-advanced > summary .icon { width: 14px; height: 14px; transition: transform .16s var(--ease-out); }
+.drive-advanced[open] > summary .icon { transform: rotate(90deg); }
+.drive-advanced[open] { display: grid; gap: 10px; }
+.drive-advanced .hint { margin: 0; }
+.drive-advanced-actions { justify-content: flex-end; }
+.drive-advanced > summary .chev-sm { opacity: 1; }

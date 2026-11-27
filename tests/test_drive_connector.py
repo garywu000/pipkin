@@ -554,3 +554,136 @@ class DriveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PickerAPI(FakeAPI):
+    """Like Drive with drive.file: items Pipkin wasn't given access to come back 404."""
+
+    def __init__(self, hidden=()):
+        super().__init__()
+        self.hidden = set(hidden)
+
+    def call(self, path, **kwargs):
+        if path.startswith("files/") and (path.split("/")[1] in self.hidden or path.split("/")[1] not in self.items):
+            raise drive.DriveHTTPError(404)
+        return super().call(path, **kwargs)
+
+
+class PickerSignInTests(unittest.TestCase):
+    """Pipkin's own Google sign-in: only what the user picks in Google's picker (drive.file)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.journal = Path(self.tmp.name) / "writes.db"
+
+    def connect(self, picked, api=None, writes=True):
+        self.api = api or PickerAPI(hidden={"other"})
+        connection = drive.Connection(api_factory=lambda _: self.api)
+        connection._oauth = {"scope": drive.FILE_SCOPE}
+        with connection._lock:
+            connection._grant_from_pick(picked, writes)
+        return connection
+
+    def test_picked_ids_parsing(self):
+        self.assertEqual(drive.picked_ids({"picked_file_ids": ["a1,b_2-c"]}), ["a1", "b_2-c"])
+        self.assertEqual(drive.picked_ids({}), [])
+        with self.assertRaises(ValueError):
+            drive.picked_ids({"picked_file_ids": ["ok,../etc"]})
+        with self.assertRaises(ValueError):
+            drive.picked_ids({"picked_file_ids": [",".join(f"f{i}" for i in range(drive.MAX_ALLOWED_FILES + 1))]})
+
+    def test_picked_folder_covers_its_contents_only(self):
+        turn = self.connect(["root"]).turn(writes=True, journal=self.journal)
+        self.assertEqual(turn._inside("doc")["id"], "doc")
+        with self.assertRaises(ValueError):
+            turn._inside("outside")  # its parent folder wasn't picked and isn't visible
+        self.assertIn("Test folder", turn.guidance)
+        listing = json.loads(turn.execute("drive_list", {}).split("\n", 1)[1])
+        self.assertEqual([f["id"] for f in listing["files"]], ["root"])
+
+    def test_picked_file_without_a_folder(self):
+        turn = self.connect(["doc"]).turn(writes=True, journal=self.journal)
+        self.assertEqual(turn._inside("doc")["id"], "doc")
+        with self.assertRaisesRegex(ValueError, "No folder was picked"):
+            turn.execute("drive_create_doc", {"name": "New"}, approve=lambda *_: True)
+        self.assertEqual(self.api.posts, [])
+
+    def test_whole_drive_tools_are_refused(self):
+        connection = self.connect(["root"])
+        with self.assertRaisesRegex(ValueError, "picker"):
+            connection.browse("root")
+        with self.assertRaisesRegex(ValueError, "picker"):
+            connection.select("root")
+
+    def test_adding_more_keeps_earlier_picks_and_remove_works(self):
+        connection = self.connect(["doc"])
+        with connection._lock:
+            connection._grant_from_pick(["root"], True, connection._grant)
+        self.assertEqual([i["id"] for i in connection.status()["items"]], ["doc", "root"])
+        connection.forget_item("doc")
+        self.assertEqual([i["id"] for i in connection.status()["items"]], ["root"])
+        self.assertEqual(connection.status()["folder"], "root")
+
+    def test_nothing_picked_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, "Pick at least one"):
+            self.connect([])
+
+    def test_token_must_be_drive_file_only(self):
+        good = {"access_token": "a", "refresh_token": "r", "expires_in": 3600, "scope": drive.FILE_SCOPE}
+        self.assertEqual(drive.Connection._token(good, drive.FILE_SCOPE, "id", "s")["scope"], drive.FILE_SCOPE)
+        for scopes in (drive.FILE_SCOPE + " " + drive.WRITE_SCOPE, drive.READ_SCOPE):
+            with self.assertRaises(ValueError):
+                drive.Connection._token({**good, "scope": scopes}, drive.FILE_SCOPE, "id", "s")
+
+    def test_saved_sign_in_restores_picks(self):
+        store = drive.MemoryStore()
+        connection = self.connect(["root"])
+        connection._oauth = {"access": "", "refresh": "r", "expires": 0.0, "client_id": "c", "secret": "s", "scope": drive.FILE_SCOPE}
+        connection._store = store
+        connection._persist()
+        restored = drive.Connection(api_factory=lambda _: self.api, store=store)
+        self.assertEqual(restored.status()["mode"], "picked")
+        self.assertEqual([i["id"] for i in restored.status()["items"]], ["root"])
+        self.assertEqual(restored.state()["mode"], "picked")
+
+    def test_writes_toggle_is_respected(self):
+        connection = self.connect(["root"], writes=False)
+        self.assertNotIn("drive_create_doc", {t["function"]["name"] for t in connection.turn(writes=True, journal=self.journal).tools})
+        connection.set_writes(True)
+        self.assertIn("drive_create_doc", {t["function"]["name"] for t in connection.turn(writes=True, journal=self.journal).tools})
+
+    def test_picker_needs_pipkins_client(self):
+        with mock.patch.object(drive, "builtin_client", return_value=None):
+            with self.assertRaisesRegex(ValueError, "doesn't include Google sign-in"):
+                drive.Connection().start(picker=True)
+
+    def test_builtin_client_file(self):
+        path = Path(self.tmp.name) / "google-client.json"
+        path.write_text(json.dumps({"installed": {"client_id": "123-abc.apps.googleusercontent.com", "client_secret": "GOCSPX-x_y"}}))
+        with mock.patch.dict(drive.os.environ, {"PIPKIN_GOOGLE_CLIENT": str(path)}):
+            self.assertEqual(drive.builtin_client(), ("123-abc.apps.googleusercontent.com", "GOCSPX-x_y"))
+        path.write_text("{}")
+        with mock.patch.dict(drive.os.environ, {"PIPKIN_GOOGLE_CLIENT": str(path)}):
+            self.assertIsNone(drive.builtin_client())
+
+    def test_picker_url_and_callback(self):
+        opened = []
+        responses = {"about": {"user": {"permissionId": "account", "emailAddress": "test@example.com"}}}
+        api = PickerAPI(hidden={"other"})
+        connection = drive.Connection(api_factory=lambda _: api, token_request=lambda *a, **k: {
+            "access_token": "a", "refresh_token": "r", "expires_in": 3600, "scope": drive.FILE_SCOPE})
+        with mock.patch.object(drive, "builtin_client", return_value=("123-abc.apps.googleusercontent.com", "s")), \
+                mock.patch.object(drive.webbrowser, "open", side_effect=lambda url: opened.append(url) or True):
+            connection.start(picker=True, writes=True)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(opened[0]).query)
+        self.assertEqual(query["scope"], [drive.FILE_SCOPE])
+        self.assertEqual((query["trigger_onepick"], query["allow_folder_selection"], query["prompt"]), (["true"], ["true"], ["consent"]))
+        self.assertIn("code_challenge", query)
+        callback = urllib.parse.urlencode({"state": query["state"][0], "code": "c", "picked_file_ids": "root,doc", "scope": drive.FILE_SCOPE})
+        with urllib.request.urlopen(query["redirect_uri"][0] + "?" + callback, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+        state = connection.state()
+        self.assertEqual((state["mode"], state["pending"], state["error"]), ("picked", False, None))
+        self.assertEqual([i["id"] for i in state["connection"]["items"]], ["root", "doc"])
+        self.assertTrue(state["connection"]["writes"])

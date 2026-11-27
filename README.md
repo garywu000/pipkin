@@ -203,11 +203,13 @@ Talk instead of typing. Hold the mic button beside Send and release to finish, o
 
 The first time, pick a speech model in **Settings › Voice**: Fast (about 148 MB, many languages), Fast English (about 148 MB) or Accurate (about 574 MB). Models download only when you click, are checked against a pinned checksum, and can be removed there. Audio is never uploaded and is deleted right after it's transcribed. Your system asks once for microphone access. The Windows engine needs a CPU with AVX2 (most PCs from 2013 on).
 
-## Google Drive connector (v2.6.0 beta)
+## Google Drive connector
 
-Connect one My Drive folder (or specific files in it) through your own Google Cloud Desktop OAuth client. In Google Cloud, enable the Drive, Docs, Sheets and Slides APIs, configure the OAuth consent screen (add your account as a test user while the app is in testing), and create an OAuth client of type **Desktop app**. In **Settings › Connected accounts**, choose its JSON file, sign in with Google in your browser, then paste a folder link or use **Browse My Drive…** to pick a folder or files. Pipkin keeps the sign-in in the macOS Keychain or Windows DPAPI until you choose **Disconnect**.
+In **Settings › Connected accounts**, click **Sign in with Google**. Google opens in your browser: sign in, then use Google's picker to choose the files you want Pipkin to use, plus a folder where it can save new ones. Pipkin can read and edit only the files you picked (and files it creates); files already inside a picked folder stay hidden unless you pick them too. Add more anytime with **Add files or folders…**, or remove one with ×. Your sign-in is kept in the macOS Keychain or Windows DPAPI until you choose **Disconnect**.
 
-Read-only is the default. Turning on reviewed writes asks Google for full Drive access; Pipkin still limits its tools to what you selected and shows every write for approval. Chat reads Google Docs (with tables and tabs), Sheets, Slides, text and PDF details. Agent mode can create folders and Docs, append or replace text in Docs, update or append Sheet rows, edit or add Slides, and upload a workspace file you name. Ask naturally ("Find the biology notes in my Google Drive", "Add these rows to my budget sheet") or use `@drive`. Drive work runs only with a local model, never on a schedule, and sharing, moving and deleting files are not supported.
+Chat reads Google Docs (with tables and tabs), Sheets, Slides, text and PDF details. With **reviewed writes** turned on, Agent mode can create Docs and folders, append or replace text in Docs, update or append Sheet rows, edit or add Slides, and upload a workspace file you name, each after your approval. Ask naturally ("Summarize my biology notes doc", "Add these rows to my budget sheet") or use `@drive`. Drive work runs only with a local model, never on a schedule, and sharing, moving and deleting files are not supported.
+
+**Advanced:** to let Pipkin read a whole folder without picking each file, open **Advanced: use your own Google Cloud client**. In Google Cloud, enable the Drive, Docs, Sheets and Slides APIs, create an OAuth client of type **Desktop app**, and choose its JSON file. While your own Google app is in Testing, Google ends that sign-in after 7 days.
 
 ## GitHub connector (v2.4.1 beta)
 
