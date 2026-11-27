@@ -3057,3 +3057,99 @@ a.button { text-decoration: none; }
 }
 .drive-slide-preview strong { font-size: .92rem; color: var(--ink); }
 .drive-slide-preview p { margin: 0; font-size: .82rem; color: var(--ink-2); white-space: pre-wrap; line-height: 1.45; }
+
+/* ---------- Dictation ---------- */
+.dictate-wrap { position: relative; display: inline-flex; }
+.mic-button {
+  width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%;
+  background: var(--surface-2); color: var(--ink-2); touch-action: none; -webkit-user-select: none; user-select: none;
+  transition: background-color .16s var(--ease-out), color .16s var(--ease-out), transform .16s var(--ease-spring), box-shadow .2s var(--ease-out);
+}
+.mic-button .icon { width: 18px; height: 18px; stroke-width: 2; }
+.mic-button:hover:enabled { background: var(--surface-3); color: var(--ink); }
+.mic-button:active:enabled { transform: scale(.92); }
+.mic-button:disabled { opacity: .45; }
+.mic-button.recording { background: var(--danger); color: #fff; animation: mic-pulse 1.6s ease-in-out infinite; }
+.mic-button.recording:hover:enabled { background: var(--danger); color: #fff; filter: brightness(1.06); }
+.mic-button.transcribing .icon { animation: mic-breathe 1.1s ease-in-out infinite; }
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 45%, transparent); }
+  50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--danger) 0%, transparent); }
+}
+@keyframes mic-breathe { 50% { opacity: .35; } }
+
+/* Hover label with the shortcut, like other agent apps: "Dictate ⇧⌘D". */
+.mic-tip {
+  position: absolute; right: -4px; bottom: calc(100% + 10px); z-index: 30; display: grid; gap: 3px;
+  padding: 8px 11px; border: 1px solid var(--rule); border-radius: 11px; background: var(--glass-strong);
+  backdrop-filter: blur(18px) saturate(1.3); -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  box-shadow: var(--shadow-md); color: var(--ink); white-space: nowrap; pointer-events: none;
+  opacity: 0; transform: translateY(4px); transition: opacity .14s var(--ease-out), transform .16s var(--ease-out);
+}
+.dictate-wrap:hover .mic-tip, .mic-button:focus-visible + .mic-tip { opacity: 1; transform: none; transition-delay: .35s; }
+/* Only offer the hint while idle: during recording, transcribing or the preview it would cover the controls. */
+.mic-button:not([data-state="idle"]) + .mic-tip, .mic-button:active + .mic-tip { opacity: 0 !important; transition-delay: 0s !important; }
+.tip-row { display: flex; align-items: center; gap: 14px; justify-content: space-between; font-size: .9rem; font-weight: 600; }
+/* Each key as its own clear keycap: easy to read at a glance. */
+.tip-keys { display: inline-flex; gap: 3px; }
+.tip-keys kbd {
+  min-width: 22px; height: 22px; display: inline-grid; place-items: center; padding: 0 5px;
+  font: 600 12.5px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: var(--ink);
+  background: var(--surface-3); border: 1px solid var(--rule-strong); border-bottom-width: 2px; border-radius: 6px;
+}
+.tip-detail { font-size: .76rem; color: var(--muted); }
+
+.dictation-bar {
+  display: flex; align-items: center; gap: 10px; margin: 0 0 8px; padding: 6px 6px 6px 12px;
+  border-radius: 14px; background: color-mix(in srgb, var(--danger) 8%, var(--surface-2));
+  animation: dictation-in .22s var(--ease-out);
+}
+.dictation-bar[data-state="transcribing"], .dictation-bar[data-state="starting"] { background: var(--surface-2); }
+.dictation-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); flex: none; animation: mic-breathe 1.2s ease-in-out infinite; }
+.dictation-bar[data-state="transcribing"] .dictation-dot, .dictation-bar[data-state="starting"] .dictation-dot { background: var(--accent); }
+.dictation-label { font-size: .84rem; font-weight: 560; color: var(--ink-2); white-space: nowrap; }
+.dictation-levels { flex: 1; min-width: 40px; height: 22px; display: flex; align-items: center; justify-content: flex-end; gap: 2px; overflow: hidden; }
+.dictation-levels span { width: 3px; height: 100%; border-radius: 2px; background: color-mix(in srgb, var(--danger) 70%, var(--ink-2)); transform: scaleY(.12); transition: transform .09s linear; flex: none; }
+.dictation-bar[data-state="transcribing"] .dictation-levels span { background: var(--muted); opacity: .5; }
+.dictation-time { font: 500 .8rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); min-width: 2.6em; text-align: right; }
+.dictation-done { color: var(--accent-text); }
+@keyframes dictation-in { from { opacity: 0; transform: translateY(4px); } }
+
+.dictation-preview {
+  margin: 0 0 9px; padding: 9px 10px 8px; border: 1px solid var(--rule); border-radius: 14px; background: var(--surface);
+  box-shadow: inset 0 1px 0 var(--specular); animation: dictation-in .22s var(--ease-out);
+}
+.dictation-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.dictation-preview-title { display: inline-flex; align-items: center; gap: 6px; font-size: .8rem; font-weight: 600; color: var(--muted); }
+.dictation-preview-title .icon { width: 14px; height: 14px; }
+.dictation-views { display: inline-flex; padding: 2px; border-radius: 999px; background: var(--surface-2); }
+.dictation-views button {
+  border: 0; background: transparent; color: var(--muted); font-size: .76rem; font-weight: 560; padding: 3px 10px; border-radius: 999px;
+  transition: background-color .14s var(--ease-out), color .14s var(--ease-out);
+}
+.dictation-views button.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
+.dictation-views button:disabled { opacity: .6; }
+#dictation-text {
+  width: 100%; min-height: 44px; max-height: 180px; resize: none; border: 0; outline: none; padding: 2px 0;
+  background: transparent; color: var(--ink); font: inherit; line-height: 1.5;
+}
+#dictation-text:focus, #dictation-text:focus-visible { outline: none; box-shadow: none; }
+.dictation-preview-foot { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.dictation-note { flex: 1; min-width: 0; font-size: .76rem; color: var(--muted); }
+
+.voice-models { display: grid; gap: 6px; }
+.voice-model {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px;
+  border: 1px solid var(--rule); border-radius: 12px; background: var(--surface);
+}
+.voice-model.selected { border-color: color-mix(in srgb, var(--accent) 45%, var(--rule)); }
+.voice-model-text p { margin: 2px 0 0; font-size: .8rem; color: var(--muted); }
+.voice-model-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.voice-progress { position: relative; display: inline-grid; place-items: center; width: 92px; height: 24px; overflow: hidden; border-radius: 999px; background: var(--surface-2); font-size: .76rem; font-weight: 600; color: var(--ink-2); }
+.voice-progress-bar { position: absolute; inset: 0 auto 0 0; width: var(--progress, 0%); background: color-mix(in srgb, var(--accent) 28%, transparent); transition: width .5s var(--ease-out); }
+.voice-error { margin: 4px 0 0; font-size: .78rem; color: var(--danger); }
+#panel-voice .select-wrap { max-width: 220px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mic-button.recording, .dictation-dot, .mic-button.transcribing .icon, .dictation-bar, .dictation-preview { animation: none; }
+}

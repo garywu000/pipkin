@@ -148,6 +148,7 @@ internal sealed class MainWindow : Form
             core.NavigationStarting += OnNavigationStarting;
             core.NewWindowRequested += OnNewWindowRequested;
             core.WebMessageReceived += OnWebMessageReceived;
+            core.PermissionRequested += OnPermissionRequested;
 
             core.Navigate(AppOrigin.AbsoluteUri);
             _webView.Visible = true;
@@ -178,6 +179,19 @@ internal sealed class MainWindow : Form
         }
         e.Cancel = true;
         OpenExternalUrl(target);
+    }
+
+    // Dictation: Pipkin's own page may use the microphone; nothing else gets the microphone or camera.
+    private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
+    {
+        if (e.PermissionKind is not (CoreWebView2PermissionKind.Microphone or CoreWebView2PermissionKind.Camera)) return;
+        bool local = Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri)
+            && uri.Scheme == Uri.UriSchemeHttp
+            && string.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
+            && uri.Port == Port;
+        e.State = local && e.PermissionKind == CoreWebView2PermissionKind.Microphone
+            ? CoreWebView2PermissionState.Allow
+            : CoreWebView2PermissionState.Deny;
     }
 
     private void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)

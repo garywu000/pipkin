@@ -713,6 +713,11 @@ static NSButton *ToolButton(NSString *symbol, NSString *tip, id target, SEL acti
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) { completion(r == NSAlertFirstButtonReturn); }];
 }
 
+// Websites opened in Pipkin's browser never get the microphone or camera.
+- (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))decisionHandler API_AVAILABLE(macos(12.0)) {
+    decisionHandler(WKPermissionDecisionDeny);
+}
+
 - (void)webView:(WKWebView *)webView runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSArray<NSURL *> *))completion {
     NSOpenPanel *panel = [NSOpenPanel openPanel];
     panel.allowsMultipleSelection = parameters.allowsMultipleSelection;

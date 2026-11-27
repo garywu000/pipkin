@@ -196,6 +196,12 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | [v1.3.0](https://github.com/garywu000/pipkin/releases/tag/v1.3.0) | Added a guard against starting new model loads under critical memory pressure, the memory warning banner, and stricter native browser link handling. Included the v1.2.1 development changes for pausing runs, unloading idle models, and recommending context sizes. |
 | [v1.2.0](https://github.com/garywu000/pipkin/releases/tag/v1.2.0) | Redesigned the Mac interface with five palettes and first-launch customization. Added the Harness launcher, live model memory display, and Undo All. |
 
+## Dictation (v2.6.0 development beta)
+
+Talk instead of typing. Hold the mic button beside Send and release to finish, or click it (or press ⌘⇧D on Mac, Ctrl+Shift+D on Windows) to start and again to stop. Esc cancels. Pipkin turns your speech into text on your computer with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and shows it in an editable preview. Choose **As spoken** or **Tidied** (your local chat model fixes punctuation and filler words, and Pipkin keeps your exact words if tidying would change a name, number or "not"), then **Insert**. Dictation never sends a message by itself.
+
+The first time, pick a speech model in **Settings › Voice**: Fast (about 148 MB, many languages), Fast English (about 148 MB) or Accurate (about 574 MB). Models download only when you click, are checked against a pinned checksum, and can be removed there. Audio is never uploaded and is deleted right after it's transcribed. Your system asks once for microphone access. The Windows engine needs a CPU with AVX2 (most PCs from 2013 on).
+
 ## Google Drive connector (v2.5.0 development beta)
 
 This preview connects to a selected My Drive folder through Google OAuth. In Google Cloud, enable the Google Drive API and Google Docs API, configure the OAuth consent screen (add your account as a test user if the app is in testing), and create a **Desktop app** OAuth client. Download its JSON file. In Pipkin, open Settings › Connected accounts › Google Drive, choose the JSON file, sign in through your browser, and enter the ID or link of a folder in My Drive. Use a disposable test folder first.
@@ -216,6 +222,7 @@ Ask naturally, for example “Create a branch for the README changes,” “Open
 
 - **Distribution.** Developer ID signing and notarization for Mac builds, plus Windows installer improvements.
 - **Benchmark comparisons.** Publish repeated trials with the same hardware, model, context, and task when comparing single-model and Explorer runs.
+- **Dictation.** Local speech-to-text in the v2.6.0 development beta. Conversational voice is planned next.
 - **Connected accounts.** GitHub connector in the v2.4.1 beta; Google Drive preview in the v2.5.0 development beta. Picker authorization, broader Google Workspace operations and local Git transfer remain planned.
 - **Extensibility.** More reusable workflows and scheduled work.
 

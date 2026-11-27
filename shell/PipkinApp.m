@@ -416,6 +416,14 @@ static NSString *StatusPage(NSString *title, NSString *detail, BOOL spinner) {
     }];
 }
 
+// Dictation: only Pipkin's own page (the local server, main frame) may use the microphone, and never the camera.
+// WebKit then skips its own prompt; macOS still asks once for Pipkin (NSMicrophoneUsageDescription).
+- (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))decisionHandler API_AVAILABLE(macos(12.0)) {
+    BOOL local = [origin.protocol isEqualToString:@"http"] && [origin.host isEqualToString:@"127.0.0.1"]
+        && origin.port == self.port && frame.isMainFrame;
+    decisionHandler(local && type == WKMediaCaptureTypeMicrophone ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
+}
+
 - (void)webView:(WKWebView *)webView runJavaScriptAlertPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(void))completion {
     NSAlert *alert = [NSAlert new];
     alert.messageText = message;

@@ -27,6 +27,8 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Pipkin uses the microphone only while you dictate. Speech is turned into text on this Mac and the audio is deleted right after.</string>
 	<key>CFBundleVersion</key>
 	<string>50</string>
 	<key>LSApplicationCategoryType</key>
