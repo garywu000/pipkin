@@ -167,6 +167,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.4.1 beta](https://github.com/garywu000/pipkin/releases/tag/v2.4.1) | GitHub connector: read your selected repository in Chat; in Agent mode, propose branches, commits, pull requests, issues, comments, releases and pushes, each approved by you. |
 | [v2.3.3](https://github.com/garywu000/pipkin/releases/tag/v2.3.3) | Scheduled task pages with run history and live progress, and any run opens as an Agent chat. Optional beta updates, labeled as beta in the app, and required updates only a whole major version behind. |
 | [v2.3.2 beta](https://github.com/garywu000/pipkin/releases/tag/v2.3.2) | Scheduled tasks get their own pages: task cards, a History of every run with live progress, and any run opens as an Agent chat. |
 | [v2.3.1 beta](https://github.com/garywu000/pipkin/releases/tag/v2.3.1) | Beta updates: turn them on in Settings › General to get test versions early, each one optional. Pipkin now requires an update only when it is a whole major version behind. Shorter one-line update notice. |
@@ -195,7 +196,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | [v1.3.0](https://github.com/garywu000/pipkin/releases/tag/v1.3.0) | Added a guard against starting new model loads under critical memory pressure, the memory warning banner, and stricter native browser link handling. Included the v1.2.1 development changes for pausing runs, unloading idle models, and recommending context sizes. |
 | [v1.2.0](https://github.com/garywu000/pipkin/releases/tag/v1.2.0) | Redesigned the Mac interface with five palettes and first-launch customization. Added the Harness launcher, live model memory display, and Undo All. |
 
-## GitHub connector (v2.4.1 development preview)
+## GitHub connector (v2.4.1 beta)
 
 Install GitHub CLI and sign in with `gh auth login --hostname github.com` in your terminal. In Settings › Connected accounts, enter an `owner/repository` and connect it. Enable reviewed writes only if needed. The connection is cleared when the server restarts; select it again to change repositories.
 
@@ -205,7 +206,7 @@ Ask naturally, for example “Create a branch for the README changes,” “Open
 
 - **Distribution.** Developer ID signing and notarization for Mac builds, plus Windows installer improvements.
 - **Benchmark comparisons.** Publish repeated trials with the same hardware, model, context, and task when comparing single-model and Explorer runs.
-- **Connected accounts.** GitHub pilot in the unreleased v2.4.1 dev build; Google Drive and broader local Git transfer are planned.
+- **Connected accounts.** GitHub connector in the v2.4.1 beta; Google Drive and broader local Git transfer are planned.
 - **Extensibility.** More reusable workflows and scheduled work.
 
 Have an idea or a task Pipkin should finish? [Open an issue](https://github.com/garywu000/pipkin/issues).
