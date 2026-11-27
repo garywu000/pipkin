@@ -600,15 +600,15 @@
     card.append(el("header", {}, icon(entry.decision === "approved" ? "check" : entry.decision ? "x" : entry.kind === "command" ? "terminal" : "edit"), el("span", { text: `${heading} · ${entry.title}` })));
     // Once decided, the approval is shown beside the action's result inside its batch.
     if (entry.decision) return card;
-    card.append(entry.kind === "edit" ? diffView(entry.detail) : el("div", { className: "tool-output", text: "$ " + entry.detail }));
+    card.append(entry.kind === "edit" ? diffView(entry.detail) : el("div", { className: "tool-output", text: entry.kind === "drive" ? entry.detail : "$ " + entry.detail }));
     const footer = el("footer");
     if (!entry.decision) {
       const deny = el("button", { type: "button", className: "button small", text: "Deny", disabled: Boolean(entry.submitting) });
       const allow = el("button", { type: "button", className: "button small accent", disabled: Boolean(entry.submitting),
-        text: entry.submitting ? "Sending…" : entry.kind === "command" ? "Run command" : "Apply change" });
+        text: entry.submitting ? "Sending…" : entry.kind === "drive" ? "Approve Drive action" : entry.kind === "command" ? "Run command" : "Apply change" });
       deny.addEventListener("click", () => onApprove?.(entry, false));
       allow.addEventListener("click", () => onApprove?.(entry, true));
-      footer.append(el("span", { className: "decision", text: entry.kind === "command" ? (/your terminal/i.test(entry.title || "") ? "Types into your terminal panel." : "Runs in your workspace folder.") : "Writes to your workspace folder." }), deny, allow);
+      footer.append(el("span", { className: "decision", text: entry.kind === "drive" ? "Writes to the selected Google Drive folder." : entry.kind === "command" ? (/your terminal/i.test(entry.title || "") ? "Types into your terminal panel." : "Runs in your workspace folder.") : "Writes to your workspace folder." }), deny, allow);
     }
     card.append(footer);
     return card;

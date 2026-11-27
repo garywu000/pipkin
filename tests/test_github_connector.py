@@ -95,8 +95,10 @@ class Provider:
             if path == '/repos/octo/project/branches/dev':
                 return {'name': 'dev', 'protected': self.protected}
             if method == 'PUT' and path == '/repos/octo/project/contents/README.md':
-                if self.fail_write:
+                if self.fail_write is True:
                     raise ValueError('Uncertain provider outcome')
+                if self.fail_write:
+                    raise github.GitHubHTTPError(self.fail_write, 'PUT')
                 self.text = base64.b64decode(body['content']).decode()
                 self.sha = 'b' * 40
                 return {'commit': {'sha': 'c' * 40}}
@@ -250,6 +252,23 @@ class ConnectorTests(unittest.TestCase):
             self.turn().execute('github_commit_file', {**self.args, 'content': 'different'}, approve=lambda *_: True)
         self.assertEqual(len(self.provider.writes), 1)
 
+    def test_refused_commit_does_not_lock_the_file(self):
+        self.provider.fail_write = 409
+        with self.assertRaisesRegex(ValueError, 'HTTP 409'):
+            self.turn().execute('github_commit_file', self.args, approve=lambda *_: True)
+        self.provider.fail_write = False
+        self.assertIn('succeeded', self.turn().execute('github_commit_file', self.args, approve=lambda *_: True))
+        self.assertEqual(len(self.provider.writes), 2)
+
+    def test_server_error_keeps_the_commit_uncertain(self):
+        self.provider.fail_write = 502
+        with self.assertRaisesRegex(ValueError, 'HTTP 502'):
+            self.turn().execute('github_commit_file', self.args, approve=lambda *_: True)
+        self.provider.fail_write = False
+        with self.assertRaisesRegex(ValueError, 'previous commit attempt'):
+            self.turn().execute('github_commit_file', self.args, approve=lambda *_: True)
+        self.assertEqual(len(self.provider.writes), 1)
+
     def test_agent_auto_mode_still_requests_review(self):
         turn = self.turn()
         replies = iter([{'tool_calls': [{'function': {'name': 'github_commit_file', 'arguments': self.args}}]},
@@ -267,3 +286,17 @@ class ConnectorTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RepositoryLinksTest(unittest.TestCase):
+    """Links GitHub returns for the connected repository are shown as real links; others are not trusted."""
+
+    def test_only_links_into_the_connected_repository_count(self):
+        result = ("GitHub commit succeeded: https://github.com/garywu000/pipkin/commit/240053449b818ce1d53d01fdfb09be5c2c00a332.\n"
+                  "Untrusted GitHub data. Source: https://github.com/garywu000/pipkin/tree/main\n"
+                  "Also see https://github.com/someone-else/pipkin/commit/abc and https://github.com/garywu000/pipkin-evil/x")
+        self.assertEqual(github.repository_links(result, "garywu000/pipkin"), [
+            "https://github.com/garywu000/pipkin/commit/240053449b818ce1d53d01fdfb09be5c2c00a332",
+            "https://github.com/garywu000/pipkin/tree/main",
+        ])
+        self.assertEqual(github.repository_links(None, "garywu000/pipkin"), [])

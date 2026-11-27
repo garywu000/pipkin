@@ -403,7 +403,7 @@ function firstTurnTitle(message) {
   const attachment = message?.files?.[0]?.name;
   const command = Skills.parse(content);
   const input = command ? command.input.trim().replace(/^(?:--[\w-]+(?:\s+|$))+/i, "") : content.trim();
-  const request = input
+  const request = input.replace(/^@(?:github|drive|google[- ]?drive)\b[\s:,]*/i, "")
     .replace(/^(?:(?:hi|hey|hello)[,.!:]?\s+|please\s+|(?:can|could|would) you\s+|help me\s+)+/i, "")
     .split(/\n|[.!?](?=\s|$)/, 1)[0]
     .replace(/^[-•*#]+\s+/, "")
@@ -905,7 +905,7 @@ function refineChatTitle(id, userMessage, reply) {
   const chat = chatTitles.get(id);
   if (!chat || !["generated", "pending"].includes(chat.titleSource) || unsavedChats.has(id) || titleJob) return;
   const command = Skills.parse(userMessage.content || "");
-  const request = ((command ? command.input : userMessage.content) || "").trim() ||
+  const request = ((command ? command.input : userMessage.content) || "").replace(/^\s*@(?:github|drive|google[- ]?drive)\b[\s:,]*/i, "").trim() ||
     (userMessage.files || []).map((file) => file.name).join(", ");
   if (!request) return;
   const controller = new AbortController();
@@ -2898,7 +2898,7 @@ function addMessage(message, { animate = true } = {}) {
     renderedReplies.set(body, content);
     if (message.humanized) body.textContent = content;
     else renderMarkdown(body, content);
-    if (message.sourceChecked) showInlineSources(body, sources, evidencePanel);
+    if (message.sourceChecked) showInlineSources(body, sources, evidencePanel, verifiedLinks(message));
     if (!message.humanized) showLocalLinks(body, message.agentRun);
   };
   let draftText;
@@ -3350,7 +3350,7 @@ function* documentPassages(text) {
 }
 
 function modelMessage({ role, content, files: attached = [], skill, sourceChecked, github }, evidence = null) {
-  if (github) return { role, content: "[Isolated GitHub turn omitted from other model contexts.]" };
+  if (github) return { role, content: "[Isolated connector turn omitted from other model contexts.]" };
   const command = skill && Skills.parse(content);
   const request = command?.name === skill?.name && typeof skill?.instructions === "string"
     ? Skills.prompt({ ...skill, instructions: skill.instructions.slice(0, 4000) }, command.input)
@@ -3504,7 +3504,7 @@ function requestChat(messages, think, signal, compact = false, scheduleText = nu
       messages, think, compact, system: compact ? "" : systemPrompt(), temperature: settings.temperature,
       web: compact || aboutPipkin ? "off" : settings.webMode,
       ...(!compact && scheduleText ? { scheduleText: scheduleText.slice(0, 4000), requestText: scheduleText.slice(0, 40000) } : {}),
-      ...(githubRoute ? { githubRoute: githubRoute.github, githubGeneration: githubRoute.generation } : {}),
+      ...(githubRoute ? { githubRoute: githubRoute.github, githubGeneration: githubRoute.generation, driveRoute: githubRoute.drive, driveGeneration: githubRoute.driveGeneration } : {}),
     }),
     signal,
   });
@@ -4254,12 +4254,12 @@ async function sendMessage(event, { alternate = false } = {}) {
 // The server decides from the raw user request, using the same router for Chat and Agent.
 async function routeGithub(text) {
   if (!text.trim()) return null;
-  const response = await fetch("/api/connectors/github/route", {
+  const response = await fetch("/api/connectors/drive/route", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: text.slice(0, 40000) }),
   });
   const data = await response.json();
-  if (!response.ok || typeof data.github !== "boolean" || !Number.isSafeInteger(data.generation)) throw new Error(data.error || "Could not check GitHub routing.");
+  if (!response.ok || typeof data.github !== "boolean" || !Number.isSafeInteger(data.generation) || typeof data.drive !== "boolean" || !Number.isSafeInteger(data.driveGeneration)) throw new Error(data.error || "Could not check GitHub routing.");
   return data;
 }
 
@@ -4288,7 +4288,6 @@ async function startTurn(text, { queued = false } = {}) {
     announce("Unknown skill /" + command.name + ". Open Skills to see the available commands.", true);
     return false;
   }
-  if (!canRunSkill(skill, text)) return false;
   let githubRoute = null;
   if (!command && !humanize) {
     const originalChat = chatId;
@@ -4299,12 +4298,13 @@ async function startTurn(text, { queued = false } = {}) {
     catch (error) { announce(error.message, true); return false; }
     finally { routingGithub = false; updateControls(); }
     if (chatId !== originalChat || activeReply || (!queued && promptBox.value !== originalDraft)) return false;
-    if (githubRoute?.github && draftFiles.length) {
-      announce("GitHub requests cannot use local attachments yet. Remove the attachments or work locally first.", true);
+    if ((githubRoute?.github || githubRoute?.drive) && draftFiles.length) {
+      announce("Connected account requests cannot use local attachments yet. Remove the attachments or work locally first.", true);
       return false;
     }
   }
-  const continuing = !githubRoute?.github && !command && !humanize && !draftFiles.length && text.length <= 2000 ? stoppedRunToContinue() : null;
+  if (!githubRoute?.github && !githubRoute?.drive && !canRunSkill(skill, text)) return false;
+  const continuing = !githubRoute?.github && !githubRoute?.drive && !command && !humanize && !draftFiles.length && text.length <= 2000 ? stoppedRunToContinue() : null;
   const proceed = async () => {
     const attachments = draftFiles;
     if (!queued) {
@@ -4378,15 +4378,15 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
       ...(skill.permissions ? { permissions: skill.permissions } : {}),
     };
   }
-  const workflow = useAgent ? turnWorkflow(skill, text) : null;
-  const starter = skill && !workflow && Skills.starters.some(({ name }) => name === skill.name);
   const tools = Skills.requestedMentions(text);
   let githubTurn = false;
   if (!humanize && !skill && !resume) {
-    try { githubRoute = githubRoute ?? await routeGithub(text); githubTurn = Boolean(githubRoute?.github); }
+    try { githubRoute = githubRoute ?? await routeGithub(text); githubTurn = Boolean(githubRoute?.github || githubRoute?.drive); }
     catch (error) { announce(error.message, true); return; }
   }
   if (githubTurn) userMessage.github = true;
+  const workflow = useAgent && !githubTurn ? turnWorkflow(skill, text) : null;
+  const starter = skill && !workflow && Skills.starters.some(({ name }) => name === skill.name);
   const mode = modeOverride || (starter || (tools.length && !workflow && !githubTurn) ? "read" : settings.permission);
   const skillDisablesWeb = skill?.permissions?.web === false;
   const web = !githubTurn && !workflow && !skillDisablesWeb && settings.webMode !== "off" && !tools.length && !starter;
@@ -4445,10 +4445,11 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
   let rewriteNote = "";
   let thought = "";
   const webSteps = [];
+  const githubLinks = [];
   let scheduleProposal = null;
   let done = false;
   let savedTurn = false;
-  const interrupted = githubTurn ? "GitHub request interrupted. Inspect GitHub before retrying any remote write." : useAgent ? "Work was interrupted. You can resume from the checkpoint."
+  const interrupted = githubTurn ? "Connector request interrupted. Inspect the remote service before retrying any remote write." : useAgent ? "Work was interrupted. You can resume from the checkpoint."
     : "Reply interrupted. Use Regenerate reply to try again.";
   let stats = null;
   let thinkingStartedAt = null;
@@ -4556,7 +4557,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
         body: JSON.stringify({
           ...(!githubTurn ? (resume ? { resume } : { checkpoint: agentRun.checkpointId }) : {}),
           ...(resume && steering ? { steering } : {}),
-          workspace: agentWorkspace?.key || null, task, requestText: userMessage.content.slice(0, 40000), ...(githubRoute ? { githubRoute: githubRoute.github, githubGeneration: githubRoute.generation } : {}), context: notes, history: githubTurn ? [] : agentHistory(),
+          workspace: agentWorkspace?.key || null, task, requestText: userMessage.content.slice(0, 40000), ...(githubRoute ? { githubRoute: githubRoute.github, githubGeneration: githubRoute.generation, driveRoute: githubRoute.drive, driveGeneration: githubRoute.driveGeneration } : {}), context: notes, history: githubTurn ? [] : agentHistory(),
           mode, web, think: settings.think && !thinkToggle.hidden,
           ...(workflow ? { workflow, artifact: {
             brief: skill ? Skills.parse(text)?.input || "" : text,
@@ -4773,6 +4774,12 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
         view.renderScheduleProposal?.(scheduleProposal);
         return;
       }
+      if (Array.isArray(part.githubLinks)) {
+        // Repository links GitHub returned: shown as real links, not "unverified".
+        for (const link of part.githubLinks) if (typeof link === "string" && !githubLinks.includes(link)) githubLinks.push(link);
+        view.message.githubLinks = githubLinks;
+        return;
+      }
       if (part.web) {
         const step = part.web;
         if (step.phase === "start") {
@@ -4885,16 +4892,19 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
       const web = webSteps.filter((step) => step.phase === "done").map(({ phase, sources, ...step }) => step);
       activeReplyHistory.push(userMessage, { role: "assistant", content: answer, thinking: thought, thinkingDurationMs, agentRun,
         stats, ...replyDetails, ...(rewriteNote && { rewriteNote }), web: web.length ? web : undefined, ...sourceState(sourceNote),
-        ...(scheduleProposal && { scheduleProposal }) });
+        ...(scheduleProposal && { scheduleProposal }), ...(githubLinks.length && { githubLinks }) });
       const saved = await saveHistory([...activeReplyHistory], runContext, runChatId);
       // Discard the completed checkpoint before starting background chat titling, since /api/title acquires GENERATION.
       if (saved && !unsavedChats.has(runChatId) && agentRun?.state === "complete" && agentRun.checkpointId) {
         await discardWorkCheckpoints([agentRun.checkpointId]).catch(() => {});
       }
       // Name the chat from its first request; if an earlier attempt failed, a later reply tries again.
-      if (saved && !humanize && !githubTurn && !activeReplyHistory[0]?.github) {
+      /* Connected-account chats (GitHub, Drive) are named from the user's own request only, so text read from the
+         remote service never reaches the title model outside the isolated turn. */
+      if (saved && !humanize) {
         const firstRequest = activeReplyHistory.find((message) => message.role === "user") || userMessage;
-        refineChatTitle(runChatId, firstRequest, answer);
+        const githubChat = githubTurn || Boolean(activeReplyHistory[0]?.github);
+        refineChatTitle(runChatId, firstRequest, githubChat ? "" : answer);
       }
       if (chatId !== runChatId) {
         toast(`Finished reply in “${chatTitles.get(runChatId)?.title || "chat"}”`);
@@ -4905,7 +4915,7 @@ async function submitTurn(text, attachments, useAgent, { resume = null, steering
     } else if (savedTurn) {
       if (agentRun) {
         Agent.finish(agentRun, "stopped", agentRun.runId
-          ? (githubTurn ? "GitHub work stopped. Inspect GitHub before retrying any remote write." : "Work stopped. You can resume from the checkpoint.") : "Work stopped before it started.");
+          ? (githubTurn ? "Connector work stopped. Inspect the remote service before retrying any remote write." : "Work stopped. You can resume from the checkpoint.") : "Work stopped before it started.");
         view.updateResume?.();
         view.activity?.render();
       }
@@ -5037,7 +5047,7 @@ function selectSettingsTab(tab) {
   }
   stopTokenUsageUpdates();
   if (tab.id === "tab-usage") refreshTokenUsage();
-  if (tab.id === "tab-connectors") void githubConnection("status");
+  if (tab.id === "tab-connectors") { void githubConnection("status"); void driveConnection("status"); }
 }
 
 async function githubConnection(action) {
@@ -5242,8 +5252,30 @@ function withSourceNotes(content, entries) {
   return notes.length ? [content, "### Sources", notes.join("\n")].join("\n\n") : content;
 }
 
-function showInlineSources(body, sources, panel) {
-  const destinations = new Set([...sources.values()].map((source) => sourceHref(source.url)).filter(Boolean));
+/* Links GitHub itself returned in this reply's GitHub tool results: real repository links, not model guesses. */
+const GITHUB_LINK = /https:\/\/github\.com\/[^\s"'<>()[\]{}]+/g;
+function verifiedLinks(message) {
+  const links = [...(message?.githubLinks || [])];
+  for (const entry of message?.agentRun?.entries || []) {
+    if (entry.type !== "tool" || typeof entry.output !== "string") continue;
+    if (String(entry.name || "").startsWith("drive_") && entry.output.startsWith("Untrusted Google Drive data:\n")) {
+      try {
+        const data = JSON.parse(entry.output.slice("Untrusted Google Drive data:\n".length));
+        for (const item of data.files || [data]) {
+          if (/^[A-Za-z0-9_-]{1,160}$/.test(item.id) && item.url === "https://drive.google.com/open?id=" + item.id) links.push(item.url);
+        }
+      } catch { /* malformed or truncated tool output */ }
+      continue;
+    }
+    if (!String(entry.name || "").startsWith("github_")) continue;
+    for (const match of entry.output.matchAll(GITHUB_LINK)) links.push(match[0].replace(/[.,;:]+$/, ""));
+  }
+  return links;
+}
+
+function showInlineSources(body, sources, panel, extraLinks = []) {
+  const destinations = new Set([...sources.values()].map((source) => sourceHref(source.url))
+    .concat(extraLinks.map(sourceHref)).filter(Boolean));
   for (const link of body.querySelectorAll("a[href]")) {
     if (destinations.has(sourceHref(link.getAttribute("href")))) continue;
     const url = link.getAttribute("href");
@@ -7106,3 +7138,51 @@ window.PipkinSchedule?.init({
   ],
   notifyShell,
 });
+
+let drivePoll = null;
+let driveBusy = false;
+async function driveConnection(action) {
+  if (driveBusy) return;
+  driveBusy = true;
+  clearTimeout(drivePoll);
+  const status = byId("drive-status");
+  const signin = byId("drive-start");
+  const select = byId("drive-select");
+  const disconnect = byId("drive-disconnect");
+  signin.disabled = select.disabled = disconnect.disabled = true;
+  let data = null;
+  try {
+    let payload = {};
+    if (action === "start") {
+      const file = byId("drive-client").files[0];
+      if (!file || file.size > 12000) throw new Error("Choose your Desktop OAuth client JSON file.");
+      payload = { client: JSON.parse(await file.text()), writes: byId("drive-writes").checked };
+      byId("drive-client").value = "";
+    } else if (action === "select") {
+      payload = { folder: byId("drive-folder").value.trim() };
+    }
+    const response = await fetch("/api/connectors/drive/" + action, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Google Drive connection failed.");
+    const grant = data.connection;
+    status.textContent = data.error || (grant ? `Connected as ${grant.account} · ${grant.folderName} · ${grant.writes ? "Reviewed writes" : "Read only"}` :
+      data.pending ? "Complete authorization in your browser…" : data.signedIn ? "Signed in. Enter a folder ID or link, then select it." : "Not connected.");
+    byId("drive-status-pill").textContent = grant ? "Connected" : data.pending ? "Signing in" : data.signedIn ? "Select folder" : "Not connected";
+    byId("drive-status-pill").dataset.status = grant ? "active" : "paused";
+    if (grant) byId("drive-folder").value = grant.folder;
+    if (data.signedIn) byId("drive-writes").checked = Boolean(data.writeScope);
+    if (data.pending) drivePoll = setTimeout(() => driveConnection("status"), 1500);
+  } catch (error) {
+    status.textContent = error.message || "Google Drive connection failed.";
+  } finally {
+    driveBusy = false;
+    signin.disabled = Boolean(data?.pending);
+    select.disabled = !data?.signedIn;
+    disconnect.disabled = false;
+  }
+}
+byId("drive-start").addEventListener("click", () => driveConnection("start"));
+byId("drive-select").addEventListener("click", () => driveConnection("select"));
+byId("drive-disconnect").addEventListener("click", () => driveConnection("disconnect"));

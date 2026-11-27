@@ -143,6 +143,25 @@ def file_path(value):
     return value
 
 
+_GITHUB_LINK = re.compile(r"https://github\.com/[^\s\"'<>()\[\]{}]+")
+
+
+def repository_links(text, repo, limit=40):
+    """The github.com links in a tool result that point into the connected repository (shown as verified links)."""
+    if not isinstance(text, str) or not isinstance(repo, str):
+        return []
+    prefix = "https://github.com/" + repo.lower()
+    found = []
+    for match in _GITHUB_LINK.finditer(text):
+        url = match.group(0).rstrip(".,;:")
+        lowered = url.lower()
+        if (lowered == prefix or lowered.startswith(prefix + "/")) and url not in found:
+            found.append(url)
+        if len(found) >= limit:
+            break
+    return found
+
+
 def quote(value):
     return urllib.parse.quote(value, safe="")
 
@@ -601,7 +620,20 @@ class Turn:
             # Intent is durable before PUT. An interrupted response must never trigger an automatic retry.
             check()
             self.uncertain_write = True
-            result = self.api.request(self.root + "/contents/" + urllib.parse.quote(path, safe="/"), method="PUT", body=payload)
+            try:
+                result = self.api.request(self.root + "/contents/" + urllib.parse.quote(path, safe="/"), method="PUT", body=payload)
+            except GitHubHTTPError as error:
+                # GitHub refused it outright, so nothing was committed and the file can be reviewed again. Timeouts,
+                # rate limits and server errors keep the intent pending (same list as github_workflows).
+                if error.status in (400, 401, 403, 404, 405, 409, 422):
+                    try:
+                        with contextlib.closing(sqlite3.connect(self.journal)) as db, db:
+                            db.execute("DELETE FROM pending_targets WHERE target=? AND digest=?", (target, digest))
+                            db.execute("DELETE FROM commits WHERE digest=? AND state='unknown'", (digest,))
+                        self.uncertain_write = False
+                    except sqlite3.Error:
+                        pass
+                raise
             commit = result.get("commit", {}) if isinstance(result, dict) else {}
             commit_sha = commit.get("sha") if isinstance(commit, dict) else None
             if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_sha):

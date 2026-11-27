@@ -17,7 +17,7 @@ if [ -n "${PIPKIN_PROMOTE_COMMIT:-}" ]; then
 fi
 cd "$source"
 echo "Checking the dev copy…"
-/usr/bin/python3 -c "import ast,sys;[ast.parse(open(f).read(),f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py
+/usr/bin/python3 -c "import ast,sys;[ast.parse(open(f).read(),f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py
 if command -v node >/dev/null 2>&1; then
   for f in dist/*.js; do node --check "$f"; done
 fi
@@ -33,7 +33,7 @@ stamp="$(date +%Y%m%d-%H%M%S)"
 parent="$(dirname "$bundle")"
 mkdir -p "$outputs/backups"
 (cd "$parent" && zip -qr "$outputs/backups/Pipkin-before-$stamp.zip" "$(basename "$bundle")")
-rsync -a server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py read-pdf read-pdf.m "$app/"
+rsync -a server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py read-pdf read-pdf.m "$app/"
 rsync -a --delete dist/ "$app/dist/"
 rsync -a shell/ "$app/shell/"
 cp shell/Info.plist "$bundle/Contents/Info.plist"

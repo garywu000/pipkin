@@ -1981,6 +1981,10 @@ def system_prompt(workspace, mode, web, memory, memories, instructions, context,
 def describe(name, args):
     args = args if isinstance(args, dict) else {}
     path = str(args.get("path", "."))[:120]
+    if name.startswith("drive_"):
+        label = name.replace("drive_", "Google Drive: ").replace("_", " ")
+        detail = args.get("name") or args.get("query") or args.get("id") or args.get("folder")
+        return label + (f" · {str(detail)[:100]}" if detail else "")
     if name.startswith("github_"):
         label = name.replace("github_", "GitHub: ").replace("_", " ")
         detail_hint = (
@@ -2340,7 +2344,7 @@ class Agent:
             self.tools = github.tools
             self.schedule = None
         self.explore_tools = [t for t in self.tools if t["function"]["name"] not in
-                              WRITE_TOOL_NAMES | {"run_command", "terminal_run", "schedule_task", "github_commit_file"} and (not github or t["function"]["name"] in github_connector.READ_NAMES)]
+                              WRITE_TOOL_NAMES | {"run_command", "terminal_run", "schedule_task", "github_commit_file"} and (not github or t["function"]["name"] in getattr(github, "read_names", github_connector.READ_NAMES))]
         self.tool_names = {tool["function"]["name"] for tool in self.tools}
         self.seen = set()
         self.counter = 0

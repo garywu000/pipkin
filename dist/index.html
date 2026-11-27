@@ -582,6 +582,21 @@
                 </div>
               </div>
             </div>
+            <div class="connector-card" id="drive-connector-card">
+              <div class="connector-card-head"><div class="connector-card-title"><strong>Google Drive · Beta</strong><p>Connect your own Google Cloud Desktop OAuth client. Enable Drive and Docs APIs first.</p></div><span id="drive-status-pill" class="task-status-pill" data-status="paused">Not connected</span></div>
+              <div class="connector-card-body">
+                <label>Desktop OAuth client JSON <input id="drive-client" type="file" accept=".json,application/json"></label>
+                <label><input id="drive-writes" type="checkbox"> Enable reviewed writes (requests full Drive OAuth access; Pipkin restricts tools to the selected folder)</label>
+                <p>Read-only sign-in requests read access to Drive. Credentials stay in memory until disconnect or restart.</p>
+                <label>My Drive folder ID or URL <input id="drive-folder" type="text" autocomplete="off" spellcheck="false"></label>
+              </div>
+              <div class="connector-card-foot"><p id="drive-status" class="connector-status" role="status">Not connected.</p><div class="connector-actions">
+                <button id="drive-disconnect" class="button small" type="button">Disconnect</button>
+                <button id="drive-start" class="button small" type="button">Sign in with Google</button>
+                <button id="drive-select" class="button small accent" type="button" disabled>Select folder</button>
+              </div></div>
+            </div>
+            <p class="hint connector-footnote">Ask naturally about Google Drive or Google Docs, or use @drive. Chat reads; Agent can create folders and Docs and append or replace reviewed text.</p>
             <p class="hint connector-footnote">Ask naturally in Chat (read-only) or Agent mode (reviewed writes), or mention <code>@github</code>. Commits and pushes target unprotected non-default branches. Say “local workspace” for local-only edits. Reconnect after restarting Pipkin.</p>
           </section>
           <section id="panel-data" role="tabpanel" aria-labelledby="tab-data" hidden>

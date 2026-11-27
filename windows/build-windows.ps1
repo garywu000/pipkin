@@ -20,7 +20,7 @@ dotnet publish (Join-Path $scriptDir "PipkinWindows.csproj") `
     -o $outDir
 
 Write-Host "Bundling Python backend and web UI..."
-foreach ($file in @("server.py", "agent.py", "artifacts.py", "platform_os.py", "skills.py", "scheduler.py", "updater.py", "github_connector.py", "github_workflows.py")) {
+foreach ($file in @("server.py", "agent.py", "artifacts.py", "platform_os.py", "skills.py", "scheduler.py", "updater.py", "github_connector.py", "github_workflows.py", "drive_connector.py")) {
     Copy-Item (Join-Path $repoRoot $file) -Destination $outDir -Force
 }
 Copy-Item (Join-Path $repoRoot "dist") -Destination (Join-Path $outDir "dist") -Recurse -Force

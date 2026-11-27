@@ -196,6 +196,16 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | [v1.3.0](https://github.com/garywu000/pipkin/releases/tag/v1.3.0) | Added a guard against starting new model loads under critical memory pressure, the memory warning banner, and stricter native browser link handling. Included the v1.2.1 development changes for pausing runs, unloading idle models, and recommending context sizes. |
 | [v1.2.0](https://github.com/garywu000/pipkin/releases/tag/v1.2.0) | Redesigned the Mac interface with five palettes and first-launch customization. Added the Harness launcher, live model memory display, and Undo All. |
 
+## Google Drive connector (v2.5.0 development beta)
+
+This preview connects to a selected My Drive folder through Google OAuth. In Google Cloud, enable the Google Drive API and Google Docs API, configure the OAuth consent screen (add your account as a test user if the app is in testing), and create a **Desktop app** OAuth client. Download its JSON file. In Pipkin, open Settings › Connected accounts › Google Drive, choose the JSON file, sign in through your browser, and enter the ID or link of a folder in My Drive. Use a disposable test folder first.
+
+Read-only is the default. Reviewed writes require opting into the full Drive OAuth scope before signing in. Both scopes are account-wide Google permissions; Pipkin restricts its typed tools to the selected folder and its descendants. Tokens and client credentials are held in process memory, so reconnect after a restart. Disconnect clears the local session; Google account third-party access settings can revoke the grant at Google. Distribution with these restricted scopes may require Google OAuth verification. Picker-based file-specific authorization and secure persistent credentials are future work.
+
+Ask naturally, for example, “Find the biology notes in my Google Drive,” “Read this Google Doc,” or “Create a Google Doc named Meeting notes.” The `@drive` mention is optional. Chat can list, search and read supported files. Agent mode can additionally create folders and empty Docs, append text, and replace one exact unique text fragment within a single formatting run. Each write requires approval, including in Auto mode. Pipkin checks the selected account, destination and document revision, and records write intent and receipts locally. If a write has an uncertain outcome, inspect Google Drive before retrying; journal recovery is not yet exposed in the UI. Connector requests use local models and isolated tools. Content may remain in local chat history and exports.
+
+This beta excludes shared drives, shortcuts, scheduled connector work, cross-provider transfers, binary files and local uploads, sharing, moving, deletion, Sheets and Slides editing, and complex or multi-tab Docs. Replacement formatting is limited. Google sign-in and real remote writes require live testing before release.
+
 ## GitHub connector (v2.4.1 beta)
 
 Install GitHub CLI and sign in with `gh auth login --hostname github.com` in your terminal. In Settings › Connected accounts, enter an `owner/repository` and connect it. Enable reviewed writes only if needed. The connection is cleared when the server restarts; select it again to change repositories.
@@ -206,7 +216,7 @@ Ask naturally, for example “Create a branch for the README changes,” “Open
 
 - **Distribution.** Developer ID signing and notarization for Mac builds, plus Windows installer improvements.
 - **Benchmark comparisons.** Publish repeated trials with the same hardware, model, context, and task when comparing single-model and Explorer runs.
-- **Connected accounts.** GitHub connector in the v2.4.1 beta; Google Drive and broader local Git transfer are planned.
+- **Connected accounts.** GitHub connector in the v2.4.1 beta; Google Drive preview in the v2.5.0 development beta. Picker authorization, broader Google Workspace operations and local Git transfer remain planned.
 - **Extensibility.** More reusable workflows and scheduled work.
 
 Have an idea or a task Pipkin should finish? [Open an issue](https://github.com/garywu000/pipkin/issues).

@@ -40,6 +40,7 @@ import scheduler as scheduler_module
 import skills as skills_module
 import updater
 import github_connector
+import drive_connector
 from agent import (
     FILE_FLAGS, PERMISSION_MODES, SCHEDULE_NOTE, SCHEDULE_TOOL, SOURCE_GUIDANCE, WEB_TOOLS, Agent, AgentStopped,
     ApprovalCancelled, Sources,
@@ -50,8 +51,9 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.5.0"
 GITHUB = github_connector.Connection()
+DRIVE = drive_connector.Connection()
 RELEASE_REPO = "garywu000/pipkin"
 # The list includes pre-releases (betas); GitHub's /releases/latest never does.
 RELEASE_API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases?per_page=30"
@@ -724,7 +726,19 @@ def installed_models():
         connection.close()
 
 
-def require_local_github_model():
+def connector_routes(text, *, allow_inferred=True):
+    drive = DRIVE.route(text)
+    github = GITHUB.route(text)
+    use_drive = drive["drive"] if allow_inferred else drive_connector.requested(text, False)
+    use_github = github["github"] if allow_inferred else github_connector.requested(text, False)
+    if use_drive:
+        use_github = bool(github_connector.mentioned(text) or
+                          re.search(r"\b(?:github|remote (?:repository|repo|branch))\b", text or "", re.I))
+    return {"github": use_github, "generation": github["generation"],
+            "drive": use_drive, "driveGeneration": drive["generation"]}
+
+
+def require_local_github_model(service="GitHub"):
     """Do not pass authenticated repository data to an Ollama cloud model."""
     model = current()["model"]
     try:
@@ -733,7 +747,7 @@ def require_local_github_model():
                 or local.get("remote_model") or local.get("remote_host")):
             raise ValueError()
     except (OSError, http.client.HTTPException, KeyError, TypeError, ValueError):
-        raise ValueError("Choose a locally installed, non-cloud Ollama model for GitHub requests.") from None
+        raise ValueError(f"Choose a locally installed, non-cloud Ollama model for {service} requests.") from None
 
 
 def model_capabilities(model):
@@ -1921,6 +1935,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         ):
             self.send_json(400, {"error": "Invalid request length."})
             return
+        if self.path.startswith("/api/connectors/drive/"):
+            self.drive_connection(self.path.rsplit("/", 1)[-1])
+            return
         if self.path.startswith("/api/connectors/github/"):
             self.github_connection(self.path.rsplit("/", 1)[-1])
             return
@@ -2058,6 +2075,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             github_text = payload.get("requestText", schedule_text)
             github_route = payload.get("githubRoute")
             github_generation = payload.get("githubGeneration")
+            drive_route = payload.get("driveRoute")
+            drive_generation = payload.get("driveGeneration")
+            if (drive_route is not None and type(drive_route) is not bool) or (drive_generation is not None and (type(drive_generation) is not int or drive_generation < 0)) or (drive_route is not None and drive_generation is None):
+                raise ValueError()
             if (github_route is not None and type(github_route) is not bool) or (github_generation is not None and (type(github_generation) is not int or github_generation < 0)) or (github_route is not None and github_generation is None) or (github_text is not None and (not isinstance(github_text, str) or len(github_text) > 40_000)):
                 raise ValueError()
             if schedule_text is not None and (not isinstance(schedule_text, str) or len(schedule_text) > scheduler_module.PROMPT_LIMIT):
@@ -2081,7 +2102,19 @@ class ChatHandler(BaseHTTPRequestHandler):
             # Chat can propose a scheduled task too, but the tool is offered only when the message itself names a time
             # or repeat ("every Wednesday at 6pm"), so ordinary chats never see it.
             hint = None if compact or not schedule_text else scheduler_module.schedule_hint(schedule_text, datetime.datetime.now())
-            if not compact and (github_route if github_route is not None else github_connector.requested(github_text, bool(GITHUB.status()))):
+            routes = connector_routes(github_text)
+            use_drive = drive_route if drive_route is not None else routes["drive"]
+            use_github = github_route if github_route is not None else routes["github"]
+            if not compact and use_drive and use_github:
+                raise ValueError("Please make separate Google Drive and GitHub requests.")
+            if not compact and use_drive:
+                if not github_text or hint:
+                    raise ValueError("Google Drive requires a fresh interactive request.")
+                require_local_github_model("Google Drive")
+                connector = DRIVE.turn(generation=drive_generation)
+                connector.validate_destination(github_text)
+                self.relay_chat_with_web([{"role": "user", "content": github_text}], think, "", temperature, "off", github=connector)
+            elif not compact and use_github:
                 if scheduler_module.schedule_hint(github_text, datetime.datetime.now()):
                     raise ValueError("Scheduled GitHub requests are not supported yet. Ask for an interactive GitHub action instead.")
                 require_local_github_model()
@@ -2100,6 +2133,33 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(503, {"error": str(error)})
         finally:
             GENERATION.release()
+
+    def drive_connection(self, action):
+        try:
+            payload = self.read_json(250_000 if action == "route" else 16000)
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid connector request.")
+            if action == "route":
+                request = payload.get("text")
+                if not isinstance(request, str) or len(request) > 40_000:
+                    raise ValueError("Invalid connector routing request.")
+                self.send_json(200, connector_routes(request))
+                return
+            if action == "start":
+                result = DRIVE.start(payload.get("client"), payload.get("writes", False))
+            elif action == "select":
+                result = DRIVE.select(payload.get("folder"))
+            elif action == "disconnect":
+                DRIVE.disconnect()
+                result = DRIVE.state()
+            elif action == "status":
+                result = DRIVE.state()
+            else:
+                self.send_json(404, {"error": "Unknown connector operation."})
+                return
+            self.send_json(200, result)
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            self.send_json(400, {"error": str(error) if isinstance(error, ValueError) else "Google Drive connection failed."})
 
     def github_connection(self, action):
         try:
@@ -3252,6 +3312,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             explicit_request = request_text
             github_route = payload.get("githubRoute")
             github_generation = payload.get("githubGeneration")
+            drive_route = payload.get("driveRoute")
+            drive_generation = payload.get("driveGeneration")
+            if (drive_route is not None and type(drive_route) is not bool) or (drive_generation is not None and (type(drive_generation) is not int or drive_generation < 0)) or (drive_route is not None and drive_generation is None):
+                raise ValueError()
             if (github_route is not None and type(github_route) is not bool) or (github_generation is not None and (type(github_generation) is not int or github_generation < 0)) or (github_route is not None and github_generation is None):
                 raise ValueError()
             request_text = scheduler_module.user_request(task, request_text)
@@ -3283,16 +3347,27 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": "The agent request was invalid. Try a shorter task."})
             return
         github = None
-        if (github_route if github_route is not None else github_connector.requested(request_text, not scheduled_run and bool(GITHUB.status()))):
+        routes = connector_routes(request_text, allow_inferred=not scheduled_run)
+        use_drive = drive_route if drive_route is not None else routes["drive"]
+        use_github = github_route if github_route is not None else routes["github"]
+        if use_drive and use_github:
+            self.send_json(400, {"error": "Please make separate Google Drive and GitHub requests."})
+            return
+        if use_drive or use_github:
             if (explicit_request is None or scheduled_run or resume_id or workflow or skill_name
                     or scheduler_module.schedule_hint(request_text, datetime.datetime.now())):
-                self.send_json(400, {"error": "GitHub requires a fresh interactive request. Scheduled runs and skills are not supported yet."})
+                self.send_json(400, {"error": "Connected accounts require a fresh interactive request. Scheduled runs and skills are not supported yet."})
                 return
             try:
-                journal = SETTINGS_FILE.parent / "github-commits.sqlite3"
-                github = GITHUB.turn(writes=mode in ("ask", "auto"), journal=journal, generation=github_generation)
-                github_connector.validate_destination(request_text, github.grant)
-                if key is not None and github.grant["writes"] and github_connector.local_upload_requested(request_text):
+                if use_drive:
+                    require_local_github_model("Google Drive")
+                    github = DRIVE.turn(writes=mode in ("ask", "auto"), journal=SETTINGS_FILE.parent / "drive-writes.sqlite3", generation=drive_generation)
+                    github.validate_destination(request_text)
+                else:
+                    journal = SETTINGS_FILE.parent / "github-commits.sqlite3"
+                    github = GITHUB.turn(writes=mode in ("ask", "auto"), journal=journal, generation=github_generation)
+                    github_connector.validate_destination(request_text, github.grant)
+                if use_github and key is not None and github.grant["writes"] and github_connector.local_upload_requested(request_text):
                     # Only the dedicated upload tool may read explicitly named workspace files.
                     source_key = key
                     if authorized_workspace(source_key) is None:
@@ -3322,7 +3397,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         if github:
             try:
-                require_local_github_model()
+                require_local_github_model("Google Drive" if use_drive else "GitHub")
             except ValueError as error:
                 GENERATION.release()
                 self.send_json(400, {"error": str(error)})
@@ -3596,7 +3671,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                    notes_text, notes_name, panels=panels, workflow=workflow, allow_shell=allow_shell,
                                    skill_checks=skill_checks, scheduling="schedule_task" in agent.tool_names)
             if github:
-                system = github_connector.GUIDANCE + "\nSelected repository: " + github.grant["repo"]
+                system = github.guidance if isinstance(github, drive_connector.Turn) else github_connector.GUIDANCE + "\nSelected repository: " + github.grant["repo"]
             schedule_context = [request_text, *(note["text"] for note in run["steering"])]
             has_schedule_intent = agent.schedule and any(
                 scheduler_module.schedule_hint(text, datetime.datetime.now()) or scheduler_module.cancels_schedule(text)
@@ -3947,8 +4022,8 @@ class ChatHandler(BaseHTTPRequestHandler):
         guidance = (WEB_GUIDANCE[web] + " " + SOURCE_GUIDANCE) if web != "off" else ""
         if github:
             tools = github.tools
-            guidance = (github_connector.GUIDANCE + " Selected repository: " + github.grant["repo"]
-                        + ". Chat is read-only. Use Agent mode for approved GitHub writes.")
+            guidance = ((github.guidance if isinstance(github, drive_connector.Turn) else github_connector.GUIDANCE + " Selected repository: " + github.grant["repo"])
+                        + ". Chat is read-only. Use Agent mode for approved remote writes.")
         schedule_text, hint = schedule or (None, None)
         if schedule:
             tools.append(SCHEDULE_TOOL)
@@ -4032,7 +4107,11 @@ class ChatHandler(BaseHTTPRequestHandler):
                         try:
                             result = github.execute(name, args)
                         except (ValueError, OSError) as error:
-                            result = "Tool error: " + (str(error) if isinstance(error, ValueError) else "GitHub read failed.")
+                            result = "Tool error: " + (str(error) if isinstance(error, ValueError) else "Connected account read failed.")
+                        # Links GitHub itself returned for the connected repository count as verified on the page.
+                        links = drive_connector.result_links(result) if isinstance(github, drive_connector.Turn) else github_connector.repository_links(result, github.grant["repo"])
+                        if links:
+                            send({"githubLinks": links})
                         outgoing.append({"role": "tool", "tool_name": str(name), "content": clip(result, 14000)})
                         continue
                     if name == "schedule_task":
