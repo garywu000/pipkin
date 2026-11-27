@@ -167,6 +167,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.7.0 beta](https://github.com/garywu000/pipkin/releases/tag/v2.7.0) | Conversation mode: talk with Pipkin hands-free in a voice stage with a live orb and captions, answered in natural, human-sounding voices made on your computer (Kokoro, optional 132 MB download). Dictation gets a Simple mode that types straight into the message box. Google Drive sign-in uses Google's own file picker (in testing). |
 | [v2.6.0 beta](https://github.com/garywu000/pipkin/releases/tag/v2.6.0) | Local dictation: hold or click the mic beside Send, or press ⌘⇧D, and Pipkin transcribes your speech on your computer into an editable preview, with an optional tidy-up by your local model. Google Drive connector: Docs, Sheets and Slides, a My Drive browser, file-level access, reviewed writes and uploads, and a saved sign-in. Refused GitHub or Drive writes no longer lock that file. |
 | [v2.4.1 beta](https://github.com/garywu000/pipkin/releases/tag/v2.4.1) | GitHub connector: read your selected repository in Chat; in Agent mode, propose branches, commits, pull requests, issues, comments, releases and pushes, each approved by you. |
 | [v2.3.3](https://github.com/garywu000/pipkin/releases/tag/v2.3.3) | Scheduled task pages with run history and live progress, and any run opens as an Agent chat. Optional beta updates, labeled as beta in the app, and required updates only a whole major version behind. |
@@ -197,11 +198,15 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | [v1.3.0](https://github.com/garywu000/pipkin/releases/tag/v1.3.0) | Added a guard against starting new model loads under critical memory pressure, the memory warning banner, and stricter native browser link handling. Included the v1.2.1 development changes for pausing runs, unloading idle models, and recommending context sizes. |
 | [v1.2.0](https://github.com/garywu000/pipkin/releases/tag/v1.2.0) | Redesigned the Mac interface with five palettes and first-launch customization. Added the Harness launcher, live model memory display, and Undo All. |
 
-## Dictation (v2.6.0 beta)
+## Dictation and conversation (v2.7.0 beta)
 
-Talk instead of typing. Hold the mic button beside Send and release to finish, or click it (or press ⌘⇧D on Mac, Ctrl+Shift+D on Windows) to start and again to stop. Esc cancels. Pipkin turns your speech into text on your computer with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and shows it in an editable preview. Choose **As spoken** or **Tidied** (your local chat model fixes punctuation and filler words, and Pipkin keeps your exact words if tidying would change a name, number or "not"), then **Insert**. Dictation never sends a message by itself.
+**Dictation.** Hold the mic button beside Send and release to finish, or click it (or press ⌘⇧D on Mac, Ctrl+Shift+D on Windows) to start and again to stop. Esc cancels. Pipkin turns your speech into text on your computer with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and puts it straight into the message box. Turn on **Advanced mode** in Settings › Voice to review each transcript first, with an optional tidy-up by your local model that keeps names, numbers and "not" exactly. Dictation never sends a message by itself.
 
 The first time, pick a speech model in **Settings › Voice**: Fast (about 148 MB, many languages), Fast English (about 148 MB) or Accurate (about 574 MB). Models download only when you click, are checked against a pinned checksum, and can be removed there. Audio is never uploaded and is deleted right after it's transcribed. Your system asks once for microphone access. The Windows engine needs a CPU with AVX2 (most PCs from 2013 on).
+
+**Conversation mode (beta).** Turn it on in Settings › Voice, then click the waveform button beside the mic to talk with Pipkin hands-free. It listens, notices when you stop, answers in Chat, and reads the reply aloud while a live orb and captions follow along. Tap the orb or press Space to interrupt; Esc ends. It runs only Chat turns: no Agent work, web search, connectors or spoken approvals.
+
+For a human-sounding voice, download the **Natural voice** (Kokoro, about 132 MB) in Settings › Voice and pick one of eight English voices. It runs on your computer through Pipkin's `pipkin-tts` helper; nothing you say or hear is sent anywhere. Without it, Pipkin uses your system's best on-device voice.
 
 ## Google Drive connector
 
