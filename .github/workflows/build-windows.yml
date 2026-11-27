@@ -25,7 +25,7 @@ jobs:
 
       - name: Verify Python syntax, JS syntax, unit tests, and benchmarks on macOS
         run: |
-          python3 -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py
+          python3 -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py speech.py
           for f in dist/*.js; do node --check "$f"; done
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
           PYTHONDONTWRITEBYTECODE=1 python3 benchmarks/run.py
@@ -49,7 +49,7 @@ jobs:
       - name: Verify Python syntax, JS syntax, unit tests, and benchmarks on Windows
         shell: pwsh
         run: |
-          python -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py
+          python -c "import ast, sys; [ast.parse(open(f, encoding='utf-8').read(), f) for f in sys.argv[1:]]" server.py agent.py artifacts.py platform_os.py skills.py scheduler.py updater.py github_connector.py github_workflows.py drive_connector.py speech.py
           Get-ChildItem dist\*.js | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
           $env:PYTHONDONTWRITEBYTECODE = "1"
           python -m unittest discover -s tests
@@ -61,6 +61,23 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Build the speech engine (whisper.cpp, pinned)
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:RUNNER_TEMP "whisper.cpp"
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v1.9.5 https://github.com/ggml-org/whisper.cpp.git $src
+          if ((git -C $src rev-parse HEAD) -ne "d1be6fde11ac6e0407606b4e42fe72d34add8037") { throw "whisper.cpp v1.9.5 does not match the pinned commit." }
+          # Static, CPU-only, no OpenMP and no tuning for the build machine: one whisper-cli.exe with no DLLs.
+          # AVX2 covers PCs from about 2013 on.
+          cmake -S $src -B "$src\build" -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON `
+            -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF `
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$src\build" --config Release --target whisper-cli -j 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$src\build\bin\Release\whisper-cli.exe" windows\whisper-cli.exe
+          Copy-Item "$src\LICENSE" windows\whisper.cpp-LICENSE.txt
 
       - name: Build self-contained Pipkin Windows package
         shell: pwsh

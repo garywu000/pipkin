@@ -41,6 +41,7 @@ import skills as skills_module
 import updater
 import github_connector
 import drive_connector
+import speech
 from agent import (
     FILE_FLAGS, PERMISSION_MODES, SCHEDULE_NOTE, SCHEDULE_TOOL, SOURCE_GUIDANCE, WEB_TOOLS, Agent, AgentStopped,
     ApprovalCancelled, Sources,
@@ -68,6 +69,7 @@ _SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$")
 DEFAULT_MODEL = "qwen3:8b"
 CONTEXT_SIZES = (4096, 8192, 16384, 32768, 65536)
 SETTINGS_FILE = platform_os.app_data_dir() / "settings.json"
+SPEECH = speech.Speech(SETTINGS_FILE.parent / "speech")
 UPDATER = updater.Updater(SETTINGS_FILE.parent, root=updater.install_root())
 USAGE_FILE = SETTINGS_FILE.with_name("usage.sqlite3")
 SETTINGS_LOCK = Lock()
@@ -452,6 +454,8 @@ STATIC_FILES = {
     "/vendor/xterm.js": ("vendor/xterm.js", "text/javascript; charset=utf-8"),
     "/vendor/xterm-addon-webgl.js": ("vendor/xterm-addon-webgl.js", "text/javascript; charset=utf-8"),
     "/vendor/xterm.css": ("vendor/xterm.css", "text/css; charset=utf-8"),
+    "/dictation.js": ("dictation.js", "text/javascript; charset=utf-8"),
+    "/dictation-worklet.js": ("dictation-worklet.js", "text/javascript; charset=utf-8"),
 }
 
 
@@ -1850,7 +1854,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
-        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; "
@@ -1934,6 +1938,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             not value.isascii() or not value.isdigit() or len(value) > 9 for value in lengths
         ):
             self.send_json(400, {"error": "Invalid request length."})
+            return
+        if self.path.startswith("/api/dictation/"):
+            self.dictation_request(self.path.removeprefix("/api/dictation/"))
             return
         if self.path.startswith("/api/connectors/drive/"):
             self.drive_connection(self.path.rsplit("/", 1)[-1])
@@ -2131,6 +2138,84 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json(409, {"error": "The local model is being unloaded."})
         except ValueError as error:
             self.send_json(503, {"error": str(error)})
+        finally:
+            GENERATION.release()
+
+    def dictation_request(self, action):
+        """Local dictation: model downloads the user asked for, transcription, and optional tidy-up."""
+        try:
+            # Base64 PCM for the longest recording, plus a little room for the JSON around it.
+            payload = self.read_json(speech.MAX_PCM_BYTES * 4 // 3 + 4096 if action == "transcribe" else 60_000)
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid dictation request.")
+            if action == "status":
+                self.send_json(200, SPEECH.status())
+            elif action == "download":
+                self.send_json(200, SPEECH.start_download(payload.get("model")))
+            elif action == "cancel":
+                self.send_json(200, SPEECH.cancel_download())
+            elif action == "remove":
+                self.send_json(200, SPEECH.remove(payload.get("model")))
+            elif action == "transcribe":
+                audio = payload.get("audio")
+                if not isinstance(audio, str) or not audio:
+                    raise ValueError("Invalid recording.")
+                pcm = base64.b64decode(audio, validate=True)
+
+                def check():
+                    if select([self.connection], [], [], 0)[0] and not self.connection.recv(1, MSG_PEEK):
+                        raise AgentStopped()
+
+                text = SPEECH.transcribe(pcm, payload.get("model"), payload.get("language", "auto"), check)
+                del pcm, audio
+                self.send_json(200, {"text": text})
+            elif action == "clean":
+                self.dictation_cleanup(payload.get("text"))
+            else:
+                self.send_json(404, {"error": "Unknown dictation request."})
+        except speech.BusyError as error:
+            self.send_json(409, {"error": str(error)})
+        except AgentStopped:
+            pass
+        except (ValueError, binascii.Error) as error:
+            self.send_json(400, {"error": str(error) if isinstance(error, ValueError) and str(error) else "Invalid dictation request."})
+        except OSError:
+            try:
+                self.send_json(503, {"error": "Dictation failed. Check free disk space and try again."})
+            except OSError:
+                pass
+
+    def dictation_cleanup(self, text):
+        """Tidy dictated text with the local chat model. If the result loses a detail, the original is kept."""
+        if not isinstance(text, str) or not text.strip() or len(text) > speech.MAX_TRANSCRIPT:
+            raise ValueError("Nothing to tidy up.")
+        if not GENERATION.acquire(blocking=False):
+            self.send_json(409, {"error": "Pipkin is busy with a reply. Tidy up after it finishes."})
+            return
+
+        def check():
+            SESSIONS.check_cancelled()
+            if select([self.connection], [], [], 0)[0] and not self.connection.recv(1, MSG_PEEK):
+                raise AgentStopped()
+
+        try:
+            messages = [{"role": "system", "content": speech.CLEAN_INSTRUCTIONS},
+                        {"role": "user", "content": "Dictated text:\n" + text.strip()}]
+            reply = self.agent_step(messages, [], False, check, lambda *_args, **_fields: None,
+                                    output_schema=speech.CLEAN_SCHEMA,
+                                    output_limit=min(4096, max(128, int(len(text) * 1.5) + 64)))
+            cleaned = " ".join(str(json.loads(reply["content"]).get("text", "")).split())
+            if speech.cleanup_keeps_meaning(text, cleaned):
+                self.send_json(200, {"text": cleaned, "kept": False})
+            else:
+                self.send_json(200, {"text": text, "kept": True})
+        except (AgentStopped, BrokenPipeError, ConnectionResetError):
+            pass
+        except (ValueError, KeyError, TypeError, AttributeError, OSError, http.client.HTTPException, ModelGlitch):
+            try:
+                self.send_json(503, {"error": "Couldn't tidy this up. The original text is unchanged."})
+            except OSError:
+                pass
         finally:
             GENERATION.release()
 

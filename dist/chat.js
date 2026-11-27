@@ -155,6 +155,7 @@ const DEFAULT_SHORTCUTS = {
   switchMode: "Mod+Shift+A",
   settings: "Mod+,",
   focusPrompt: "/",
+  dictate: "Mod+Shift+D",
 };
 const SHORTCUT_ITEMS = [
   ["newChat", "New chat"],
@@ -164,6 +165,7 @@ const SHORTCUT_ITEMS = [
   ["switchMode", "Switch Chat / Agent"],
   ["settings", "Settings"],
   ["focusPrompt", "Focus the message box"],
+  ["dictate", "Dictate"],
 ];
 const RESERVED_SHORTCUTS = new Set(["Mod+Q", "Mod+W", "Mod+C", "Mod+V", "Mod+X", "Mod+A", "Mod+Z", "Mod+R"]);
 
@@ -172,6 +174,7 @@ const defaultSettings = {
   memoryEnabled: true, protectMemory: true, allowShell: false, exploreModel: "", shortcuts: {},
   permission: "ask", webMode: "auto", maxSteps: 24, think: true, appMode: "chat", busySend: "steer",
   sidebarCollapsed: false, sidebarWidth: 268,
+  dictationModel: "base", dictationLanguage: "auto", dictationTidy: false,
 };
 const hadSavedSettings = (() => { try { return Boolean(localStorage.getItem(settingsKey)); } catch { return false; } })();
 let settings = { ...defaultSettings, ...readLocal(settingsKey, {}) };
@@ -1980,6 +1983,7 @@ function updateControls() {
   renderQueue();
   for (const button of messagesBox.querySelectorAll("[data-requires-idle]")) button.disabled = replying;
   renderSkillMenu();
+  window.PipkinDictation?.sync();
 }
 
 function showState(nextState, loaded = modelLoaded) {
@@ -5048,6 +5052,7 @@ function selectSettingsTab(tab) {
   stopTokenUsageUpdates();
   if (tab.id === "tab-usage") refreshTokenUsage();
   if (tab.id === "tab-connectors") { void githubConnection("status"); void driveConnection("status"); }
+  if (tab.id === "tab-voice") void window.PipkinDictation?.refresh();
 }
 
 async function githubConnection(action) {
@@ -6909,6 +6914,7 @@ function syncShortcutHints() {
   if (byId("toggle-harness")) byId("toggle-harness").title = `Harness panel (${fmt("harness")})`;
   if (byId("harness-close")) byId("harness-close").title = `Close panel (${fmt("harness")})`;
   if (byId("harness-close-sub")) byId("harness-close-sub").title = `Close panel (${fmt("harness")})`;
+  window.PipkinDictation?.sync();
 }
 
 function applyPlatformUI() {
@@ -7031,6 +7037,9 @@ document.addEventListener("keydown", (event) => {
   } else if (combo === map.settings) {
     event.preventDefault();
     openSettings();
+  } else if (combo === map.dictate && !dialogOpen) {
+    event.preventDefault();
+    window.PipkinDictation?.toggle();
   } else if (combo === map.focusPrompt && !inInput && !dialogOpen) {
     event.preventDefault();
     promptBox.focus();
@@ -7186,3 +7195,12 @@ async function driveConnection(action) {
 byId("drive-start").addEventListener("click", () => driveConnection("start"));
 byId("drive-select").addEventListener("click", () => driveConnection("select"));
 byId("drive-disconnect").addEventListener("click", () => driveConnection("disconnect"));
+
+/* Local dictation (dist/dictation.js): the mic beside Send, its preview, and Settings › Voice. */
+window.PipkinDictation?.init({
+  promptBox, openPopover, openSettings, announce, saveSettings,
+  getSettings: () => settings,
+  isMac: PipkinPlatform.isMac,
+  shortcutParts: () => formatShortcutParts(shortcutMap().dictate),
+  onInserted: () => { updateControls(); updateTokenMeter(); },
+});

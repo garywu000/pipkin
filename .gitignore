@@ -5,3 +5,5 @@ __pycache__/
 windows/bin/
 windows/obj/
 windows/dist/
+windows/whisper-cli.exe
+windows/whisper.cpp-LICENSE.txt

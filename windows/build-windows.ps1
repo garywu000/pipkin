@@ -20,10 +20,19 @@ dotnet publish (Join-Path $scriptDir "PipkinWindows.csproj") `
     -o $outDir
 
 Write-Host "Bundling Python backend and web UI..."
-foreach ($file in @("server.py", "agent.py", "artifacts.py", "platform_os.py", "skills.py", "scheduler.py", "updater.py", "github_connector.py", "github_workflows.py", "drive_connector.py")) {
+foreach ($file in @("server.py", "agent.py", "artifacts.py", "platform_os.py", "skills.py", "scheduler.py", "updater.py", "github_connector.py", "github_workflows.py", "drive_connector.py", "speech.py")) {
     Copy-Item (Join-Path $repoRoot $file) -Destination $outDir -Force
 }
 Copy-Item (Join-Path $repoRoot "dist") -Destination (Join-Path $outDir "dist") -Recurse -Force
+
+# The speech engine for dictation (built by CI from pinned whisper.cpp source).
+$engine = Join-Path $scriptDir "whisper-cli.exe"
+if (Test-Path $engine) {
+    Copy-Item $engine -Destination $outDir -Force
+    Copy-Item (Join-Path $scriptDir "whisper.cpp-LICENSE.txt") -Destination $outDir -Force
+} else {
+    Write-Warning "windows\whisper-cli.exe not found: this package will not include dictation."
+}
 
 Write-Host "Creating $zipPath..."
 Compress-Archive -Path $outDir -DestinationPath $zipPath -Force
