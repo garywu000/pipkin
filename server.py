@@ -52,7 +52,7 @@ from agent import (
 HOST = "127.0.0.1"
 PORT = 8765
 ORIGIN = f"http://{HOST}:{PORT}"
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 GITHUB = github_connector.Connection()
 DRIVE = drive_connector.Connection(store=drive_connector.os_credential_store())
 RELEASE_REPO = "garywu000/pipkin"

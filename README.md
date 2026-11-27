@@ -167,6 +167,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 | Version | What changed |
 | --- | --- |
+| [v2.6.0 beta](https://github.com/garywu000/pipkin/releases/tag/v2.6.0) | Local dictation: hold or click the mic beside Send, or press ⌘⇧D, and Pipkin transcribes your speech on your computer into an editable preview, with an optional tidy-up by your local model. Google Drive connector: Docs, Sheets and Slides, a My Drive browser, file-level access, reviewed writes and uploads, and a saved sign-in. Refused GitHub or Drive writes no longer lock that file. |
 | [v2.4.1 beta](https://github.com/garywu000/pipkin/releases/tag/v2.4.1) | GitHub connector: read your selected repository in Chat; in Agent mode, propose branches, commits, pull requests, issues, comments, releases and pushes, each approved by you. |
 | [v2.3.3](https://github.com/garywu000/pipkin/releases/tag/v2.3.3) | Scheduled task pages with run history and live progress, and any run opens as an Agent chat. Optional beta updates, labeled as beta in the app, and required updates only a whole major version behind. |
 | [v2.3.2 beta](https://github.com/garywu000/pipkin/releases/tag/v2.3.2) | Scheduled tasks get their own pages: task cards, a History of every run with live progress, and any run opens as an Agent chat. |
@@ -196,21 +197,17 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | [v1.3.0](https://github.com/garywu000/pipkin/releases/tag/v1.3.0) | Added a guard against starting new model loads under critical memory pressure, the memory warning banner, and stricter native browser link handling. Included the v1.2.1 development changes for pausing runs, unloading idle models, and recommending context sizes. |
 | [v1.2.0](https://github.com/garywu000/pipkin/releases/tag/v1.2.0) | Redesigned the Mac interface with five palettes and first-launch customization. Added the Harness launcher, live model memory display, and Undo All. |
 
-## Dictation (v2.6.0 development beta)
+## Dictation (v2.6.0 beta)
 
 Talk instead of typing. Hold the mic button beside Send and release to finish, or click it (or press ⌘⇧D on Mac, Ctrl+Shift+D on Windows) to start and again to stop. Esc cancels. Pipkin turns your speech into text on your computer with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and shows it in an editable preview. Choose **As spoken** or **Tidied** (your local chat model fixes punctuation and filler words, and Pipkin keeps your exact words if tidying would change a name, number or "not"), then **Insert**. Dictation never sends a message by itself.
 
 The first time, pick a speech model in **Settings › Voice**: Fast (about 148 MB, many languages), Fast English (about 148 MB) or Accurate (about 574 MB). Models download only when you click, are checked against a pinned checksum, and can be removed there. Audio is never uploaded and is deleted right after it's transcribed. Your system asks once for microphone access. The Windows engine needs a CPU with AVX2 (most PCs from 2013 on).
 
-## Google Drive connector (v2.5.0 development beta)
+## Google Drive connector (v2.6.0 beta)
 
-This preview connects to a selected My Drive folder through Google OAuth. In Google Cloud, enable the Google Drive API and Google Docs API, configure the OAuth consent screen (add your account as a test user if the app is in testing), and create a **Desktop app** OAuth client. Download its JSON file. In Pipkin, open Settings › Connected accounts › Google Drive, choose the JSON file, sign in through your browser, and enter the ID or link of a folder in My Drive. Use a disposable test folder first.
+Connect one My Drive folder (or specific files in it) through your own Google Cloud Desktop OAuth client. In Google Cloud, enable the Drive, Docs, Sheets and Slides APIs, configure the OAuth consent screen (add your account as a test user while the app is in testing), and create an OAuth client of type **Desktop app**. In **Settings › Connected accounts**, choose its JSON file, sign in with Google in your browser, then paste a folder link or use **Browse My Drive…** to pick a folder or files. Pipkin keeps the sign-in in the macOS Keychain or Windows DPAPI until you choose **Disconnect**.
 
-Read-only is the default. Reviewed writes require opting into the full Drive OAuth scope before signing in. Both scopes are account-wide Google permissions; Pipkin restricts its typed tools to the selected folder and its descendants. Tokens and client credentials are held in process memory, so reconnect after a restart. Disconnect clears the local session; Google account third-party access settings can revoke the grant at Google. Distribution with these restricted scopes may require Google OAuth verification. Picker-based file-specific authorization and secure persistent credentials are future work.
-
-Ask naturally, for example, “Find the biology notes in my Google Drive,” “Read this Google Doc,” or “Create a Google Doc named Meeting notes.” The `@drive` mention is optional. Chat can list, search and read supported files. Agent mode can additionally create folders and empty Docs, append text, and replace one exact unique text fragment within a single formatting run. Each write requires approval, including in Auto mode. Pipkin checks the selected account, destination and document revision, and records write intent and receipts locally. If a write has an uncertain outcome, inspect Google Drive before retrying; journal recovery is not yet exposed in the UI. Connector requests use local models and isolated tools. Content may remain in local chat history and exports.
-
-This beta excludes shared drives, shortcuts, scheduled connector work, cross-provider transfers, binary files and local uploads, sharing, moving, deletion, Sheets and Slides editing, and complex or multi-tab Docs. Replacement formatting is limited. Google sign-in and real remote writes require live testing before release.
+Read-only is the default. Turning on reviewed writes asks Google for full Drive access; Pipkin still limits its tools to what you selected and shows every write for approval. Chat reads Google Docs (with tables and tabs), Sheets, Slides, text and PDF details. Agent mode can create folders and Docs, append or replace text in Docs, update or append Sheet rows, edit or add Slides, and upload a workspace file you name. Ask naturally ("Find the biology notes in my Google Drive", "Add these rows to my budget sheet") or use `@drive`. Drive work runs only with a local model, never on a schedule, and sharing, moving and deleting files are not supported.
 
 ## GitHub connector (v2.4.1 beta)
 
@@ -222,8 +219,8 @@ Ask naturally, for example “Create a branch for the README changes,” “Open
 
 - **Distribution.** Developer ID signing and notarization for Mac builds, plus Windows installer improvements.
 - **Benchmark comparisons.** Publish repeated trials with the same hardware, model, context, and task when comparing single-model and Explorer runs.
-- **Dictation.** Local speech-to-text in the v2.6.0 development beta. Conversational voice is planned next.
-- **Connected accounts.** GitHub connector in the v2.4.1 beta; Google Drive preview in the v2.5.0 development beta. Picker authorization, broader Google Workspace operations and local Git transfer remain planned.
+- **Dictation.** Local speech-to-text in the v2.6.0 beta. Conversational voice is planned next.
+- **Connected accounts.** GitHub connector in the v2.4.1 beta; Google Drive (Docs, Sheets, Slides) in the v2.6.0 beta. Calendar and Gmail reads and local Git transfer remain planned.
 - **Extensibility.** More reusable workflows and scheduled work.
 
 Have an idea or a task Pipkin should finish? [Open an issue](https://github.com/garywu000/pipkin/issues).

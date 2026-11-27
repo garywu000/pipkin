@@ -15,7 +15,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.5.0</string>
+	<string>2.6.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -30,7 +30,7 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Pipkin uses the microphone only while you dictate. Speech is turned into text on this Mac and the audio is deleted right after.</string>
 	<key>CFBundleVersion</key>
-	<string>50</string>
+	<string>60</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
